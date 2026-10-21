@@ -1,0 +1,780 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:gerfaut/src/bridge.dart';
+import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
+    show PanicException;
+import 'package:gerfaut/src/format.dart';
+import 'package:gerfaut/src/models.dart';
+
+/// The preferences a vault that never stored any answers, as the core
+/// sends them.
+const _preferences = {
+  'unit': 'btc',
+  'masked': false,
+  'fiat': false,
+  'fiat_currency': 'eur',
+  'price_source': 'coingecko',
+  'notify_new_tx': false,
+  'explorer_ack': false,
+};
+
+const _descriptors = {
+  'type': 'descriptors',
+  'external': 'wpkh(tpub.../0/*)#checksum',
+  'internal': 'wpkh(tpub.../1/*)#checksum',
+  'script': 'segwit',
+};
+
+Map<String, dynamic> _metaJson({bool withScanGap = true}) => {
+  'id': 'w1',
+  'name': 'Cold storage',
+  'network': 'signet',
+  'kind': _descriptors,
+  'recognized_as': 'extended_key',
+  'created_at': 1755000000,
+  'gap_limit': 20,
+  if (withScanGap) 'scan_gap': 50,
+  'last_sync': null,
+  'cached': {
+    'balance': {
+      'confirmed': 0,
+      'trusted_pending': 0,
+      'untrusted_pending': 0,
+      'immature': 0,
+      'total': 0,
+    },
+    'tx_count': 0,
+  },
+};
+
+void main() {
+  group('ParsedInput.fromJson', () {
+    test('reads the script options and the preview address', () {
+      final json = {
+        'kind': 'extended_key',
+        'networks': ['signet', 'testnet4', 'regtest'],
+        'payload': _descriptors,
+        'warnings': ['assumed_segwit'],
+        'script_options': ['legacy', 'nested_segwit', 'segwit', 'taproot'],
+        'preview_address': 'tb1qexample',
+      };
+      final raw = jsonEncode(json);
+      final parsed = ParsedInput.fromJson(json, raw);
+
+      expect(parsed.kind, RecognizedKind.extendedKey);
+      expect(parsed.scriptOptions, [
+        ScriptKind.legacy,
+        ScriptKind.nestedSegwit,
+        ScriptKind.segwit,
+        ScriptKind.taproot,
+      ]);
+      expect(parsed.previewAddress, 'tb1qexample');
+      expect(parsed.warnings, [InputWarning.assumedSegwit]);
+      expect(parsed.rawJson, raw);
+    });
+
+    test('tolerates a core answer without the new fields', () {
+      final json = {
+        'kind': 'descriptor',
+        'networks': ['mainnet'],
+        'payload': _descriptors,
+        'warnings': <String>[],
+      };
+      final parsed = ParsedInput.fromJson(json, jsonEncode(json));
+
+      expect(parsed.scriptOptions, isEmpty);
+      expect(parsed.previewAddress, isNull);
+    });
+
+    test('recognizes a BSMS record', () {
+      final json = {
+        'kind': 'bsms',
+        'networks': ['mainnet'],
+        'payload': _descriptors,
+        'warnings': <String>[],
+      };
+      final parsed = ParsedInput.fromJson(json, jsonEncode(json));
+
+      expect(parsed.kind, RecognizedKind.bsms);
+      expect(RecognizedKind.fromId('bsms'), RecognizedKind.bsms);
+      expect(RecognizedKind.bsms.label, 'BSMS record');
+    });
+
+    test('reads an explicit null preview address', () {
+      final json = {
+        'kind': 'address',
+        'networks': ['mainnet'],
+        'payload': {'type': 'address', 'address': 'bc1qexample'},
+        'warnings': <String>[],
+        'script_options': <String>[],
+        'preview_address': null,
+      };
+      final parsed = ParsedInput.fromJson(json, jsonEncode(json));
+
+      expect(parsed.scriptOptions, isEmpty);
+      expect(parsed.previewAddress, isNull);
+    });
+  });
+
+  group('QrProgress.fromJson', () {
+    test('reads what the core assumed reading the code', () {
+      final progress = QrProgress.fromJson({
+        'format': 'ur',
+        'received': 1,
+        'total': 1,
+        'complete': true,
+        'text': 'wpkh([9a6a2580/84h/1h/0h]tpub.../<0;1>/*)',
+        'warnings': ['assumed_branches'],
+      });
+      expect(progress.warnings, [InputWarning.assumedBranches]);
+      expect(
+        progress.warnings.single.label,
+        'This QR code carries no receive or change path, so Gerfaut '
+        'assumes the usual 0/* and 1/*. Compare the first address with '
+        'your signer.',
+      );
+    });
+
+    test('reads no warning when the answer has none', () {
+      final progress = QrProgress.fromJson({
+        'format': 'plain',
+        'received': 1,
+        'total': 1,
+        'complete': true,
+        'text': 'wpkh(tpub.../0/*)',
+      });
+      expect(progress.warnings, isEmpty);
+    });
+  });
+
+  group('WalletMeta.fromJson', () {
+    test('reads the scan gap', () {
+      final meta = WalletMeta.fromJson(_metaJson());
+      expect(meta.scanGap, 50);
+      expect(meta.gapLimit, 20);
+    });
+
+    test('defaults the scan gap on older metadata', () {
+      final meta = WalletMeta.fromJson(_metaJson(withScanGap: false));
+      expect(meta.scanGap, 20);
+    });
+
+    test('reads the icon by its serde name', () {
+      final json = _metaJson()..['icon'] = 'piggy_bank';
+      expect(WalletMeta.fromJson(json).icon, WalletIcon.piggyBank);
+      expect(WalletIcon.fromId('map_pin'), WalletIcon.mapPin);
+      expect(WalletIcon.piggyBank.id, 'piggy_bank');
+    });
+
+    test('names each icon the way the desktop app does', () {
+      expect(WalletIcon.values.map((icon) => icon.label), [
+        'Wallet',
+        'Key',
+        'Shield',
+        'Pin',
+        'Snowflake',
+        'Landmark',
+        'Piggy bank',
+      ]);
+    });
+
+    test('falls back to the wallet glyph when the icon is missing or '
+        'unknown', () {
+      // A vault written before icons existed carries none.
+      expect(WalletMeta.fromJson(_metaJson()).icon, WalletIcon.wallet);
+      // A newer core may name one this build has never heard of.
+      final json = _metaJson()..['icon'] = 'telescope';
+      expect(WalletMeta.fromJson(json).icon, WalletIcon.wallet);
+    });
+
+    test('copyWith changes the name or the icon and nothing else', () {
+      final meta = WalletMeta.fromJson(_metaJson());
+      final renamed = meta.copyWith(name: 'Savings');
+      expect(renamed.name, 'Savings');
+      expect(renamed.icon, meta.icon);
+      expect(renamed.id, meta.id);
+      expect(renamed.scanGap, meta.scanGap);
+      final iconed = meta.copyWith(icon: WalletIcon.snowflake);
+      expect(iconed.icon, WalletIcon.snowflake);
+      expect(iconed.name, meta.name);
+    });
+  });
+
+  group('the preferences both apps keep', () {
+    /// What the core sends for them, every field filled.
+    const stored = {
+      'unit': 'sats',
+      'masked': true,
+      'fiat': true,
+      'fiat_currency': 'try',
+      'price_source': 'coingecko',
+      'notify_new_tx': true,
+      'explorer_ack': false,
+    };
+
+    test('read as the core sends them', () {
+      final preferences = Preferences.fromJson(stored);
+      expect(preferences.unit, AmountUnit.sats);
+      expect(preferences.masked, isTrue);
+      expect(preferences.fiat, isTrue);
+      // The Turkish lira keeps the identifier the core stores, whatever
+      // Dart makes of the word `try`.
+      expect(preferences.fiatCurrency, const FiatCurrency('try'));
+      expect(preferences.fiatCurrency.code, 'TRY');
+      expect(preferences.priceSource, PriceSource.coingecko);
+      expect(preferences.notifyNewTx, isTrue);
+      expect(preferences.explorerAck, isFalse);
+      final settings = Settings.fromJson({
+        'active_network': 'signet',
+        'backends': <String, dynamic>{},
+        'app_prefs': {'mobile.theme': 'dark'},
+        'preferences': stored,
+      });
+      expect(settings.preferences, preferences);
+      expect(settings.appPrefs, {'mobile.theme': 'dark'});
+    });
+
+    test('a change names what it changes, and nothing else', () {
+      expect(const PreferencesChange().toJson(), isEmpty);
+      expect(
+        jsonEncode(
+          const PreferencesChange(
+            fiatCurrency: FiatCurrency('inr'),
+            masked: false,
+          ).toJson(),
+        ),
+        '{"masked":false,"fiat_currency":"inr"}',
+      );
+      expect(
+        const PreferencesChange(
+          unit: AmountUnit.btc,
+          priceSource: PriceSource.mempoolSpace,
+          notifyNewTx: false,
+          explorerAck: true,
+          fiat: false,
+        ).toJson(),
+        {
+          'unit': 'btc',
+          'fiat': false,
+          'price_source': 'mempool_space',
+          'notify_new_tx': false,
+          'explorer_ack': true,
+        },
+      );
+      final before = Preferences.fromJson(stored);
+      expect(
+        const PreferencesChange(masked: false).applyTo(before),
+        before.copyWith(masked: false),
+      );
+    });
+  });
+
+  group('PriceTable', () {
+    test('reads the currencies and sources in the core\'s order', () {
+      final table = PriceTable.fromJson({
+        'currencies': [
+          {
+            'currency': 'eur',
+            'code': 'EUR',
+            'name': 'Euro',
+            'reach': 'every',
+            'sources': ['mempool_space', 'coingecko'],
+          },
+          {
+            'currency': 'ngn',
+            'code': 'NGN',
+            'name': 'Nigerian naira',
+            'reach': 'coingecko_only',
+            'sources': ['coingecko'],
+          },
+        ],
+        'sources': [
+          {
+            'source': 'mempool_space',
+            'label': 'mempool.space',
+            'ranges': ['month', 'year', 'max'],
+          },
+          {
+            'source': 'coingecko',
+            'label': 'CoinGecko',
+            'ranges': ['day', 'week', 'month', 'year'],
+            'credit': {
+              'text': 'Powered by CoinGecko',
+              'url': 'https://www.coingecko.com',
+            },
+          },
+        ],
+        'refresh_secs': 60,
+      });
+      expect(table.refresh, const Duration(seconds: 60));
+      expect(table.currencies.map((entry) => entry.currency.code), [
+        'EUR',
+        'NGN',
+      ]);
+      final naira = table.entryOf(const FiatCurrency('ngn'))!;
+      expect(naira.name, 'Nigerian naira');
+      expect(naira.reach, CurrencyReach.coingeckoOnly);
+      expect(naira.sources, [PriceSource.coingecko]);
+      expect(table.entryOf(const FiatCurrency('xxx')), isNull);
+      expect(table.sources.map((entry) => entry.label), [
+        'mempool.space',
+        'CoinGecko',
+      ]);
+      // The credit each source asks for, as the table carries it.
+      expect(table.creditOf(PriceSource.mempoolSpace), isNull);
+      final credit = table.creditOf(PriceSource.coingecko)!;
+      expect(credit.text, 'Powered by CoinGecko');
+      expect(credit.url, 'https://www.coingecko.com');
+    });
+  });
+
+  group('BackendConfig', () {
+    test('an automatic public backend keeps its stored shape', () {
+      final stored = BackendConfig.fromJson({'type': 'public_esplora'});
+      expect(stored, isA<PublicEsplora>());
+      expect((stored as PublicEsplora).server, isNull);
+      // The key must not appear at all: the core reads the exact shape
+      // every vault written before the choice existed already carries.
+      expect(jsonEncode(stored.toJson()), '{"type":"public_esplora"}');
+    });
+
+    test('a chosen operator rides along in the same tag', () {
+      final config = BackendConfig.fromJson({
+        'type': 'public_esplora',
+        'server': 'blockstream.info',
+      });
+      expect((config as PublicEsplora).server, 'blockstream.info');
+      expect(
+        jsonEncode(config.toJson()),
+        '{"type":"public_esplora","server":"blockstream.info"}',
+      );
+    });
+
+    test('reads a public server entry', () {
+      final server = PublicServer.fromJson(const {
+        'id': 'electrum:electrum.diynodes.com',
+        'label': 'electrum.diynodes.com:50022',
+        'protocol': 'electrum',
+        'url': 'ssl://electrum.diynodes.com:50022',
+      });
+      expect(server.id, 'electrum:electrum.diynodes.com');
+      expect(server.label, 'electrum.diynodes.com:50022');
+      expect(server.protocol, ServerProtocol.electrum);
+      expect(server.protocol.label, 'Electrum');
+      expect(server.url, 'ssl://electrum.diynodes.com:50022');
+      // A public authority vouches for this one.
+      expect(server.selfSigned, isFalse);
+      expect(
+        PublicServer.fromJson(const {
+          'id': 'electrum:bitcoin.lu.ke',
+          'label': 'bitcoin.lu.ke:50002',
+          'protocol': 'electrum',
+          'url': 'ssl://bitcoin.lu.ke:50002',
+          'self_signed': true,
+        }).selfSigned,
+        isTrue,
+      );
+      expect(
+        PublicServer.fromJson(const {
+          'id': 'mempool.space',
+          'label': 'mempool.space',
+          'protocol': 'esplora',
+          'url': 'https://mempool.space/api',
+        }).protocol,
+        ServerProtocol.esplora,
+      );
+    });
+
+    test("a node of the user's own says so, and only when it is", () {
+      // Written by a version without the switch: off, and written back
+      // in the very same shape.
+      final before = BackendConfig.fromJson({
+        'type': 'custom_electrum',
+        'url': 'ssl://node.local:50002',
+      });
+      expect((before as CustomElectrum).ownNode, isFalse);
+      expect(
+        jsonEncode(before.toJson()),
+        '{"type":"custom_electrum","url":"ssl://node.local:50002"}',
+      );
+
+      final electrum = BackendConfig.fromJson({
+        'type': 'custom_electrum',
+        'url': 'ssl://node.local:50002',
+        'own_node': true,
+      });
+      expect((electrum as CustomElectrum).ownNode, isTrue);
+      expect(electrum.toJson()['own_node'], isTrue);
+
+      final esplora = BackendConfig.fromJson({
+        'type': 'custom_esplora',
+        'url': 'https://node.local:3002/api',
+        'own_node': true,
+      });
+      expect((esplora as CustomEsplora).ownNode, isTrue);
+      expect(
+        jsonEncode(esplora.toJson()),
+        '{"type":"custom_esplora","url":"https://node.local:3002/api",'
+        '"own_node":true}',
+      );
+    });
+
+    test('settings fall back to the automatic public backend', () {
+      final settings = Settings(
+        preferences: Preferences.fromJson(_preferences),
+        activeNetwork: Network.mainnet,
+        backends: {},
+        appPrefs: {},
+      );
+      final config = settings.backendFor(Network.mainnet);
+      expect((config as PublicEsplora).server, isNull);
+    });
+  });
+
+  group('TxPreview.fromJson', () {
+    Map<String, dynamic> wire(bool ready, [String? readiness]) => {
+      'txid': 'ab' * 32,
+      'source': 'raw_transaction',
+      'network': 'signet',
+      'inputs': const [],
+      'outputs': const [],
+      'vsize': 141,
+      'weight': 561,
+      'size': 222,
+      'version': 2,
+      'locktime': 0,
+      'rbf': true,
+      'amounts_declared': false,
+      'amounts_listed': false,
+      'fee_rate_basis': 'exact',
+      'fee_unknown_reason': null,
+      'ready': ready,
+      'readiness': ?readiness,
+    };
+
+    test('takes where the transaction stands from the core', () {
+      expect(
+        TxPreview.fromJson(wire(false, 'refused')).readiness,
+        TxReadiness.refused,
+      );
+      expect(
+        TxPreview.fromJson(wire(false, 'unsigned')).readiness,
+        TxReadiness.unsigned,
+      );
+      expect(
+        TxPreview.fromJson(wire(true, 'ready')).readiness,
+        TxReadiness.ready,
+      );
+      final waiting = TxPreview.fromJson(wire(true, 'in_mempool'));
+      expect(waiting.readiness, TxReadiness.inMempool);
+      expect(waiting.readiness.sendable, isTrue);
+      expect(TxReadiness.refused.sendable, isFalse);
+      expect(TxReadiness.unsigned.sendable, isFalse);
+    });
+
+    test('a state this build does not know is refused', () {
+      expect(() => TxPreview.fromJson(wire(true, 'maybe')), throwsStateError);
+    });
+  });
+
+  group('TxWarning.fromJson', () {
+    test('reads the tone the core sent rather than deriving one', () {
+      final alert = TxWarning.fromJson(const {
+        'kind': 'unsigned',
+        'message': '1 of 1 inputs carry no signature.',
+        'severity': 'alert',
+      });
+      expect(alert.kind, TxWarningKind.unsigned);
+      expect(alert.severity, TxSeverity.alert);
+
+      final info = TxWarning.fromJson(const {
+        'kind': 'spends_watched',
+        'message': 'Spends coins of Cold storage.',
+        'severity': 'info',
+      });
+      expect(info.severity, TxSeverity.info);
+    });
+
+    test('reads whether the core blocks the send, and blocks nothing '
+        'when the wire says nothing', () {
+      final refused = TxWarning.fromJson(const {
+        'kind': 'input_spent',
+        'message': 'Input 0 is already spent by another transaction.',
+        'severity': 'alert',
+        'blocking': true,
+      });
+      expect(refused.blocking, isTrue);
+
+      final silent = TxWarning.fromJson(const {
+        'kind': 'input_spent',
+        'message': 'Input 0 is already spent.',
+        'severity': 'alert',
+      });
+      expect(silent.blocking, isFalse);
+    });
+
+    test('an input the chain disagrees about is named and loud', () {
+      final warning = TxWarning.fromJson(const {
+        'kind': 'input_mismatch',
+        'message':
+            'Input 0 claims 100000 sats; the chain records 10000000 sats.',
+        'severity': 'alert',
+      });
+      expect(warning.kind, TxWarningKind.inputMismatch);
+      expect(warning.severity, TxSeverity.alert);
+    });
+
+    test('a signature that leaves outputs open is named and loud', () {
+      final warning = TxWarning.fromJson(const {
+        'kind': 'uncommitted_outputs',
+        'message': 'Input 0 is signed with SIGHASH_SINGLE.',
+        'severity': 'alert',
+      });
+      expect(warning.kind, TxWarningKind.uncommittedOutputs);
+      expect(warning.severity, TxSeverity.alert);
+    });
+
+    test('a kind added by a newer core still arrives with its tone', () {
+      // The whole point of carrying severity on the wire: a kind this
+      // build cannot name no longer falls through a hand-written table.
+      final warning = TxWarning.fromJson(const {
+        'kind': 'something_this_build_never_heard_of',
+        'message': 'Worth reading all the same.',
+        'severity': 'alert',
+      });
+      expect(warning.kind, TxWarningKind.other);
+      expect(warning.severity, TxSeverity.alert);
+    });
+
+    test('a tone it cannot name reads as info', () {
+      // Quiet is the safe way to be wrong about a tone: the red is a
+      // budget, and it must not be spent by a string nobody parsed.
+      expect(
+        TxWarning.fromJson(const {
+          'kind': 'other',
+          'message': 'Something.',
+          'severity': 'catastrophic',
+        }).severity,
+        TxSeverity.info,
+      );
+      expect(
+        TxWarning.fromJson(const {'kind': 'other', 'message': 'Something.'})
+            .severity,
+        TxSeverity.info,
+      );
+    });
+  });
+
+  group('certificates', () {
+    test('every status the core can report is read back', () {
+      const fingerprint =
+          '11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:'
+          '11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00';
+
+      final trusted = CertificateReport.fromJson(const {
+        'host': 'electrum.blockstream.info:50002',
+        'status': 'trusted',
+      });
+      expect(trusted.host, 'electrum.blockstream.info:50002');
+      expect(trusted.status, isA<TrustedCertificate>());
+
+      expect(
+        CertificateReport.fromJson(const {
+          'host': 'node.local:50001',
+          'status': 'not_tls',
+        }).status,
+        isA<NotTlsCertificate>(),
+      );
+      expect(
+        CertificateReport.fromJson(const {
+          'host': 'abcdefgh.onion:50002',
+          'status': 'tor',
+        }).status,
+        isA<TorCertificate>(),
+      );
+
+      final pinned = CertificateReport.fromJson({
+        'host': 'node.local:50002',
+        'status': 'pinned',
+        'fingerprint': fingerprint,
+      }).status;
+      expect((pinned as PinnedCertificate).fingerprint, fingerprint);
+
+      final unknown = CertificateReport.fromJson({
+        'host': 'node.local:50002',
+        'status': 'unknown',
+        'fingerprint': fingerprint,
+        'reason':
+            'self-signed, or signed by an authority this machine '
+            'does not know',
+        'subject': 'CN=node.local',
+        'expires': 1893456000,
+      }).status;
+      expect((unknown as UnknownCertificate).fingerprint, fingerprint);
+      expect(unknown.subject, 'CN=node.local');
+      expect(unknown.expires, 1893456000);
+      expect(unknown.reason, startsWith('self-signed'));
+
+      // What the certificate says about itself is optional; the
+      // fingerprint is what gets trusted.
+      final bare = CertificateReport.fromJson({
+        'host': 'node.local:50002',
+        'status': 'unknown',
+        'fingerprint': fingerprint,
+        'reason': 'expired',
+        'subject': null,
+        'expires': null,
+      }).status;
+      expect((bare as UnknownCertificate).subject, isNull);
+      expect(bare.expires, isNull);
+
+      final changed = CertificateReport.fromJson({
+        'host': 'node.local:50002',
+        'status': 'changed',
+        'stored': fingerprint,
+        'presented': 'AA:$fingerprint',
+      }).status;
+      expect((changed as ChangedCertificate).stored, fingerprint);
+      expect(changed.presented, 'AA:$fingerprint');
+
+      final unreachable = CertificateReport.fromJson(const {
+        'host': 'node.local:50002',
+        'status': 'unreachable',
+        'detail': 'connection refused',
+      }).status;
+      expect(
+        (unreachable as UnreachableCertificate).detail,
+        'connection refused',
+      );
+    });
+
+    test('a status this build does not know is refused, not guessed', () {
+      expect(
+        () => CertificateReport.fromJson(const {
+          'host': 'node.local:50002',
+          'status': 'revoked',
+        }),
+        throwsFormatException,
+      );
+    });
+
+    test('accepted certificates ride along in the settings', () {
+      final settings = Settings.fromJson(const {
+        'active_network': 'mainnet',
+        'backends': <String, dynamic>{},
+        'app_prefs': <String, dynamic>{},
+        'gap_limit': 20,
+        'electrum_certs': {'node.local:50002': 'AB:CD'},
+        'preferences': _preferences,
+      });
+      expect(settings.electrumCerts, {'node.local:50002': 'AB:CD'});
+
+      // A vault written before the map existed reads as empty.
+      expect(
+        Settings.fromJson(const {
+          'active_network': 'mainnet',
+          'backends': <String, dynamic>{},
+          'app_prefs': <String, dynamic>{},
+          'preferences': _preferences,
+        }).electrumCerts,
+        isEmpty,
+      );
+    });
+  });
+
+  group('BackupPreview.fromJson', () {
+    test('names the node and the certificates a restore would pin', () {
+      final preview = BackupPreview.fromJson(const {
+        'created_at': 1755000000,
+        'wallets': [],
+        'has_settings': true,
+        'backends': [
+          {'network': 'mainnet', 'backend': 'electrum.example:50002'},
+          {'network': 'signet', 'backend': 'mempool.example'},
+        ],
+        'electrum_hosts': ['electrum.example:50002'],
+      });
+      expect(preview.hasSettings, isTrue);
+      expect(preview.backends.length, 2);
+      expect(preview.backends.first.network, Network.mainnet);
+      expect(preview.backends.first.backend, 'electrum.example:50002');
+      expect(preview.backends.last.network, Network.signet);
+      expect(preview.electrumHosts, ['electrum.example:50002']);
+    });
+
+    test('a backup without settings carries neither list', () {
+      final preview = BackupPreview.fromJson(const {
+        'created_at': 1755000000,
+        'wallets': [],
+        'has_settings': false,
+      });
+      expect(preview.backends, isEmpty);
+      expect(preview.electrumHosts, isEmpty);
+    });
+  });
+
+  test(
+    'a panic in the core comes back as a failure the screens catch',
+    () async {
+      await expectLater(
+        guardPanics(
+          Future<String>.error(PanicException('index out of bounds')),
+        ),
+        throwsA(
+          isA<BridgeException>()
+              .having((e) => e.kind, 'kind', 'internal')
+              .having((e) => e.message, 'message', internalFailure),
+        ),
+      );
+      expect(await guardPanics(Future.value('{"ok":true}')), '{"ok":true}');
+    },
+  );
+
+  group('the one guard against panics', () {
+    final internal = isA<BridgeException>()
+        .having((e) => e.kind, 'kind', 'internal')
+        .having((e) => e.message, 'message', internalFailure);
+
+    test('a call that panics answers a failure the screens catch', () async {
+      await expectLater(
+        guardCall(Future<String>.error(PanicException('unwrap on None'))),
+        throwsA(internal),
+      );
+    });
+
+    test('a stream a panic cut short ends on that failure', () async {
+      final events = StreamController<String>();
+      final stream = events.stream;
+      // As the generated code does: nobody awaits the call itself, and
+      // no uncaught error may come of it.
+      unawaited(
+        guardCall(
+          Future<void>.error(PanicException('index out of bounds')),
+          streams: [stream],
+        ),
+      );
+      events
+        ..add('{"type":"status"}')
+        ..close();
+      await expectLater(
+        endsWithItsCall(stream),
+        emitsInOrder(['{"type":"status"}', emitsError(internal), emitsDone]),
+      );
+    });
+
+    test('a stream whose call returned simply ends', () async {
+      final events = StreamController<String>();
+      final stream = events.stream;
+      unawaited(guardCall(Future<void>.value(), streams: [stream]));
+      events
+        ..add('{"type":"stopped"}')
+        ..close();
+      await expectLater(
+        endsWithItsCall(stream),
+        emitsInOrder(['{"type":"stopped"}', emitsDone]),
+      );
+    });
+  });
+}

@@ -1,0 +1,437 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:gerfaut/app.dart';
+import 'package:gerfaut/screens/export.dart';
+import 'package:gerfaut/src/bridge.dart';
+import 'package:gerfaut/src/documents.dart';
+import 'package:gerfaut/src/models.dart';
+import 'package:gerfaut/src/share.dart';
+import 'package:gerfaut/src/state.dart';
+import 'package:gerfaut/theme/tokens.dart';
+import 'package:gerfaut/widgets/choice_group.dart';
+import 'package:gerfaut/widgets/notice.dart';
+
+import 'fakes.dart';
+
+/// Records share calls instead of touching the platform.
+class FakeCsvSharer implements CsvSharer {
+  final List<({String csv, String filename})> shared = [];
+
+  @override
+  Future<void> shareCsv({required String csv, required String filename}) async {
+    shared.add((csv: csv, filename: filename));
+  }
+
+  @override
+  Future<void> forgetCopies() async {}
+}
+
+TxSummary tx(String txid, int netSats, {int? timestamp}) {
+  return TxSummary(
+    txid: txid,
+    netSats: netSats,
+    feeSats: null,
+    status: timestamp == null
+        ? const TxStatus.pending()
+        : TxStatus.confirmed(height: 100, timestamp: timestamp),
+    confirmations: timestamp == null ? 0 : 3,
+  );
+}
+
+Widget exportApp(
+  FakeBridge bridge,
+  FakeCsvSharer sharer, {
+  FakeDocumentSaver? saver,
+}) {
+  return ProviderScope(
+    retry: noRetry,
+    overrides: [
+      bridgeProvider.overrideWithValue(bridge),
+      csvSharerProvider.overrideWithValue(sharer),
+      documentSaverProvider.overrideWithValue(saver ?? FakeDocumentSaver()),
+    ],
+    child: MaterialApp(
+      theme: themeFrom(GerfautTokens.light, Brightness.light),
+      home: const ExportScreen(walletId: 'w1'),
+    ),
+  );
+}
+
+FakeBridge makeBridge({bool truncated = false}) {
+  final meta = makeMeta();
+  return FakeBridge(
+    wallets: [meta],
+    snapshots: {
+      'w1': makeSnapshot(
+        meta: meta,
+        txs: [
+          tx('a' * 64, 5000, timestamp: 1755000000),
+          tx('b' * 64, -3000, timestamp: 1755100000),
+          tx('c' * 64, 700),
+        ],
+        truncated: truncated,
+      ),
+    },
+  );
+}
+
+void main() {
+  testWidgets('the counter mirrors the direction and pending filters', (
+    tester,
+  ) async {
+    final sharer = FakeCsvSharer();
+    await tester.pumpWidget(exportApp(makeBridge(), sharer));
+    await tester.pumpAndSettle();
+
+    expect(find.text('3 of 3 transactions selected'), findsOneWidget);
+
+    await tester.tap(find.text('Sent'));
+    await tester.pumpAndSettle();
+    expect(find.text('1 of 3 transactions selected'), findsOneWidget);
+
+    await tester.tap(find.text('Received'));
+    await tester.pumpAndSettle();
+    expect(find.text('2 of 3 transactions selected'), findsOneWidget);
+
+    await tester.tap(find.text('All'));
+    await tester.pumpAndSettle();
+    expect(find.text('3 of 3 transactions selected'), findsOneWidget);
+
+    // Dropping pending keeps only the confirmed rows.
+    final pendingSwitch = find.byType(Switch).first;
+    await tester.tap(pendingSwitch);
+    await tester.pumpAndSettle();
+    expect(find.text('2 of 3 transactions selected'), findsOneWidget);
+  });
+
+  testWidgets('the direction filter is the shared choice group', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 1600);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(exportApp(makeBridge(), FakeCsvSharer()));
+    await tester.pumpAndSettle();
+
+    // The last row of tight pills in the app: it goes through the same
+    // component as Unit, Theme and the rest, so it cannot drift again.
+    expect(find.byType(ChoiceGroup<ExportDirection?>), findsOneWidget);
+
+    Rect option(String label) =>
+        tester.getRect(find.widgetWithText(InkWell, label));
+    final all = option('All');
+    final received = option('Received');
+    final sent = option('Sent');
+    // Stacked full-width rows, drawn a control's height, with room
+    // between them.
+    expect(received.top - all.bottom, GerfautSpacing.sm);
+    expect(sent.top - received.bottom, GerfautSpacing.sm);
+    expect(all.height, GerfautTouch.control);
+    expect(received.width, all.width);
+    expect(sent.left, all.left);
+
+    // Null is an option of its own, and it is the one selected first.
+    final tokens = GerfautTokens.light;
+    Color fill(String label) => tester
+        .widget<Material>(
+          find
+              .ancestor(of: find.text(label), matching: find.byType(Material))
+              .first,
+        )
+        .color!;
+    expect(fill('All'), tokens.primary);
+    expect(fill('Sent'), tokens.surfaceSunken);
+
+    await tester.tap(find.text('Sent'));
+    await tester.pumpAndSettle();
+    expect(fill('Sent'), tokens.primary);
+    expect(fill('All'), tokens.surfaceSunken);
+    expect(find.text('1 of 3 transactions selected'), findsOneWidget);
+  });
+
+  testWidgets('a date bound excludes pending and disables an empty export', (
+    tester,
+  ) async {
+    final sharer = FakeCsvSharer();
+    await tester.pumpWidget(exportApp(makeBridge(), sharer));
+    await tester.pumpAndSettle();
+
+    // Picking today as the lower bound leaves the 2025 transactions and
+    // the undated pending row out: nothing passes.
+    await tester.tap(find.text('From'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('0 of 3 transactions selected'), findsOneWidget);
+    for (final label in ['Save file', 'Share']) {
+      final button = tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, label),
+      );
+      expect(button.onPressed, isNull, reason: label);
+    }
+
+    // Clearing the bound restores the full selection.
+    await tester.tap(find.bySemanticsLabel('Clear From date'));
+    await tester.pumpAndSettle();
+    expect(find.text('3 of 3 transactions selected'), findsOneWidget);
+  });
+
+  testWidgets('saving writes the file where the user points', (tester) async {
+    final sharer = FakeCsvSharer();
+    final saver = FakeDocumentSaver();
+    final bridge = makeBridge();
+    await tester.pumpWidget(exportApp(bridge, sharer, saver: saver));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Save file'));
+    await tester.pumpAndSettle();
+
+    // A file, literally: the system's save dialog, not the share sheet.
+    expect(bridge.exportCalls, hasLength(1));
+    expect(saver.saved, hasLength(1));
+    expect(saver.saved.single.filename, 'cold-storage-transactions.csv');
+    expect(saver.saved.single.mimeType, 'text/csv');
+    expect(utf8.decode(saver.saved.single.bytes), contains('txid,date_utc'));
+    expect(sharer.shared, isEmpty);
+    expect(find.text('3 transactions saved'), findsOneWidget);
+
+    // Flush the snackbar timer.
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('a save dialog waved away says nothing', (tester) async {
+    final saver = FakeDocumentSaver(answer: false);
+    final bridge = makeBridge();
+    await tester.pumpWidget(exportApp(bridge, FakeCsvSharer(), saver: saver));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Save file'));
+    await tester.pumpAndSettle();
+
+    expect(saver.saved, isEmpty);
+    expect(find.textContaining('saved'), findsNothing);
+    // The filters are still there for another try.
+    expect(find.text('3 of 3 transactions selected'), findsOneWidget);
+  });
+
+  testWidgets('sharing hands the file to the sheet, which says the rest', (
+    tester,
+  ) async {
+    final sharer = FakeCsvSharer();
+    final saver = FakeDocumentSaver();
+    final bridge = makeBridge();
+    await tester.pumpWidget(exportApp(bridge, sharer, saver: saver));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Share'));
+    await tester.pumpAndSettle();
+
+    expect(bridge.exportCalls, hasLength(1));
+    expect(sharer.shared, hasLength(1));
+    expect(sharer.shared.single.filename, 'cold-storage-transactions.csv');
+    expect(sharer.shared.single.csv, contains('txid,date_utc'));
+    expect(saver.saved, isEmpty);
+    // Whether an app took it is the sheet's to say: nothing claims it.
+    expect(find.textContaining('shared'), findsNothing);
+    expect(find.textContaining('exported'), findsNothing);
+  });
+
+  testWidgets('a save that fails is said under the buttons, not in a toast', (
+    tester,
+  ) async {
+    final saver = FakeDocumentSaver()
+      ..failure = const DocumentSaveException('The drive is full.');
+    await tester.pumpWidget(
+      exportApp(makeBridge(), FakeCsvSharer(), saver: saver),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Save file'));
+    await tester.pumpAndSettle();
+
+    final note = tester.widget<GerfautNotice>(find.byType(GerfautNotice));
+    expect(note.tone, NoticeTone.info);
+    expect(note.message, 'The file could not be saved.');
+    expect(note.detail, 'The drive is full.');
+    expect(find.byType(SnackBar), findsNothing);
+    // The filters are still there, and the note leaves with the next try.
+    expect(find.text('3 of 3 transactions selected'), findsOneWidget);
+    saver.failure = null;
+    await tester.tap(find.text('Save file'));
+    await tester.pumpAndSettle();
+    expect(find.byType(GerfautNotice), findsNothing);
+    expect(find.text('3 transactions saved'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('a file the core cannot build is said the same way', (
+    tester,
+  ) async {
+    final bridge = makeBridge()
+      ..onExportTransactions = (_, _) => throw const BridgeException(
+        'internal',
+        'the history could not be read',
+      );
+    await tester.pumpWidget(exportApp(bridge, FakeCsvSharer()));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Share'));
+    await tester.pumpAndSettle();
+
+    final note = tester.widget<GerfautNotice>(find.byType(GerfautNotice));
+    expect(note.message, 'The file could not be built.');
+    expect(note.detail, 'the history could not be read');
+    expect(find.byType(SnackBar), findsNothing);
+  });
+
+  testWidgets('a partial history warns before exporting', (tester) async {
+    final sharer = FakeCsvSharer();
+    await tester.pumpWidget(exportApp(makeBridge(truncated: true), sharer));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text(
+        'Only the loaded transactions export. Load older rounds first '
+        'for a complete file.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  test('histories left in the cache by earlier builds are deleted', () async {
+    final cache = await Directory.systemTemp.createTemp('gerfaut-cache');
+    addTearDown(() => cache.delete(recursive: true));
+    final old = File(
+      '${cache.path}${Platform.pathSeparator}savings-transactions.csv',
+    )..writeAsStringSync('txid,amount');
+    old.setLastModifiedSync(longAgo());
+    final other = File('${cache.path}${Platform.pathSeparator}keep.txt')
+      ..writeAsStringSync('not ours');
+
+    expect((await sweepSharedCopies(cache: cache)).gone, 1);
+    expect(old.existsSync(), isFalse);
+    expect(other.existsSync(), isTrue);
+  });
+
+  test(
+    'the copy the share sheet was handed goes too, folder and all',
+    () async {
+      final cache = await Directory.systemTemp.createTemp('gerfaut-cache');
+      addTearDown(() => cache.delete(recursive: true));
+      final sep = Platform.pathSeparator;
+      // Where share_plus writes a file it is handed from memory.
+      final folder = Directory('${cache.path}${sep}0b5f6d2e-uuid')
+        ..createSync();
+      final shared = File('${folder.path}${sep}savings-transactions.csv')
+        ..writeAsStringSync('txid,amount');
+      shared.setLastModifiedSync(longAgo());
+      final other = Directory('${cache.path}${sep}other-uuid')..createSync();
+      final kept = File('${other.path}${sep}picture.jpg')
+        ..writeAsStringSync('not ours');
+
+      expect((await sweepSharedCopies(cache: cache)).gone, 1);
+      expect(shared.existsSync(), isFalse);
+      expect(folder.existsSync(), isFalse);
+      expect(kept.existsSync(), isTrue);
+    },
+  );
+
+  test('the copy share_plus keeps goes, and nothing deeper is read', () async {
+    final cache = await Directory.systemTemp.createTemp('gerfaut-cache');
+    addTearDown(() => cache.delete(recursive: true));
+    final sep = Platform.pathSeparator;
+    // Where share_plus copies a file before handing it to another app.
+    final shareFolder = Directory('${cache.path}${sep}share_plus')
+      ..createSync();
+    final copied = File('${shareFolder.path}${sep}savings-transactions.csv')
+      ..writeAsStringSync('txid,amount');
+    copied.setLastModifiedSync(longAgo());
+    // Two levels down is no place a share writes to: left unread.
+    final deep = Directory('${cache.path}${sep}some${sep}deeper')
+      ..createSync(recursive: true);
+    final elsewhere = File('${deep.path}${sep}other-transactions.csv')
+      ..writeAsStringSync('txid,amount');
+    elsewhere.setLastModifiedSync(longAgo());
+
+    expect((await sweepSharedCopies(cache: cache)).gone, 1);
+    expect(copied.existsSync(), isFalse);
+    expect(shareFolder.existsSync(), isFalse);
+    expect(elsewhere.existsSync(), isTrue);
+  });
+
+  test('a history shared by the app goes from its folder, and the '
+      'folder with it', () async {
+    final cache = await Directory.systemTemp.createTemp('gerfaut-cache');
+    addTearDown(() => cache.delete(recursive: true));
+    final sep = Platform.pathSeparator;
+    // One folder per share, under the app's own `shared`.
+    final share = Directory('${cache.path}${sep}shared${sep}0b5f6d2e-uuid')
+      ..createSync(recursive: true);
+    final copy = File('${share.path}${sep}savings-transactions.csv')
+      ..writeAsStringSync('txid,amount');
+    copy.setLastModifiedSync(longAgo());
+    final young = Directory('${cache.path}${sep}shared${sep}1c6e7f3f-uuid')
+      ..createSync();
+    final recent = File('${young.path}${sep}cold-transactions.csv')
+      ..writeAsStringSync('txid,amount');
+
+    expect((await sweepSharedCopies(cache: cache)).gone, 1);
+    expect(copy.existsSync(), isFalse);
+    expect(share.existsSync(), isFalse);
+    // Still within its hour: the app it went to may be reading it.
+    expect(recent.existsSync(), isTrue);
+  });
+
+  test('a shared file goes by its age, whatever its name', () async {
+    final cache = await Directory.systemTemp.createTemp('gerfaut-cache');
+    addTearDown(() => cache.delete(recursive: true));
+    final sep = Platform.pathSeparator;
+    // A name the platform fell back on, or one a later build may give.
+    final share = Directory('${cache.path}${sep}shared${sep}2d7f8a4a-uuid')
+      ..createSync(recursive: true);
+    final copy = File('${share.path}${sep}shared')..writeAsStringSync('x');
+    copy.setLastModifiedSync(longAgo());
+    // Elsewhere in the cache, a name that is not ours stays.
+    final other = File('${cache.path}${sep}shared.txt')
+      ..writeAsStringSync('not ours');
+    other.setLastModifiedSync(longAgo());
+
+    expect((await sweepSharedCopies(cache: cache)).gone, 1);
+    expect(copy.existsSync(), isFalse);
+    expect(other.existsSync(), isTrue);
+  });
+
+  test(
+    'a history shared within the hour stays for the app reading it',
+    () async {
+      final cache = await Directory.systemTemp.createTemp('gerfaut-cache');
+      addTearDown(() => cache.delete(recursive: true));
+      final sep = Platform.pathSeparator;
+      final shareFolder = Directory('${cache.path}${sep}share_plus')
+        ..createSync();
+      final recent = File('${shareFolder.path}${sep}savings-transactions.csv')
+        ..writeAsStringSync('txid,amount');
+      recent.setLastModifiedSync(
+        DateTime.now().subtract(sharedCopyLifetime ~/ 2),
+      );
+      final old = File('${shareFolder.path}${sep}spending-transactions.csv')
+        ..writeAsStringSync('txid,amount');
+      old.setLastModifiedSync(longAgo());
+
+      expect((await sweepSharedCopies(cache: cache)).gone, 1);
+      expect(recent.existsSync(), isTrue);
+      expect(old.existsSync(), isFalse);
+      expect(shareFolder.existsSync(), isTrue);
+    },
+  );
+}
+
+/// A time well past the life of a shared copy.
+DateTime longAgo() => DateTime.now().subtract(sharedCopyLifetime * 2);

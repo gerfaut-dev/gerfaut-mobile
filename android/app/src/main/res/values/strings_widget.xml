@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Everything the widgets say on their own. The figures come from the
+     app; these are the frames around them. -->
+<resources>
+    <string name="widget_price_label">Bitcoin price</string>
+    <string name="widget_price_description">The bitcoin price in your chosen currency, as of the last refresh.</string>
+    <string name="widget_balance_label">Balance</string>
+    <string name="widget_balance_description">Your total balance and wallets. Masked until you allow balances on widgets in the settings.</string>
+    <string name="widget_network_label">Network</string>
+    <string name="widget_network_description">Block height as of the last sync.</string>
+    <string name="widget_block_height_label">Block height</string>
+    <string name="widget_placeholder">—</string>
+    <string name="widget_masked_placeholder">•••••</string>
+    <!-- What a screen reader says for each placeholder: read as drawn,
+         the dash is "dash" and the mask "bullet" five times over. -->
+    <string name="widget_placeholder_spoken">Not known yet</string>
+    <string name="widget_masked_spoken">Hidden amount</string>
+</resources>

@@ -1,0 +1,820 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import '../src/bridge.dart';
+import '../src/format.dart';
+import '../src/live.dart';
+import '../src/models.dart';
+import '../src/policy_text.dart';
+import '../src/state.dart';
+import '../theme/tokens.dart';
+import '../widgets/address_chip.dart';
+import '../widgets/amounts.dart';
+import '../widgets/app_bar.dart';
+import '../widgets/buttons.dart';
+import '../widgets/count_badge.dart';
+import '../widgets/empty_state.dart';
+import '../widgets/load_failure.dart';
+import '../widgets/mask_unsaved_notice.dart';
+import '../widgets/overflow_menu.dart';
+import '../widgets/status_pill.dart';
+import '../widgets/sync_button.dart';
+import '../widgets/sync_indicator.dart';
+import 'broadcast.dart';
+import 'export.dart';
+import 'policy.dart';
+import 'receive.dart';
+import 'tx_detail.dart';
+import '../widgets/toast.dart';
+
+/// Home of one wallet: balance, freshness, transactions and UTXOs.
+/// The one primary action, Receive, sits at the bottom under the thumb.
+class WalletHomeScreen extends ConsumerStatefulWidget {
+  const WalletHomeScreen({super.key, required this.walletId});
+
+  final String walletId;
+
+  @override
+  ConsumerState<WalletHomeScreen> createState() => _WalletHomeScreenState();
+}
+
+class _WalletHomeScreenState extends ConsumerState<WalletHomeScreen> {
+  void _open(Widget Function(String walletId) build) {
+    Navigator.of(context)
+        .push(MaterialPageRoute<void>(builder: (_) => build(widget.walletId)));
+  }
+
+  Future<void> _sync() async {
+    try {
+      await ref.read(syncProvider.notifier).syncWallet(widget.walletId);
+    } catch (_) {
+      // The failure lands in syncErrorsProvider and the freshness line.
+    }
+  }
+
+  /// The shortcut the phone gets and the desktop does not: settings are
+  /// a swipe and three taps away here, and the title is already a target.
+  /// The full path stays Settings -> the wallet -> Rename, and both go
+  /// through the one call that writes a name.
+  Future<void> _rename(String current) async {
+    final messenger = ScaffoldMessenger.of(context);
+    // Held before the dialog: the name is written even if the page goes
+    // meanwhile, and refreshing the lists must not touch a dead `ref`.
+    final container = ProviderScope.containerOf(context, listen: false);
+    final bridge = ref.read(bridgeProvider);
+    final renamed = await showDialog<bool>(
+      context: context,
+      builder: (_) => _RenameDialog(
+        current: current,
+        // The dialog makes the call and stays up on a refusal, the
+        // reason under the field: a toast would be gone before it is
+        // read, and the name typed with it.
+        onSave: (name) async {
+          await bridge.renameWallet(widget.walletId, name);
+          container.invalidate(walletsProvider);
+          container.invalidate(snapshotProvider(widget.walletId));
+        },
+      ),
+    );
+    if (renamed != true || !mounted) return;
+    messenger.showSnackBar(Toast('Wallet renamed'));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    final masked = ref.watch(maskedProvider);
+    final syncing = ref.watch(syncProvider.notifier).isSyncing(widget.walletId);
+    ref.watch(syncProvider);
+    final snapshot = ref.watch(snapshotProvider(widget.walletId));
+    final loaded = snapshot.value;
+    final name = loaded?.meta.name;
+    // Never masked — a policy is structure, not an amount — and absent
+    // rather than pending while it loads: a menu never spins.
+    final policy = ref.watch(policyProvider(widget.walletId)).value;
+    final digest = policy == null ? null : policyDigest(policy);
+
+    return Scaffold(
+      appBar: GerfautAppBar(
+        // No pencil: a permanent target next to the title for a rare
+        // gesture, when the title is a full touch target already. What
+        // says so is the ink under the finger and the label read out
+        // loud.
+        title: Align(
+          alignment: Alignment.centerLeft,
+          child: Semantics(
+            button: true,
+            child: Tooltip(
+              // The tooltip is the label a screen reader reads out after
+              // the name: a second Semantics label would say it twice.
+              message: 'Rename this wallet',
+              child: InkWell(
+                borderRadius: BorderRadius.circular(GerfautRadius.md),
+                onTap: name == null ? null : () => _rename(name),
+                // No padding of its own: the title stays against the
+                // back arrow, where every other page starts.
+                child: Container(
+                  constraints: const BoxConstraints(
+                    minHeight: GerfautTouch.target,
+                  ),
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    name ?? '',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+        actions: [
+          // The one action of the way past stays in the bar; the rest
+          // is a tap deeper, named in words.
+          SyncButton(syncing: syncing, onPressed: _sync),
+          OverflowMenu(
+            items: [
+              // The differentiator, first: what the descriptor says and
+              // who can spend when. The digest rides under the label,
+              // so what the balance card used to show is still read
+              // here — and the entry opens even while the digest is
+              // loading or failed, because the page itself has the room
+              // to say what went wrong.
+              OverflowMenuItem(
+                icon: LucideIcons.route,
+                label: 'Policy',
+                detail: digest,
+                onSelected: () => _open((id) => PolicyScreen(walletId: id)),
+              ),
+              // The title is still the gesture; this is how it gets
+              // found. Nothing to rename until the wallet has loaded.
+              if (name != null)
+                OverflowMenuItem(
+                  icon: LucideIcons.pencil,
+                  label: 'Rename wallet',
+                  onSelected: () => _rename(name),
+                ),
+              OverflowMenuItem(
+                icon: masked ? LucideIcons.eye : LucideIcons.eyeOff,
+                label: masked ? 'Show balances' : 'Hide balances',
+                onSelected: () => ref.read(maskedProvider.notifier).toggle(),
+              ),
+              OverflowMenuItem(
+                icon: LucideIcons.fileDown,
+                label: 'Export CSV',
+                onSelected: () => _open((id) => ExportScreen(walletId: id)),
+              ),
+              OverflowMenuItem(
+                icon: LucideIcons.radio,
+                label: 'Broadcast',
+                onSelected: () => _open((_) => const BroadcastScreen()),
+              ),
+            ],
+          ),
+          const SizedBox(width: GerfautSpacing.sm),
+        ],
+      ),
+      // A wallet already loaded stays on screen while it refreshes: a
+      // loading line in place of a balance would hide what is known.
+      body: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const MaskUnsavedNotice(),
+            Expanded(
+              child: loaded != null
+                  ? _buildLoaded(loaded, syncing)
+                  : switch (snapshot) {
+                      AsyncError(:final error) => LoadFailure(
+                        what: 'This wallet',
+                        error: error,
+                        onRetry: () =>
+                            ref.invalidate(snapshotProvider(widget.walletId)),
+                      ),
+                      _ => Center(
+                        child: Text(
+                          'Loading wallet…',
+                          style: tokens.bodySmall.copyWith(
+                            color: tokens.textMuted,
+                          ),
+                        ),
+                      ),
+                    },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The figure alone can lie: a wallet that never reached a backend
+  /// shows zero. The note says where the number comes from, and only
+  /// then: a balance with nothing to explain explains nothing. "All
+  /// funds confirmed" was the normal state announcing itself.
+  static String? _balanceNote(WalletSnapshot snapshot, String? error) {
+    final synced = snapshot.meta.lastSync != null;
+    if (error != null && !synced) return 'Sync failed: nothing fetched yet.';
+    if (error != null) return 'Sync failed: showing the last known balance.';
+    if (!synced) return 'Not synced yet.';
+    return null;
+  }
+
+  Widget _buildLoaded(WalletSnapshot snapshot, bool syncing) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    final syncError = ref.watch(syncErrorsProvider)[widget.walletId];
+    final note = _balanceNote(snapshot, syncError);
+    final coverage = ref.watch(walletCoverageProvider(widget.walletId));
+    // A note about the sync outranks the pending line: a figure whose
+    // source is in doubt is not one to detail.
+    final pending = note == null ? snapshot.balance.pendingNetSats : null;
+    return DefaultTabController(
+      length: 2,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(
+              GerfautSpacing.md,
+              GerfautSpacing.sm,
+              GerfautSpacing.md,
+              GerfautSpacing.md,
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SyncIndicator(
+                  stamp: snapshot.meta.lastSync,
+                  syncing: syncing,
+                  error: syncError,
+                ),
+                if (coverage != null) ...[
+                  const SizedBox(height: GerfautSpacing.sm),
+                  _CoverageLine(coverage: coverage),
+                ],
+                const SizedBox(height: GerfautSpacing.md),
+                // The balance as a dashboard figure: its own bordered
+                // surface, with the role spelled out above it.
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(GerfautSpacing.md),
+                  decoration: BoxDecoration(
+                    color: tokens.surface,
+                    borderRadius: BorderRadius.circular(GerfautRadius.lg),
+                    border: Border.all(color: tokens.border),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'TOTAL BALANCE',
+                        style: tokens.label.copyWith(color: tokens.textMuted),
+                      ),
+                      const SizedBox(height: GerfautSpacing.sm),
+                      BalanceAmount(
+                        sats: snapshot.balance.total,
+                        network: snapshot.meta.network,
+                      ),
+                      if (note != null) ...[
+                        const SizedBox(height: GerfautSpacing.sm),
+                        Text(
+                          note,
+                          style: tokens.label.copyWith(color: tokens.textMuted),
+                        ),
+                      ] else if (pending != null) ...[
+                        const SizedBox(height: GerfautSpacing.sm),
+                        PendingAmount(sats: pending),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          TabBar(
+            tabs: [
+              Tab(
+                child: _TabLabel(
+                  label: 'Transactions',
+                  count: snapshot.txs.length,
+                ),
+              ),
+              Tab(
+                child: _TabLabel(
+                  label: 'UTXOs',
+                  count:
+                      ref.watch(utxosProvider(widget.walletId)).value?.length ??
+                      0,
+                ),
+              ),
+            ],
+          ),
+          Expanded(
+            child: TabBarView(
+              children: [
+                _TxList(
+                  walletId: widget.walletId,
+                  network: snapshot.meta.network,
+                  txs: snapshot.txs,
+                  truncated: snapshot.truncated,
+                ),
+                _UtxoList(
+                  walletId: widget.walletId,
+                  network: snapshot.meta.network,
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(GerfautSpacing.md),
+            child: PrimaryButton(
+              label: 'Receive',
+              icon: LucideIcons.qrCode,
+              expand: true,
+              onPressed: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => ReceiveScreen(walletId: widget.walletId),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// How much of the wallet Live follows, under the sync line while Live
+/// cannot follow every wallet whole: the badge, and how many addresses
+/// wait when some do.
+class _CoverageLine extends StatelessWidget {
+  const _CoverageLine({required this.coverage});
+
+  final WalletCoverage coverage;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    final waits = coverage.coverage != Coverage.live;
+    return Wrap(
+      spacing: GerfautSpacing.sm,
+      runSpacing: GerfautSpacing.xs,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        LiveCoveragePill(coverage: coverage, said: waits),
+        if (waits)
+          Text(
+            waitingWords(coverage),
+            style: tokens.label.copyWith(color: tokens.textMuted),
+          ),
+      ],
+    );
+  }
+}
+
+/// Rename in place, over the page instead of away from it. The dialog
+/// rides above the soft keyboard on its own: [Dialog] adds the view
+/// insets to its inset padding.
+class _RenameDialog extends StatefulWidget {
+  const _RenameDialog({required this.current, required this.onSave});
+
+  final String current;
+
+  /// Writes the name; a [BridgeException] keeps the dialog up.
+  final Future<void> Function(String name) onSave;
+
+  @override
+  State<_RenameDialog> createState() => _RenameDialogState();
+}
+
+class _RenameDialogState extends State<_RenameDialog> {
+  late final _controller = TextEditingController(text: widget.current);
+  bool _saving = false;
+
+  /// What the core said when it refused the name.
+  String? _refusal;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (_saving) return;
+    final name = _controller.text.trim();
+    // Empty or unchanged: the dialog closes and nothing is written.
+    if (name.isEmpty || name == widget.current) {
+      Navigator.of(context).pop(false);
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _refusal = null;
+    });
+    try {
+      await widget.onSave(name);
+      if (mounted) Navigator.of(context).pop(true);
+    } on BridgeException catch (error) {
+      if (mounted) setState(() => _refusal = error.message);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    return AlertDialog(
+      backgroundColor: tokens.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(GerfautRadius.lg),
+      ),
+      title: Text('Rename wallet', style: tokens.h2),
+      // The title is the field's label: a second one over a single
+      // prefilled field would say the same word twice.
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _field(tokens),
+          if (_refusal != null) ...[
+            const SizedBox(height: GerfautSpacing.sm),
+            Semantics(
+              liveRegion: true,
+              child: Text(
+                _refusal!,
+                style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+              ),
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        SecondaryButton(
+          label: 'Cancel',
+          onPressed: _saving ? null : () => Navigator.of(context).pop(false),
+        ),
+        PrimaryButton(
+          label: _saving ? 'Saving…' : 'Save',
+          busy: _saving,
+          onPressed: _save,
+        ),
+      ],
+    );
+  }
+
+  Widget _field(GerfautTokens tokens) {
+    return TextField(
+      controller: _controller,
+      autofocus: true,
+      enabled: !_saving,
+      autocorrect: false,
+      enableSuggestions: false,
+      enableIMEPersonalizedLearning: false,
+      textInputAction: TextInputAction.done,
+      style: tokens.body,
+      onSubmitted: (_) => _save(),
+      decoration: InputDecoration(
+        filled: true,
+        fillColor: tokens.surfaceSunken,
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: GerfautSpacing.md,
+          vertical: GerfautSpacing.sm,
+        ),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(GerfautRadius.sm),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(GerfautRadius.sm),
+          borderSide: BorderSide(color: tokens.primary, width: 2),
+        ),
+      ),
+    );
+  }
+}
+
+/// A tab label with the count of what it holds: the sunken pill keeps
+/// the number legible without competing with the label.
+class _TabLabel extends StatelessWidget {
+  const _TabLabel({required this.label, required this.count});
+
+  final String label;
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    // A long label plus its count scales down rather than clipping.
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(label),
+          if (count > 0) ...[
+            const SizedBox(width: GerfautSpacing.xs + 2),
+            CountBadge(count: count),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// Why the last "Load older transactions" failed, per wallet, said
+/// under the button until the next try: a toast would be gone before
+/// it is read.
+final _olderFailureProvider = NotifierProvider.autoDispose
+    .family<Slot<String?>, String?, String>((walletId) => Slot(null));
+
+/// Transactions are list rows, never cards: they scan vertically.
+/// 48px rows, hairline separators, figures right-aligned.
+class _TxList extends ConsumerWidget {
+  const _TxList({
+    required this.walletId,
+    required this.network,
+    required this.txs,
+    this.truncated = false,
+  });
+
+  final String walletId;
+  final Network network;
+  final List<TxSummary> txs;
+
+  /// The list is partial (busy watched address); the balance stays exact.
+  final bool truncated;
+
+  /// Fetches one more round and states what it brought back.
+  Future<void> _loadOlder(BuildContext context, WidgetRef ref) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final failure = ref.read(_olderFailureProvider(walletId).notifier);
+    failure.put(null);
+    try {
+      final added = await ref.read(historyProvider.notifier).loadMore(walletId);
+      if (added == null) return;
+      messenger.showSnackBar(
+        Toast(switch (added) {
+          0 => 'History is complete',
+          1 => '1 older transaction',
+          _ => '$added older transactions',
+        }),
+      );
+    } on BridgeException catch (error) {
+      // The page may have gone meanwhile, and its note with it.
+      if (context.mounted) failure.put(error.message);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    if (txs.isEmpty && !truncated) {
+      return const EmptyState(
+        title: 'No transactions yet',
+        hint: 'Once this wallet sees activity on the chain, it shows up here.',
+      );
+    }
+
+    // Pending first; otherwise the core's order (newest confirmed first).
+    final sorted = [
+      ...txs.where((tx) => !tx.status.confirmed),
+      ...txs.where((tx) => tx.status.confirmed),
+    ];
+
+    ref.watch(historyProvider);
+    final loading = ref.read(historyProvider.notifier).isLoading(walletId);
+    final olderFailure = ref.watch(_olderFailureProvider(walletId));
+
+    return ListView.separated(
+      itemCount: sorted.length + (truncated ? 1 : 0),
+      separatorBuilder: (_, _) =>
+          Divider(height: 1, thickness: 1, color: tokens.border),
+      itemBuilder: (context, index) {
+        if (index == sorted.length) {
+          // The rest of the history is one action away, not a warning.
+          return Padding(
+            padding: const EdgeInsets.all(GerfautSpacing.md),
+            child: Column(
+              children: [
+                SecondaryButton(
+                  label: loading ? 'Fetching…' : 'Load older transactions',
+                  icon: LucideIcons.chevronDown,
+                  busy: loading,
+                  onPressed: () => _loadOlder(context, ref),
+                ),
+                if (olderFailure != null) ...[
+                  const SizedBox(height: GerfautSpacing.sm),
+                  Semantics(
+                    liveRegion: true,
+                    child: Text(
+                      'Older transactions could not be loaded. $olderFailure',
+                      style: tokens.bodySmall.copyWith(color: tokens.pending),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: GerfautSpacing.sm),
+                Text(
+                  'This address has a long history: it loads in rounds. '
+                  'The balance above already covers all of it.',
+                  style: tokens.label.copyWith(color: tokens.textMuted),
+                  textAlign: TextAlign.center,
+                ),
+              ],
+            ),
+          );
+        }
+        final tx = sorted[index];
+        final incoming = tx.netSats >= 0;
+        final pending = !tx.status.confirmed;
+        final dated = tx.status.confirmed && tx.status.timestamp != null;
+        return InkWell(
+          onTap: () {
+            Navigator.of(context).push(
+              MaterialPageRoute<void>(
+                builder: (_) => TxDetailScreen(
+                  walletId: walletId,
+                  txid: tx.txid,
+                  network: network,
+                ),
+              ),
+            );
+          },
+          child: Container(
+            constraints: const BoxConstraints(minHeight: 48),
+            padding: const EdgeInsets.symmetric(
+              horizontal: GerfautSpacing.md,
+              vertical: GerfautSpacing.xs + 2,
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: incoming && !pending
+                        ? tokens.confirmedSurface
+                        : tokens.surfaceSunken,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(
+                    incoming
+                        ? LucideIcons.arrowDownLeft
+                        : LucideIcons.arrowUpRight,
+                    size: 15,
+                    color: incoming && !pending
+                        ? tokens.confirmed
+                        : tokens.textMuted,
+                    // Said out loud, since the word is not written any
+                    // more: the arrow, the sign and the colour say it
+                    // on screen, and this says it to a screen reader.
+                    semanticLabel: incoming ? 'Received' : 'Sent',
+                  ),
+                ),
+                const SizedBox(width: GerfautSpacing.sm),
+                // One line: the date reads in full, and the state is a
+                // glyph rather than a pill. "Sent" and "Received" are
+                // dropped on the phone, where the arrow, the sign and
+                // the colour already carry the direction three times.
+                Expanded(
+                  child: Text(
+                    dated
+                        ? formatTimestamp(tx.status.timestamp!)
+                        : truncateMiddle(tx.txid, head: 8, tail: 8),
+                    style: dated
+                        ? tokens.figureOf(size: 13)
+                        : tokens.data.copyWith(color: tokens.textMuted),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: GerfautSpacing.sm),
+                StatusGlyph(status: tx.status),
+                const SizedBox(width: GerfautSpacing.sm),
+                ListAmount(
+                  sats: tx.netSats,
+                  network: network,
+                  pending: pending,
+                ),
+                const SizedBox(width: 2),
+                Icon(
+                  LucideIcons.chevronRight,
+                  size: 16,
+                  color: tokens.textMuted,
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// UTXOs as dense rows: outpoint, address, status, value in sats.
+class _UtxoList extends ConsumerWidget {
+  const _UtxoList({required this.walletId, required this.network});
+
+  final String walletId;
+  final Network network;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    final utxos = ref.watch(utxosProvider(walletId));
+    // Every sync reads the list again: the rows already on screen stay
+    // there meanwhile, as the balance above does, rather than giving
+    // way to a loading line each time.
+    final value = utxos.isLoading || !utxos.hasError ? utxos.value : null;
+
+    if (value == null) {
+      if (utxos.hasError) {
+        return LoadFailure(
+          what: 'The UTXOs',
+          error: utxos.error,
+          onRetry: () => ref.invalidate(utxosProvider(walletId)),
+        );
+      }
+      return Center(
+        child: Text(
+          'Loading UTXOs…',
+          style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+        ),
+      );
+    }
+    if (value.isEmpty) {
+      return const EmptyState(
+        title: 'No unspent outputs',
+        hint: 'UTXOs appear here as soon as the wallet holds coins.',
+      );
+    }
+    return ListView.separated(
+      itemCount: value.length,
+      separatorBuilder: (_, _) =>
+          Divider(height: 1, thickness: 1, color: tokens.border),
+      itemBuilder: (context, index) {
+        final utxo = value[index];
+        return Container(
+          constraints: const BoxConstraints(minHeight: 48),
+          padding: const EdgeInsets.symmetric(
+            horizontal: GerfautSpacing.md,
+            vertical: GerfautSpacing.sm,
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    AddressChip(
+                      value: utxo.outpoint,
+                      head: 8,
+                      tail: 6,
+                      kind: 'outpoint',
+                      // The start of the txid and the output: enough to
+                      // tell two coins apart by ear.
+                      spoken:
+                          '${utxo.txid.substring(0, 8)}, output ${utxo.vout}',
+                    ),
+                    // No gap: each chip's touch target reaches past what
+                    // is drawn, and the two meet without overlapping.
+                    if (utxo.address != null)
+                      AddressChip(value: utxo.address!, kind: 'address')
+                    else
+                      // A script with no address form: said, as on
+                      // desktop, rather than left as a gap.
+                      Semantics(
+                        container: true,
+                        label: 'No address',
+                        child: ExcludeSemantics(
+                          child: Text(
+                            'n/a',
+                            style: tokens.data.copyWith(
+                              fontSize: 12,
+                              color: tokens.textMuted,
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: GerfautSpacing.sm),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  StatusPill(status: utxo.status),
+                  const SizedBox(height: GerfautSpacing.xs),
+                  StackedAmount(sats: utxo.valueSats, network: network),
+                ],
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}

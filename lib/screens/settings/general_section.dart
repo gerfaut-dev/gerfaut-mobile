@@ -1,0 +1,229 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import '../../src/bridge.dart';
+import '../../src/format.dart';
+import '../../src/models.dart';
+import '../../src/state.dart';
+import '../../theme/tokens.dart';
+import '../../widgets/price_credit.dart';
+import '../../widgets/choice_group.dart';
+import '../../widgets/facts.dart';
+import '../../widgets/section_card.dart';
+import '../../widgets/select_field.dart';
+import '../../widgets/setting_switch.dart';
+
+/// The General section: how amounts are shown, and which theme the app
+/// wears. Two cards, Display and Appearance.
+class GeneralSection extends ConsumerWidget {
+  const GeneralSection({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    final currency = ref.watch(fiatCurrencyProvider);
+    // What is on offer, in the core's order: the currencies with the
+    // sources that quote each, and the sources by name.
+    final table = ref.watch(priceTableProvider).value;
+    final chosen = table?.entryOf(currency);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SectionCard(
+          icon: LucideIcons.coins,
+          title: 'Display',
+          children: [
+            FieldLabel('Unit', tokens: tokens),
+            const SizedBox(height: GerfautSpacing.xs),
+            Text(
+              'Applies to every amount in the app.',
+              style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+            ),
+            const SizedBox(height: GerfautSpacing.sm),
+            ChoiceGroup<AmountUnit>(
+              label: 'Unit',
+              value: ref.watch(unitProvider),
+              options: [
+                for (final unit in AmountUnit.values)
+                  ChoiceOption(value: unit, label: unit.label),
+              ],
+              onChanged: (unit) => ref.read(unitProvider.notifier).set(unit),
+            ),
+            const SizedBox(height: GerfautSpacing.md),
+            SettingSwitch(
+              title: 'Fiat value',
+              hint: 'Shows the fiat value next to every amount.',
+              value: ref.watch(fiatEnabledProvider),
+              onChanged: (value) =>
+                  ref.read(fiatEnabledProvider.notifier).set(value),
+            ),
+            if (ref.watch(fiatEnabledProvider)) ...[
+              const SizedBox(height: GerfautSpacing.md),
+              FieldLabel('Currency', tokens: tokens),
+              const SizedBox(height: GerfautSpacing.sm),
+              _CurrencyField(
+                table: table,
+                selected: currency,
+                // The core keeps the source able to quote it: only
+                // CoinGecko serves the currencies past the common seven.
+                onChanged: (currency) =>
+                    ref.read(fiatCurrencyProvider.notifier).set(currency),
+              ),
+              const SizedBox(height: GerfautSpacing.md),
+              FieldLabel('Price source', tokens: tokens),
+              const SizedBox(height: GerfautSpacing.xs),
+              Text(
+                'Serves the fiat value and the overview price.',
+                style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+              ),
+              const SizedBox(height: GerfautSpacing.sm),
+              ChoiceGroup<PriceSource>(
+                label: 'Price source',
+                value: ref.watch(fiatSourceProvider),
+                options: [
+                  for (final entry in table?.sources ?? const <SourceEntry>[])
+                    ChoiceOption(
+                      value: entry.source,
+                      label: entry.label,
+                      // A source that does not quote the currency is
+                      // shown as unavailable, never silently broken.
+                      enabled: chosen?.sources.contains(entry.source) ?? false,
+                    ),
+                ],
+                onChanged: (source) =>
+                    ref.read(fiatSourceProvider.notifier).set(source),
+              ),
+              if (chosen?.reach == CurrencyReach.coingeckoOnly) ...[
+                const SizedBox(height: GerfautSpacing.sm),
+                Text(
+                  'CoinGecko is the only source that quotes '
+                  '${currency.code}.',
+                  style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+                ),
+              ],
+              const SizedBox(height: GerfautSpacing.sm),
+              _RatePreview(tokens: tokens),
+            ],
+          ],
+        ),
+        SectionCard(
+          icon: LucideIcons.sunMoon,
+          title: 'Appearance',
+          children: [
+            FieldLabel('Theme', tokens: tokens),
+            const SizedBox(height: GerfautSpacing.sm),
+            ChoiceGroup<ThemePref>(
+              label: 'Theme',
+              value: ref.watch(themeProvider),
+              options: [
+                for (final pref in ThemePref.values)
+                  ChoiceOption(
+                    value: pref,
+                    label: pref.label,
+                    icon: _themeIcons[pref],
+                  ),
+              ],
+              onChanged: (pref) => ref.read(themeProvider.notifier).set(pref),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// Glyph shown before each theme option; the label stays the semantic
+/// text.
+const Map<ThemePref, IconData> _themeIcons = {
+  ThemePref.light: LucideIcons.sun,
+  ThemePref.dark: LucideIcons.moon,
+  ThemePref.system: LucideIcons.monitor,
+};
+
+/// The display currency, every one the core lists: the ones every
+/// source quotes first, then the ones CoinGecko alone serves, each group
+/// announced.
+class _CurrencyField extends StatelessWidget {
+  const _CurrencyField({
+    required this.table,
+    required this.selected,
+    required this.onChanged,
+  });
+
+  /// Null until the core answered.
+  final PriceTable? table;
+  final FiatCurrency selected;
+  final ValueChanged<FiatCurrency> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return GerfautSelect<FiatCurrency>(
+      label: 'Display currency',
+      value: selected,
+      groups: [
+        for (final reach in CurrencyReach.values)
+          GerfautSelectGroup(
+            label: reach == CurrencyReach.every
+                ? 'Every source'
+                : 'CoinGecko only',
+            items: [
+              for (final entry in table?.currencies ?? const <CurrencyEntry>[])
+                if (entry.reach == reach)
+                  // The ISO code, then its name so thirty codes stay
+                  // readable.
+                  GerfautSelectItem(
+                    value: entry.currency,
+                    title: entry.currency.code,
+                    subtitle: entry.name,
+                  ),
+            ],
+          ),
+      ],
+      onChanged: onChanged,
+    );
+  }
+}
+
+class _RatePreview extends ConsumerWidget {
+  const _RatePreview({required this.tokens});
+
+  final GerfautTokens tokens;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final price = ref.watch(priceProvider);
+    ref.watch(relativeClockProvider);
+    if (price.hasError) {
+      // With a .onion node the core sends the price through Tor, and
+      // nothing at all while Tor is out of reach: that is not the
+      // source failing to answer.
+      final error = price.error;
+      final torDown = error is BridgeException && error.kind == 'tor';
+      return Text(
+        torDown
+            ? 'Tor is not available, so no price was asked. Amounts show '
+                  'without fiat until it is.'
+            : 'The price source did not answer. Amounts show without fiat '
+                  'until it does.',
+        style: tokens.bodySmall.copyWith(color: tokens.pending),
+      );
+    }
+    final quote = price.value;
+    if (quote == null) {
+      return Text(
+        'Fetching the current price…',
+        style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+      );
+    }
+    // The rate on screen is the source's: the screen credits it.
+    return CreditMark(
+      source: quote.source,
+      child: Text(
+        '1 BTC = ${formatFiatPrice(quote.rate, quote.currency)} · '
+        'updated ${relativeTime(quote.at)}',
+        style: tokens.figureOf(color: tokens.textMuted),
+      ),
+    );
+  }
+}

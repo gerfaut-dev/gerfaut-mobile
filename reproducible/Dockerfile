@@ -1,0 +1,117 @@
+# Pinned toolchain the Gerfaut Android releases are built with.
+#
+# Everything that shapes the APK is pinned here: the base image by
+# digest, the JDK by the base image, the Android SDK components by exact
+# revision, Flutter by tag and commit, Rust by version. What is not
+# pinned is the image's own build: apt pulls the live jammy pocket and
+# platform-tools has no revision.
+#
+# The image builds *unsigned* APKs; signing happens later, on the release
+# machine, with a key this image never sees.
+#
+# Build and run it through reproducible/build.sh, which also exports the
+# sources at a fixed path so no host path reaches the artifacts.
+
+# eclipse-temurin 17.0.20+8 on Ubuntu 22.04.5.
+FROM eclipse-temurin:17.0.20_8-jdk-jammy@sha256:400014962ad7224461f945bb1cc3d7d5a1927ce15b8245b72d9cedcda554cd2a
+
+# cmdline-tools 23.0. The checksum is the one Google publishes in
+# https://dl.google.com/android/repository/repository2-3.xml, as sha256.
+ARG ANDROID_CMDLINE_TOOLS=commandlinetools-linux-16111833_latest.zip
+ARG ANDROID_CMDLINE_TOOLS_SHA256=0877a1d048fe4a24efe2eff536ca4223f7adeb58648bb81909d33c446918cfa8
+# android-36 is the app's compileSdk and targetSdk; 35 and 34 are what
+# some of the Flutter plugins compile against, and Gradle needs each one.
+ARG ANDROID_PLATFORMS="android-36 android-35 android-34"
+# The default build-tools revision of Android Gradle Plugin 9.4.1.
+ARG ANDROID_BUILD_TOOLS=36.0.0
+# The NDK Flutter 3.47.7 defaults to, which every native part builds
+# with since flutter_zxing 3 stopped pinning an older one.
+ARG ANDROID_NDKS="28.2.13676358"
+# flutter_zxing and jni build their native code through CMake.
+ARG ANDROID_CMAKE=3.22.1
+ARG FLUTTER_VERSION=3.47.7
+ARG FLUTTER_COMMIT=abaf9c523780a608bd46686fd5e53740a07077f8
+ARG RUST_VERSION=1.99.1
+# rustup-init 1.29.1, the installer of the toolchain above, fetched as a
+# binary and checked against the checksum rustup publishes beside it
+# (rustup-init.sha256), never piped from a script into a shell.
+ARG RUSTUP_VERSION=1.29.1
+ARG RUSTUP_INIT_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TZ=UTC \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk \
+    FLUTTER_ROOT=/opt/flutter \
+    RUSTUP_HOME=/opt/rustup \
+    PATH=/opt/cargo/bin:/opt/flutter/bin:/opt/android-sdk/cmdline-tools/latest/bin:$JAVA_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Host tools. None of them end up in the artifacts: they fetch, unpack
+# and link. The versions are whatever the base image's suite ships, which
+# is why they are kept to tools with no influence on the output bytes.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl file git python3 unzip xz-utils zip \
+ && rm -rf /var/lib/apt/lists/*
+
+# Android SDK.
+RUN mkdir -p "$ANDROID_HOME/cmdline-tools" \
+ && curl -fsSL -o /tmp/cmdline-tools.zip \
+      "https://dl.google.com/android/repository/${ANDROID_CMDLINE_TOOLS}" \
+ && echo "${ANDROID_CMDLINE_TOOLS_SHA256}  /tmp/cmdline-tools.zip" | sha256sum -c - \
+ && unzip -q /tmp/cmdline-tools.zip -d /tmp/cmdline-tools \
+ && mv /tmp/cmdline-tools/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest" \
+ && rm -rf /tmp/cmdline-tools.zip /tmp/cmdline-tools \
+ && yes | sdkmanager --licenses > /dev/null \
+ && sdkmanager --install \
+      "build-tools;${ANDROID_BUILD_TOOLS}" \
+      "cmake;${ANDROID_CMAKE}" \
+      "platform-tools" \
+      $(for p in $ANDROID_PLATFORMS; do echo "platforms;$p"; done) \
+      $(for n in $ANDROID_NDKS; do echo "ndk;$n"; done) > /dev/null \
+ && rm -rf "$ANDROID_HOME/.downloadIntermediates"
+
+# Flutter, at the exact commit the tag points to.
+RUN git clone --depth 1 --branch "$FLUTTER_VERSION" \
+      https://github.com/flutter/flutter.git "$FLUTTER_ROOT" \
+ && test "$(git -C "$FLUTTER_ROOT" rev-parse HEAD)" = "$FLUTTER_COMMIT" \
+ && git config --global --add safe.directory "$FLUTTER_ROOT" \
+ && flutter config --no-analytics > /dev/null \
+ && flutter precache --android --no-ios --universal \
+ && flutter --version
+
+# Rust. Cargokit invokes `rustup run stable cargo`, which sets
+# RUSTUP_TOOLCHAIN and therefore ignores rust/rust-toolchain.toml; the
+# symlink below makes `stable` resolve to the pinned toolchain so the
+# two agree.
+RUN curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/rustup-init \
+      "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
+ && echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum -c - \
+ && chmod +x /tmp/rustup-init \
+ && CARGO_HOME=/opt/cargo /tmp/rustup-init -y \
+      --no-modify-path --profile minimal --default-toolchain "$RUST_VERSION" \
+ && rm /tmp/rustup-init \
+ && ln -s "$RUSTUP_HOME/toolchains/${RUST_VERSION}-x86_64-unknown-linux-gnu" \
+          "$RUSTUP_HOME/toolchains/stable-x86_64-unknown-linux-gnu" \
+ && CARGO_HOME=/opt/cargo rustup target add --toolchain "$RUST_VERSION" \
+      aarch64-linux-android armv7-linux-androideabi x86_64-linux-android \
+ && rustup run stable rustc --version | grep -q "$RUST_VERSION"
+
+# Downloaded dependencies only. Mounting a volume here across two builds
+# saves bandwidth; it cannot change the output, which is pinned by
+# Cargo.lock, pubspec.lock and the Gradle module versions.
+ENV CARGO_HOME=/cache/cargo \
+    GRADLE_USER_HOME=/cache/gradle \
+    PUB_CACHE=/cache/pub \
+    CARGO_INCREMENTAL=0 \
+    CI=true \
+    FLUTTER_SUPPRESS_ANALYTICS=true
+
+# The recipe travels with the sources rather than with the image: what
+# runs below is reproducible/entrypoint.sh of the very commit being
+# built, mounted read-only under /src. The image is nothing but the
+# toolchain.
+WORKDIR /build
+ENTRYPOINT ["bash", "/src/gerfaut-mobile/reproducible/entrypoint.sh"]

@@ -1,0 +1,2089 @@
+// A configurable in-memory bridge so widget tests never touch native
+// code. Screens observe the same contract as the real bridge, including
+// BridgeException errors.
+
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+import 'package:gerfaut/src/bridge.dart';
+import 'package:gerfaut/src/clipboard.dart';
+import 'package:gerfaut/src/disguise.dart';
+import 'package:gerfaut/src/documents.dart';
+import 'package:gerfaut/src/electrum.dart';
+import 'package:gerfaut/src/format.dart';
+import 'package:gerfaut/src/home_widgets.dart';
+import 'package:gerfaut/src/live.dart';
+import 'package:gerfaut/src/lock.dart';
+import 'package:gerfaut/src/models.dart';
+import 'package:gerfaut/widgets/price_credit.dart';
+import 'package:gerfaut/src/screen.dart';
+import 'package:gerfaut/src/state.dart';
+import 'package:gerfaut/src/window.dart';
+import 'package:url_launcher_platform_interface/link.dart';
+import 'package:url_launcher_platform_interface/url_launcher_platform_interface.dart';
+
+import 'core_fixtures.dart';
+
+/// The preferences of a vault that never stored any: the core's
+/// defaults, as it sends them.
+const kPreferences = Preferences(
+  unit: AmountUnit.btc,
+  masked: false,
+  fiat: false,
+  fiatCurrency: FiatCurrency('eur'),
+  priceSource: PriceSource.mempoolSpace,
+  notifyNewTx: false,
+  explorerAck: false,
+);
+
+const _everySource = [PriceSource.mempoolSpace, PriceSource.coingecko];
+
+CurrencyEntry _currency(String id, String name, {bool everySource = true}) {
+  return CurrencyEntry(
+    currency: FiatCurrency(id),
+    name: name,
+    reach: everySource ? CurrencyReach.every : CurrencyReach.coingeckoOnly,
+    sources: everySource ? _everySource : const [PriceSource.coingecko],
+  );
+}
+
+/// Part of the core's table, in its order: four currencies every source
+/// quotes, three only CoinGecko does.
+final kPriceTable = PriceTable(
+  currencies: [
+    _currency('eur', 'Euro'),
+    _currency('usd', 'US dollar'),
+    _currency('chf', 'Swiss franc'),
+    _currency('jpy', 'Japanese yen'),
+    _currency('inr', 'Indian rupee', everySource: false),
+    _currency('ngn', 'Nigerian naira', everySource: false),
+    _currency('try', 'Turkish lira', everySource: false),
+  ],
+  sources: const [
+    SourceEntry(source: PriceSource.mempoolSpace, label: 'mempool.space'),
+    SourceEntry(
+      source: PriceSource.coingecko,
+      label: 'CoinGecko',
+      credit: Credit(
+        text: 'Powered by CoinGecko',
+        url: 'https://www.coingecko.com',
+      ),
+    ),
+  ],
+  refresh: const Duration(seconds: 60),
+);
+
+/// What GerfautApp puts around every screen for the credit of the
+/// price, its observer and its slot, for a test that builds a screen
+/// in a MaterialApp of its own.
+Widget creditedApp({required ThemeData theme, required Widget home}) {
+  return Consumer(
+    builder: (context, ref, _) => MaterialApp(
+      theme: theme,
+      navigatorObservers: [CreditObserver(ref.read(creditBoardProvider))],
+      builder: (context, child) => CreditFrame(child: child!),
+      home: home,
+    ),
+  );
+}
+
+/// Puts [change] in what the screens hold, as hydration does with the
+/// preferences a vault stored.
+void holdPreferences(ProviderContainer container, PreferencesChange change) {
+  container
+      .read(preferencesProvider.notifier)
+      .hydrate(change.applyTo(container.read(preferencesProvider)));
+}
+
+/// The core's answer to a change of the preferences: the change made,
+/// and the currency winning, by [kPriceTable].
+Preferences coreChange(Preferences stored, PreferencesChange change) {
+  final next = change.applyTo(stored);
+  final entry = kPriceTable.entryOf(next.fiatCurrency);
+  if (entry == null || entry.sources.contains(next.priceSource)) return next;
+  return next.copyWith(priceSource: PriceSource.coingecko);
+}
+
+/// Captures external launches instead of touching the platform.
+/// Install with `UrlLauncherPlatform.instance = FakeUrlLauncher()`.
+class FakeUrlLauncher extends UrlLauncherPlatform {
+  final List<String> launched = [];
+
+  @override
+  LinkDelegate? get linkDelegate => null;
+
+  @override
+  Future<bool> canLaunch(String url) async => true;
+
+  @override
+  Future<bool> supportsMode(PreferredLaunchMode mode) async => true;
+
+  @override
+  Future<bool> supportsCloseForMode(PreferredLaunchMode mode) async => false;
+
+  @override
+  Future<bool> launchUrl(String url, LaunchOptions options) async {
+    launched.add(url);
+    return true;
+  }
+}
+
+/// Records what the window was asked to be instead of touching the
+/// activity.
+class FakeWindowGuard implements WindowGuard {
+  final List<bool> calls = [];
+
+  /// The last state asked for; null when nothing was asked yet.
+  bool? get secure => calls.isEmpty ? null : calls.last;
+
+  @override
+  Future<void> setSecure(bool secure) async => calls.add(secure);
+}
+
+/// Remembers which face the launcher shows instead of touching the
+/// package manager.
+/// Android's side of Live watch, as a test wants it: a service that
+/// starts or refuses to, a battery question answered yes or no, and a
+/// phone of any maker.
+class FakeLivePlatform implements LivePlatform {
+  FakeLivePlatform({
+    this.running = false,
+    this.wanted = false,
+    this.held = false,
+    this.batteryExempt = false,
+    this.grantsExemption = true,
+    this.opensBatteryQuestion = true,
+    this.maker = 'Google',
+    this.opensAppSettings = true,
+  });
+
+  bool running;
+  bool wanted;
+
+  /// Kept as the platform keeps it, outside any one process: a test
+  /// hands the same fake to a fresh container to stand for a restart.
+  bool held;
+  bool batteryExempt;
+  bool grantsExemption;
+
+  /// Whether the phone has the battery question, or at least its list.
+  bool opensBatteryQuestion;
+  String maker;
+  bool opensAppSettings;
+
+  /// Every call, in order, for assertions.
+  final List<String> calls = [];
+
+  @override
+  Future<bool> start() async {
+    calls.add('start');
+    wanted = true;
+    held = false;
+    running = true;
+    return true;
+  }
+
+  @override
+  Future<void> stop() async {
+    calls.add('stop');
+    wanted = false;
+    held = false;
+    running = false;
+  }
+
+  @override
+  Future<void> hold() async {
+    calls.add('hold');
+    wanted = false;
+    held = true;
+    running = false;
+  }
+
+  @override
+  Future<bool> isHeld() async => held;
+
+  @override
+  Future<bool> isRunning() async => running;
+
+  @override
+  Future<bool> isWanted() async => wanted;
+
+  @override
+  Future<bool> isBatteryExempt() async => batteryExempt;
+
+  @override
+  Future<bool?> requestBatteryExemption() async {
+    calls.add('askBattery');
+    if (!opensBatteryQuestion) return null;
+    if (grantsExemption) batteryExempt = true;
+    return batteryExempt;
+  }
+
+  @override
+  Future<String> manufacturer() async => maker;
+
+  @override
+  Future<bool> openAppSettings() async {
+    calls.add('appSettings');
+    return opensAppSettings;
+  }
+}
+
+class FakeDisguise implements Disguise {
+  FakeDisguise({this.disguised = false});
+
+  bool disguised;
+  bool widgetsEnabled = true;
+
+  /// What the package manager answers a swap with, when it refuses.
+  PlatformException? refusal;
+
+  /// Every call, in order, for assertions.
+  final List<String> calls = [];
+
+  @override
+  Future<bool> isDisguised() async => disguised;
+
+  @override
+  Future<void> setDisguised(bool disguised) async {
+    calls.add('disguise:$disguised');
+    final refusal = this.refusal;
+    if (refusal != null) throw refusal;
+    this.disguised = disguised;
+  }
+
+  @override
+  Future<void> setWidgetsEnabled(bool enabled) async {
+    calls.add('widgets:$enabled');
+    widgetsEnabled = enabled;
+  }
+}
+
+/// Counts what the screen was asked instead of touching the platform.
+class FakeScreenKeeper implements ScreenKeeper {
+  int holds = 0;
+  int releases = 0;
+
+  /// Whether the screen is being kept on right now.
+  bool get on => holds > releases;
+
+  @override
+  Future<void> keepOn() async => holds++;
+
+  @override
+  Future<void> release() async => releases++;
+}
+
+/// Holds what the widgets would read, and counts the redraws, instead
+/// of reaching the launcher.
+class FakeWidgetBoard implements WidgetBoard {
+  FakeWidgetBoard({Set<String> installed = const {}})
+    : installed = {...installed};
+
+  /// The provider names the fake reports as placed on a home screen.
+  Set<String> installed;
+
+  /// What the store holds right now: a removed key is gone from here.
+  final Map<String, String> data = {};
+
+  /// Every redraw asked for, in order.
+  final List<String> updates = [];
+
+  /// How many times the set of placed widgets was asked for.
+  int installedAsks = 0;
+
+  @override
+  Future<void> saveWidgetData(String key, String? value) async {
+    if (value == null) {
+      data.remove(key);
+    } else {
+      data[key] = value;
+    }
+  }
+
+  @override
+  Future<String?> readWidgetData(String key) async => data[key];
+
+  @override
+  Future<void> updateWidget(String name) async => updates.add(name);
+
+  @override
+  Future<Set<String>> installedWidgets() async {
+    installedAsks++;
+    return {...installed};
+  }
+}
+
+/// Records what was copied through the sensitive route instead of
+/// reaching the platform.
+class FakeSensitiveClipboard implements SensitiveClipboard {
+  FakeSensitiveClipboard({this.fails = false});
+
+  /// The clipboard refuses, as a platform may.
+  bool fails;
+  final List<String> copied = [];
+
+  /// Whether the platform takes the copy off a minute later, as the
+  /// Android activity does.
+  bool timed = true;
+
+  @override
+  Future<bool> copy(String text) async {
+    if (fails) throw PlatformException(code: 'clipboard');
+    copied.add(text);
+    return timed;
+  }
+}
+
+class FakeDocumentSaver implements DocumentSaver {
+  FakeDocumentSaver({this.answer = true});
+
+  /// What the dialog answers: true for a place picked, false for a
+  /// dialog waved away.
+  bool answer;
+
+  /// A failure to raise instead of answering.
+  DocumentSaveException? failure;
+
+  /// When set, the dialog stays up until this completes with its
+  /// answer, for a test that acts while it is.
+  Completer<bool>? hold;
+
+  /// Every call, answered or not: what a second tap would add.
+  int calls = 0;
+
+  final List<({Uint8List bytes, String filename, String mimeType})> saved = [];
+
+  @override
+  Future<bool> save({
+    required Uint8List bytes,
+    required String filename,
+    required String mimeType,
+  }) async {
+    calls++;
+    if (failure != null) throw failure!;
+    final answer = hold == null ? this.answer : await hold!.future;
+    if (answer) {
+      saved.add((bytes: bytes, filename: filename, mimeType: mimeType));
+    }
+    return answer;
+  }
+}
+
+/// Every field on screen keeps what is typed out of the keyboard's
+/// memory: names, descriptors, addresses, servers and secrets alike are
+/// neither learned, nor suggested, nor corrected.
+void expectKeyboardKeepsNothing(WidgetTester tester) {
+  final fields = tester.widgetList<TextField>(find.byType(TextField));
+  expect(fields, isNotEmpty);
+  for (final field in fields) {
+    expect(field.enableIMEPersonalizedLearning, isFalse);
+    expect(field.autocorrect, isFalse);
+    expect(field.enableSuggestions, isFalse);
+  }
+}
+
+/// Text on screen showing the mask, rich text included. Read as drawn:
+/// a screen reader is told "Hidden amount" in its place.
+Finder findMasked() => find.byWidgetPredicate(
+  (widget) =>
+      widget is RichText &&
+      widget.text
+          .toPlainText(includeSemanticsLabels: false)
+          .contains(maskedValue),
+);
+
+WalletMeta makeMeta({
+  String id = 'w1',
+  String name = 'Cold storage',
+  WalletIcon icon = WalletIcon.wallet,
+  Network network = Network.mainnet,
+  int totalSats = 0,
+  int gapLimit = 20,
+  SyncStamp? lastSync,
+  bool livePinned = false,
+  WalletKind kind = const DescriptorsKind(
+    external: 'wpkh(tpub.../0/*)#checksum',
+    internal: 'wpkh(tpub.../1/*)#checksum',
+    script: ScriptKind.segwit,
+  ),
+}) {
+  return WalletMeta(
+    id: id,
+    name: name,
+    icon: icon,
+    network: network,
+    kind: kind,
+    recognizedAs: RecognizedKind.multipathDescriptor,
+    createdAt: 1755000000,
+    gapLimit: gapLimit,
+    lastSync: lastSync,
+    cachedBalance: makeBalance(totalSats),
+    cachedTxCount: 0,
+    livePinned: livePinned,
+  );
+}
+
+BalanceSnapshot makeBalance(int totalSats, {int? pendingNetSats}) {
+  return BalanceSnapshot(
+    confirmed: totalSats,
+    trustedPending: 0,
+    untrustedPending: 0,
+    immature: 0,
+    total: totalSats,
+    pendingNetSats: pendingNetSats,
+  );
+}
+
+WalletSnapshot makeSnapshot({
+  WalletMeta? meta,
+  int totalSats = 0,
+  int? pendingNetSats,
+  List<TxSummary> txs = const [],
+  int tipHeight = 0,
+  bool truncated = false,
+}) {
+  return WalletSnapshot(
+    meta: meta ?? makeMeta(totalSats: totalSats),
+    balance: makeBalance(totalSats, pendingNetSats: pendingNetSats),
+    txs: txs,
+    tipHeight: tipHeight,
+    truncated: truncated,
+  );
+}
+
+/// One key of a policy fixture, with a stand-in for the key material.
+PolicyKey makePolicyKey(int index, {String? fingerprint, String? originPath}) {
+  final letter = String.fromCharCode(0x41 + index);
+  return PolicyKey(
+    id: 'k$index',
+    label: 'Key $letter',
+    fingerprint: fingerprint ?? '0000000$index',
+    originPath: originPath ?? "m/84'/1'/0'",
+    keyShort: 'tpubKey$letter…$index$index$index$index',
+  );
+}
+
+/// A single-key policy: one primary branch, open now. The default the
+/// fake bridge hands out for any wallet nobody configured.
+PolicySnapshot makePolicy({
+  PolicyKind kind = PolicyKind.singleKey,
+  ScriptKind script = ScriptKind.segwit,
+  String descriptor = 'wpkh(tpub.../0/*)#checksum',
+  String policy = 'pk(Key A)',
+  List<PolicyKey>? keys,
+  List<PolicyBranch>? branches,
+  int tipHeight = 800000,
+  int computedAt = 1750000000,
+  int coins = 0,
+  bool hasTimelocks = false,
+}) {
+  return PolicySnapshot(
+    kind: kind,
+    script: script,
+    descriptor: descriptor,
+    policy: policy,
+    keys: keys ?? [makePolicyKey(0)],
+    branches:
+        branches ??
+        const [
+          PolicyBranch(
+            id: 'b0',
+            role: BranchRole.primary,
+            label: 'Primary',
+            summary: 'Key A',
+            condition: KeyCondition(keyId: 'k0'),
+            timelocks: [],
+            state: SpendableNow(),
+            spendableNow: true,
+            tone: BranchTone.confirmed,
+          ),
+        ],
+    tipHeight: tipHeight,
+    computedAt: computedAt,
+    timeBasis: TimeBasis.wallClock,
+    coins: coins,
+    hasTimelocks: hasTimelocks,
+  );
+}
+
+ParsedInput makeParsedInput({
+  RecognizedKind kind = RecognizedKind.multipathDescriptor,
+  List<Network> networks = const [
+    Network.signet,
+    Network.testnet4,
+    Network.regtest,
+  ],
+  ParsedPayload payload = const DescriptorsPayload(
+    external: 'wpkh(tpub.../0/*)#checksum',
+    internal: 'wpkh(tpub.../1/*)#checksum',
+    script: ScriptKind.segwit,
+  ),
+  List<InputWarning> warnings = const [],
+  List<ScriptKind> scriptOptions = const [],
+  String? previewAddress,
+  DerivationChoice? derivation,
+  bool derivationEditable = false,
+}) {
+  return ParsedInput(
+    kind: kind,
+    networks: networks,
+    payload: payload,
+    warnings: warnings,
+    rawJson: '{}',
+    scriptOptions: scriptOptions,
+    previewAddress: previewAddress,
+    derivation:
+        derivation ?? (derivationEditable ? DerivationChoice.standard : null),
+    derivationEditable: derivationEditable,
+  );
+}
+
+PublicServer _esplora(String host, String url) => PublicServer(
+  id: host,
+  label: host,
+  protocol: ServerProtocol.esplora,
+  url: url,
+);
+
+PublicServer _electrum(
+  String host,
+  String label,
+  String url, {
+  bool selfSigned = false,
+}) => PublicServer(
+  id: 'electrum:$host',
+  label: label,
+  protocol: ServerProtocol.electrum,
+  url: url,
+  selfSigned: selfSigned,
+);
+
+/// The catalogue gerfaut-core publishes, network by network: the public
+/// Esplora instances first, then the Electrum servers. Mirrored here so
+/// the settings list under test is the one the app really offers.
+final Map<Network, List<PublicServer>> defaultPublicServers = {
+  Network.mainnet: [
+    _esplora('mempool.space', 'https://mempool.space/api'),
+    _esplora('blockstream.info', 'https://blockstream.info/api'),
+    _esplora('mempool.emzy.de', 'https://mempool.emzy.de/api'),
+    _electrum(
+      'blockstream.info',
+      'blockstream.info:700',
+      'ssl://blockstream.info:700',
+    ),
+    _electrum(
+      'electrum.blockstream.info',
+      'electrum.blockstream.info:50002',
+      'ssl://electrum.blockstream.info:50002',
+    ),
+    _electrum(
+      'electrum.diynodes.com',
+      'electrum.diynodes.com:50022',
+      'ssl://electrum.diynodes.com:50022',
+    ),
+    // The rest of Sparrow's list; these four sign their own certificate.
+    _electrum(
+      'bitcoin.lu.ke',
+      'bitcoin.lu.ke:50002',
+      'ssl://bitcoin.lu.ke:50002',
+      selfSigned: true,
+    ),
+    _electrum(
+      'electrum.emzy.de',
+      'electrum.emzy.de:50002',
+      'ssl://electrum.emzy.de:50002',
+      selfSigned: true,
+    ),
+    _electrum(
+      'electrum.bitaroo.net',
+      'electrum.bitaroo.net:50002',
+      'ssl://electrum.bitaroo.net:50002',
+      selfSigned: true,
+    ),
+    _electrum(
+      'fulcrum.sethforprivacy.com',
+      'fulcrum.sethforprivacy.com:50002',
+      'ssl://fulcrum.sethforprivacy.com:50002',
+      selfSigned: true,
+    ),
+  ],
+  Network.signet: [
+    _esplora('mempool.space', 'https://mempool.space/signet/api'),
+    _esplora('blockstream.info', 'https://blockstream.info/signet/api'),
+    _esplora('mempool.emzy.de', 'https://mempool.emzy.de/signet/api'),
+    _electrum(
+      'mempool.space',
+      'mempool.space:60602',
+      'ssl://mempool.space:60602',
+    ),
+  ],
+  Network.testnet4: [
+    _esplora('mempool.space', 'https://mempool.space/testnet4/api'),
+    _esplora('mempool.emzy.de', 'https://mempool.emzy.de/testnet4/api'),
+    _electrum(
+      'mempool.space',
+      'mempool.space:40002',
+      'ssl://mempool.space:40002',
+    ),
+    _electrum(
+      'blackie.c3-soft.com',
+      'blackie.c3-soft.com:57010',
+      'ssl://blackie.c3-soft.com:57010',
+    ),
+  ],
+  // A local chain has no public server, by definition.
+  Network.regtest: [],
+};
+
+/// The key the core records an acceptance against: `host:port`, scheme
+/// and path stripped. Mirrors `certificate_key` in gerfaut-core.
+String _certificateKey(String url) {
+  final parts = parseElectrumUrl(url);
+  return parts.port.isEmpty ? parts.host : '${parts.host}:${parts.port}';
+}
+
+class FakeBridge implements GerfautBridge {
+  FakeBridge({
+    List<WalletMeta>? wallets,
+    this.settings = const Settings(
+      activeNetwork: Network.mainnet,
+      backends: {},
+      appPrefs: {},
+      preferences: kPreferences,
+    ),
+    Map<String, WalletSnapshot>? snapshots,
+    Map<String, List<UtxoInfo>>? utxos,
+    Map<String, TxDetail>? txDetails,
+    Map<String, List<AddressEntry>>? addresses,
+    Map<String, AddressList>? addressLists,
+    this.onParse,
+    this.onParseWith,
+  }) : wallets = wallets ?? [],
+       snapshots = snapshots ?? {},
+       utxoMap = utxos ?? {},
+       txDetails = txDetails ?? {},
+       addresses = addresses ?? {},
+       addressLists = addressLists ?? {};
+
+  List<WalletMeta> wallets;
+  Settings settings;
+  Map<String, WalletSnapshot> snapshots;
+  Map<String, List<UtxoInfo>> utxoMap;
+
+  /// Keyed by `'$walletId:$txid'`.
+  Map<String, TxDetail> txDetails;
+  Map<String, List<AddressEntry>> addresses;
+  Map<String, AddressList> addressLists;
+
+  /// Classification hook; throw a [BridgeException] to simulate a
+  /// rejection (private material, unrecognized input, ...).
+  ParsedInput Function(String input)? onParse;
+
+  /// Classification hook that also sees the script type choice; takes
+  /// precedence over [onParse] when set.
+  ParsedInput Function(String input, ScriptKind? script)? onParseWith;
+
+  /// The script argument of every parseInput call, for assertions.
+  final List<ScriptKind?> parseScripts = [];
+
+  /// Every `set_app_pref` write, for assertions.
+  final Map<String, String> appPrefs = {};
+
+  /// Every backend save, for assertions.
+  final Map<Network, BackendConfig> savedBackends = {};
+
+  int addWalletCalls = 0;
+  int syncWalletCalls = 0;
+  int syncAllCalls = 0;
+  int loadMoreHistoryCalls = 0;
+
+  /// History round hook; the default reports nothing left to fetch.
+  /// Throw a [BridgeException] to simulate a failed round.
+  int Function(String id)? onLoadMoreHistory;
+
+  @override
+  Future<ParsedInput> parseInput(String input, {ScriptKind? script}) async {
+    parseScripts.add(script);
+    final parseWith = onParseWith;
+    if (parseWith != null) return parseWith(input, script);
+    final parse = onParse;
+    if (parse == null) {
+      throw const BridgeException('unrecognized_input', 'no parser configured');
+    }
+    return parse(input);
+  }
+
+  /// QR assembly hook; the default takes the last frame as the whole
+  /// code. Throw a [BridgeException] to simulate an unsupported
+  /// envelope or material that is not a wallet to watch.
+  FutureOr<QrProgress> Function(List<String> frames)? onAssembleQr;
+
+  /// The frame list of every assembleQr call, for assertions; a frame
+  /// sent to a held scan makes one call of every frame it holds.
+  final List<List<String>> assembleCalls = [];
+
+  /// Every frame sent to a held scan, one per call.
+  final List<String> pushedFrames = [];
+
+  /// Scans opened so far, and the numbers of those closed.
+  int scansOpened = 0;
+  final List<int> scansClosed = [];
+
+  /// The frames the held scan has, dropped once it answers with a
+  /// text or a refusal, as the core does.
+  List<String> _held = [];
+
+  @override
+  Future<int> openQrScan() async {
+    scansOpened++;
+    _held = [];
+    return scansOpened;
+  }
+
+  @override
+  Future<QrProgress> pushQrFrame(int scan, String frame) async {
+    pushedFrames.add(frame);
+    _held.add(frame);
+    try {
+      final progress = await assembleQr(List.of(_held));
+      if (progress.complete) _held = [];
+      return progress;
+    } catch (_) {
+      _held = [];
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> closeQrScan(int scan) async => scansClosed.add(scan);
+
+  @override
+  Future<QrProgress> assembleQr(List<String> frames) async {
+    assembleCalls.add(List.of(frames));
+    final assemble = onAssembleQr;
+    if (assemble != null) return assemble(frames);
+    return QrProgress(
+      format: QrFormat.plain,
+      received: 1,
+      total: 1,
+      complete: true,
+      text: frames.last,
+    );
+  }
+
+  /// Server address hook; the default refuses everything the way the
+  /// core refuses what is not an address. Return a [ScannedBackend] to
+  /// stand in for a QR code a node printed.
+  ScannedBackend Function(String input)? onParseBackend;
+
+  /// Every address handed to parseBackend, for assertions.
+  final List<String> parsedBackends = [];
+
+  @override
+  Future<ScannedBackend> parseBackend(String input) async {
+    parsedBackends.add(input);
+    final parse = onParseBackend;
+    if (parse == null) {
+      throw const BridgeException('server', 'nothing to read');
+    }
+    return parse(input);
+  }
+
+  /// What the core answers to the next adds instead of a wallet, when
+  /// set: the check it runs again on every wallet as it is created.
+  BridgeException? addWalletRefusal;
+
+  @override
+  Future<WalletMeta> addWallet(
+    String name,
+    ParsedInput parsed,
+    Network network,
+  ) async {
+    addWalletCalls += 1;
+    final refusal = addWalletRefusal;
+    if (refusal != null) throw refusal;
+    final meta = makeMeta(
+      id: 'w${wallets.length + 1}',
+      name: name,
+      network: network,
+    );
+    wallets = [...wallets, meta];
+    snapshots[meta.id] = makeSnapshot(meta: meta);
+    return meta;
+  }
+
+  @override
+  Future<List<WalletMeta>> listWallets([Network? network]) async {
+    final listed = [for (final wallet in wallets) _stamped(wallet)];
+    if (network == null) return listed;
+    return listed.where((w) => w.network == network).toList();
+  }
+
+  /// Wallets a sync has completed for, the way the core stamps them.
+  final Set<String> syncedIds = {};
+
+  WalletMeta _stamped(WalletMeta meta) {
+    if (meta.lastSync != null || !syncedIds.contains(meta.id)) return meta;
+    return WalletMeta(
+      id: meta.id,
+      name: meta.name,
+      icon: meta.icon,
+      network: meta.network,
+      kind: meta.kind,
+      recognizedAs: meta.recognizedAs,
+      createdAt: meta.createdAt,
+      gapLimit: meta.gapLimit,
+      scanGap: meta.scanGap,
+      lastSync: const SyncStamp(
+        at: 1755000000,
+        tipHeight: 100,
+        backend: 'mempool.space',
+      ),
+      cachedBalance: meta.cachedBalance,
+      cachedTxCount: meta.cachedTxCount,
+    );
+  }
+
+  /// Holds a snapshot in flight, for a test that looks at a wallet page
+  /// whose name is not known yet. Completed, the page loads.
+  Completer<void>? snapshotGate;
+
+  /// How many times a snapshot was read, for refresh assertions.
+  int snapshotCalls = 0;
+
+  @override
+  Future<WalletSnapshot> walletSnapshot(String id) async {
+    snapshotCalls++;
+    await snapshotGate?.future;
+    final snapshot = snapshots[id];
+    if (snapshot == null) {
+      throw BridgeException('wallet_not_found', 'wallet not found: $id');
+    }
+    return snapshot;
+  }
+
+  /// Policies by wallet id; a wallet with none gets a single-key one.
+  final Map<String, PolicySnapshot> policies = {};
+
+  /// Policy hook; throw a [BridgeException] to simulate a descriptor
+  /// the core cannot read, or return a future that never completes to
+  /// hold the screen in its loading state. Takes precedence over
+  /// [policies] when set.
+  FutureOr<PolicySnapshot> Function(String id)? onWalletPolicy;
+
+  @override
+  Future<PolicySnapshot> walletPolicy(String id) async {
+    final policy = onWalletPolicy;
+    if (policy != null) return await policy(id);
+    return policies[id] ?? makePolicy();
+  }
+
+  @override
+  Future<TxDetail> txDetail(String id, String txid) async {
+    final detail = txDetails['$id:$txid'];
+    if (detail == null) {
+      throw BridgeException('internal', 'no tx detail for $id:$txid');
+    }
+    return detail;
+  }
+
+  @override
+  Future<List<UtxoInfo>> utxos(String id) async => utxoMap[id] ?? [];
+
+  /// Lookahead of every receiveAddresses call, for assertions.
+  final List<int> receiveLookaheads = [];
+
+  /// Upcoming indexes a payment already reached, by wallet: the core
+  /// skips them.
+  final Map<String, Set<int>> paidAhead = {};
+
+  /// Wallets whose descriptor has no wildcard: one address, given once.
+  final Set<String> withoutWildcard = {};
+
+  @override
+  Future<List<AddressEntry>> receiveAddresses(String id, int lookahead) async {
+    receiveLookaheads.add(lookahead);
+    final base =
+        addresses[id] ??
+        const [AddressEntry(index: 0, address: 'tb1qexample', used: false)];
+    final first = base.first;
+    // Mirrors the core: the next unused entry plus up to `lookahead`
+    // upcoming unused ones, 200 at most, continuing past the configured
+    // list when it runs short.
+    final entries = [first];
+    if (withoutWildcard.contains(id)) return entries;
+    final paid = paidAhead[id] ?? const <int>{};
+    final wanted = (lookahead < 200 ? lookahead : 200) + 1;
+    for (var step = 1; entries.length < wanted; step++) {
+      if (paid.contains(first.index + step)) continue;
+      entries.add(
+        step < base.length
+            ? base[step]
+            : AddressEntry(
+                index: first.index + step,
+                address: '${first.address}$step',
+                used: false,
+              ),
+      );
+    }
+    return entries;
+  }
+
+  @override
+  Future<AddressList> addressList(String id) async {
+    final list = addressLists[id];
+    if (list != null) return list;
+    return const AddressList(external: [], internal: []);
+  }
+
+  /// Every export call's options, for assertions.
+  final List<ExportOptions> exportCalls = [];
+
+  /// Export hook; throw a [BridgeException] for a file the core could
+  /// not build.
+  FutureOr<ExportResult> Function(String id, ExportOptions options)?
+  onExportTransactions;
+
+  @override
+  Future<ExportResult> exportTransactions(
+    String id,
+    ExportOptions options,
+  ) async {
+    exportCalls.add(options);
+    final hook = onExportTransactions;
+    if (hook != null) return hook(id, options);
+    // Mirrors gerfaut-core's export::passes so counters and results
+    // agree in tests.
+    final txs = (snapshots[id]?.txs ?? []).where((tx) {
+      if (options.direction == ExportDirection.incoming && tx.netSats < 0) {
+        return false;
+      }
+      if (options.direction == ExportDirection.outgoing && tx.netSats >= 0) {
+        return false;
+      }
+      final unbounded = options.from == null && options.to == null;
+      if (!tx.status.confirmed) return options.includePending && unbounded;
+      final at = tx.status.timestamp;
+      if (at == null) return unbounded;
+      return (options.from == null || at >= options.from!) &&
+          (options.to == null || at <= options.to!);
+    }).toList();
+    final csv = StringBuffer(
+      'txid,date_utc,block_height,confirmations,direction,amount_sats,'
+      'amount_btc,fee_sats\n',
+    );
+    for (final tx in txs) {
+      csv.writeln(
+        '${tx.txid},,,,${tx.netSats >= 0 ? 'in' : 'out'},'
+        '${tx.netSats},,',
+      );
+    }
+    return ExportResult(csv: csv.toString(), rows: txs.length);
+  }
+
+  /// Sync hooks; throw a [BridgeException] to simulate a failure.
+  SyncReport Function(String id)? onSyncWallet;
+  SyncAllReport Function(Network? network)? onSyncAll;
+
+  /// Holds a sync in flight, for a test that looks at what the screen
+  /// does while one runs. Completed, the sync finishes.
+  Completer<void>? syncGate;
+
+  @override
+  Future<SyncReport> syncWallet(String id) async {
+    syncWalletCalls += 1;
+    await syncGate?.future;
+    final sync = onSyncWallet;
+    final report = sync != null
+        ? sync(id)
+        : SyncReport(
+            walletId: id,
+            newTxCount: 0,
+            balance: snapshots[id]?.balance ?? makeBalance(0),
+            tipHeight: 100,
+            tookMs: 1,
+            backend: 'mempool.space',
+          );
+    recordNews(report);
+    return report;
+  }
+
+  @override
+  Future<int> loadMoreHistory(String id) async {
+    loadMoreHistoryCalls += 1;
+    final load = onLoadMoreHistory;
+    return load != null ? load(id) : 0;
+  }
+
+  @override
+  Future<SyncAllReport> syncAll([Network? network]) async {
+    syncAllCalls += 1;
+    final sync = onSyncAll;
+    if (sync == null) return const SyncAllReport(reports: [], failures: []);
+    final report = sync(network);
+    report.reports.forEach(recordNews);
+    return report;
+  }
+
+  /// Held open by a test that wants the screen to go away while a
+  /// rename is still in flight.
+  Completer<void>? renameGate;
+
+  @override
+  Future<void> renameWallet(String id, String name) async {
+    final gate = renameGate;
+    if (gate != null) await gate.future;
+    _updateMeta(id, (meta) => meta.copyWith(name: name));
+  }
+
+  /// Every icon change, in order, for assertions.
+  final List<({String id, WalletIcon icon})> iconCalls = [];
+
+  @override
+  Future<void> setWalletIcon(String id, WalletIcon icon) async {
+    iconCalls.add((id: id, icon: icon));
+    if (!wallets.any((w) => w.id == id)) {
+      throw BridgeException('wallet_not_found', 'wallet not found: $id');
+    }
+    _updateMeta(id, (meta) => meta.copyWith(icon: icon));
+  }
+
+  /// Every pin set or lifted, in order, for assertions.
+  final List<({String id, bool pinned})> pinCalls = [];
+
+  /// Pin hook; throw a [BridgeException] to have the core refuse it.
+  void Function(String id, bool pinned)? onSetLivePinned;
+
+  @override
+  Future<void> setWalletLivePinned(String id, bool pinned) async {
+    pinCalls.add((id: id, pinned: pinned));
+    onSetLivePinned?.call(id, pinned);
+    if (!wallets.any((w) => w.id == id)) {
+      throw BridgeException('wallet_not_found', 'wallet not found: $id');
+    }
+    _updateMeta(id, (meta) => meta.copyWith(livePinned: pinned));
+  }
+
+  /// Every order handed over, in order, for assertions.
+  final List<List<String>> reorderCalls = [];
+
+  /// Reorder hook; throw a [BridgeException] to simulate a refusal.
+  void Function(List<String> ids)? onReorderWallets;
+
+  @override
+  Future<void> reorderWallets(List<String> ids) async {
+    reorderCalls.add(List.of(ids));
+    onReorderWallets?.call(ids);
+    // Mirrors the core: the listed wallets take the slots they occupy,
+    // in the order given; every other wallet stays where it is.
+    final byId = {for (final w in wallets) w.id: w};
+    for (final id in ids) {
+      if (!byId.containsKey(id)) {
+        throw BridgeException('wallet_not_found', 'wallet not found: $id');
+      }
+    }
+    if (ids.toSet().length != ids.length) {
+      throw coreFailure('invalid_input', 'a wallet is listed twice');
+    }
+    final moving = ids.toSet();
+    var next = 0;
+    wallets = [
+      for (final wallet in wallets)
+        if (moving.contains(wallet.id)) byId[ids[next++]]! else wallet,
+    ];
+  }
+
+  /// Rewrites one wallet's metadata everywhere the fake keeps it: the
+  /// core keeps one record per wallet, so the snapshot follows the list.
+  void _updateMeta(String id, WalletMeta Function(WalletMeta meta) change) {
+    wallets = [
+      for (final wallet in wallets)
+        if (wallet.id == id) change(wallet) else wallet,
+    ];
+    final snapshot = snapshots[id];
+    if (snapshot == null) return;
+    snapshots[id] = WalletSnapshot(
+      meta: change(snapshot.meta),
+      balance: snapshot.balance,
+      txs: snapshot.txs,
+      tipHeight: snapshot.tipHeight,
+      truncated: snapshot.truncated,
+    );
+  }
+
+  @override
+  Future<void> removeWallet(String id) async {
+    wallets = wallets.where((w) => w.id != id).toList();
+    snapshots.remove(id);
+  }
+
+  /// Thrown by every read of the settings, the way a vault that opened
+  /// and then would not answer surfaces.
+  Object? settingsError;
+
+  @override
+  Future<Settings> getSettings() async {
+    final failure = settingsError;
+    if (failure != null) throw failure;
+    // The vault carries the lock: the settings screen reads it there,
+    // the same place the core keeps it.
+    // A preference written since is read back, the way the core reads
+    // its own file: the screens that re-read the settings see it.
+    return Settings(
+      activeNetwork: settings.activeNetwork,
+      backends: settings.backends,
+      appPrefs: {...settings.appPrefs, ...appPrefs},
+      preferences: settings.preferences,
+      gapLimit: settings.gapLimit,
+      electrumCerts: settings.electrumCerts,
+      appLock: lock,
+      tor: settings.tor,
+    );
+  }
+
+  /// Rewrites the stored settings one field at a time, the way the
+  /// vault does: everything left out stays as it was.
+  void _store({
+    Network? activeNetwork,
+    Map<Network, BackendConfig>? backends,
+    int? gapLimit,
+    Map<String, String>? electrumCerts,
+    TorSettings? tor,
+    Preferences? preferences,
+  }) {
+    settings = Settings(
+      activeNetwork: activeNetwork ?? settings.activeNetwork,
+      backends: backends ?? settings.backends,
+      appPrefs: settings.appPrefs,
+      preferences: preferences ?? settings.preferences,
+      gapLimit: gapLimit ?? settings.gapLimit,
+      electrumCerts: electrumCerts ?? settings.electrumCerts,
+      appLock: settings.appLock,
+      tor: tor ?? settings.tor,
+    );
+  }
+
+  /// Network switch hook; throw a [BridgeException] to have the vault
+  /// refuse it.
+  void Function(Network network)? onSetActiveNetwork;
+
+  @override
+  Future<void> setActiveNetwork(Network network) async {
+    onSetActiveNetwork?.call(network);
+    _store(activeNetwork: network);
+  }
+
+  /// Last accepted gap limit, for assertions; null when never set.
+  int? lastGapLimitSet;
+
+  @override
+  Future<void> setGapLimit(int gapLimit) async {
+    // Mirrors the core bound: 1..=500 or CoreError::InvalidInput.
+    if (gapLimit < 1 || gapLimit > 500) {
+      throw coreFailure('invalid_input', 'gap limit must be between 1 and 500');
+    }
+    lastGapLimitSet = gapLimit;
+    _store(gapLimit: gapLimit);
+  }
+
+  /// Holds every backend save until completed: a vault slow to write.
+  Completer<void>? setBackendGate;
+
+  @override
+  Future<void> setBackend(Network network, BackendConfig config) async {
+    final gate = setBackendGate;
+    if (gate != null) await gate.future;
+    onSetBackend?.call(network, config);
+    savedBackends[network] = config;
+    _store(backends: {...settings.backends, network: config});
+  }
+
+  /// Save hook; throw a [BridgeException] to have the core refuse the
+  /// backend. Nothing is saved then.
+  void Function(Network network, BackendConfig config)? onSetBackend;
+
+  /// Catalogue hook; throw a [BridgeException] to simulate a bridge
+  /// that cannot answer. The default serves [defaultPublicServers].
+  List<PublicServer> Function(Network network)? onPublicServers;
+
+  @override
+  Future<List<PublicServer>> publicServers(Network network) async {
+    final servers = onPublicServers;
+    if (servers != null) return servers(network);
+    return defaultPublicServers[network] ?? const [];
+  }
+
+  /// Certificate hook; the default reports one a public authority
+  /// vouches for. Return an [UnknownCertificate] or a
+  /// [ChangedCertificate] to exercise the acceptance dialogs.
+  CertificateStatus Function(String url)? onInspectCertificate;
+
+  /// Every inspected URL, in order, for assertions.
+  final List<String> inspectedCertificates = [];
+
+  /// Every accepted certificate, in order, for assertions.
+  final List<({String url, String fingerprint})> trustedCertificates = [];
+
+  /// Every forgotten host, in order, for assertions.
+  final List<String> forgottenCertificates = [];
+
+  /// Holds every certificate check until completed: a server that
+  /// takes its time to answer.
+  Completer<void>? inspectGate;
+
+  @override
+  Future<CertificateReport> inspectCertificate(String url) async {
+    inspectedCertificates.add(url);
+    final gate = inspectGate;
+    if (gate != null) await gate.future;
+    final inspect = onInspectCertificate;
+    return CertificateReport(
+      host: _certificateKey(url),
+      status: inspect != null ? inspect(url) : const TrustedCertificate(),
+    );
+  }
+
+  /// Both or neither, as the core: the save hook runs first, and a
+  /// refusal from it writes no certificate either.
+  @override
+  Future<void> setBackendTrusting(
+    Network network,
+    BackendConfig config,
+    String url,
+    String fingerprint,
+  ) async {
+    final gate = setBackendGate;
+    if (gate != null) await gate.future;
+    onSetBackend?.call(network, config);
+    // The core refuses a certificate for anything but this backend's
+    // Electrum server, and writes nothing then.
+    final server = switch (config) {
+      CustomElectrum(:final url) => url,
+      PublicEsplora(server: final id?) =>
+        (await publicServers(network))
+            .where((s) => s.id == id && s.protocol == ServerProtocol.electrum)
+            .map((s) => s.url)
+            .firstOrNull,
+      _ => null,
+    };
+    if (server == null || _certificateKey(server) != _certificateKey(url)) {
+      throw coreFailure(
+        'invalid_input',
+        'the certificate is not for the Electrum server of this backend',
+      );
+    }
+    trustedCertificates.add((url: url, fingerprint: fingerprint));
+    savedBackends[network] = config;
+    _store(
+      backends: {...settings.backends, network: config},
+      electrumCerts: {
+        ...settings.electrumCerts,
+        _certificateKey(url): fingerprint,
+      },
+    );
+  }
+
+  @override
+  Future<void> forgetCertificate(String host) async {
+    forgottenCertificates.add(host);
+    _store(electrumCerts: {...settings.electrumCerts}..remove(host));
+  }
+
+  @override
+  Future<void> setAppPref(String key, String value) async {
+    appPrefs[key] = value;
+  }
+
+  /// The preferences both apps keep, as the vault holds them.
+  Preferences get preferences => settings.preferences;
+
+  /// Puts preferences in the vault, the way another isolate's write
+  /// would land.
+  set preferences(Preferences stored) => _store(preferences: stored);
+
+  /// Every change asked of the preferences, for assertions.
+  final List<PreferencesChange> preferencesChanges = [];
+
+  /// Preferences hook; throw a [BridgeException] to have the vault
+  /// refuse the change. The default is the core's answer.
+  Preferences Function(Preferences stored, PreferencesChange change)
+  onSetPreferences = coreChange;
+
+  @override
+  Future<Preferences> setPreferences(PreferencesChange change) async {
+    preferencesChanges.add(change);
+    final stored = onSetPreferences(settings.preferences, change);
+    _store(preferences: stored);
+    return stored;
+  }
+
+  @override
+  Future<PriceTable> priceTable() async => kPriceTable;
+
+  /// Price hook, handed the pair the preferences name; throw a
+  /// [BridgeException] to simulate an unreachable source. The default
+  /// rate keeps fiat lines deterministic in tests.
+  PriceQuote Function(PriceSource source, FiatCurrency currency)? onFetchPrice;
+
+  @override
+  Future<PriceQuote> fetchPrice() async {
+    final source = settings.preferences.priceSource;
+    final currency = settings.preferences.fiatCurrency;
+    final fetch = onFetchPrice;
+    if (fetch != null) return fetch(source, currency);
+    return PriceQuote(
+      rate: 50000,
+      currency: currency,
+      source: source,
+      at: 1755000000,
+    );
+  }
+
+  // --- live watch ------------------------------------------------------
+
+  /// What the watch says it is; tests move it and push a status event.
+  LiveWatchStatus watchStatus = const LiveWatchStatus();
+  int liveStartCalls = 0;
+  int liveStopCalls = 0;
+  int liveTickCalls = 0;
+  bool usesTorValue = false;
+
+  /// The fan-out of the fake: every listener gets every event.
+  final StreamController<LiveEvent> liveController =
+      StreamController<LiveEvent>.broadcast();
+
+  /// The record the core keeps in the vault: `txid:stage` already
+  /// recorded as news. A confirmed entry covers the mempool stage too.
+  final Set<String> announced = {};
+
+  /// News a sync recorded and nobody has claimed yet, by wallet.
+  final Map<String, List<LiveTx>> news = {};
+
+  /// What the core does after every sync, whoever ran it: a wallet's
+  /// first sync is an import and records nothing; later ones record
+  /// each transaction and stage once.
+  void recordNews(SyncReport report) {
+    final id = report.walletId;
+    final first =
+        !syncedIds.contains(id) &&
+        !wallets.any((w) => w.id == id && w.lastSync != null);
+    syncedIds.add(id);
+    if (first) return;
+    void record(NewTx tx, TxStage stage) {
+      if (announced.contains('${tx.txid}:confirmed') ||
+          !announced.add('${tx.txid}:${stage.id}')) {
+        return;
+      }
+      news
+          .putIfAbsent(id, () => [])
+          .add(
+            LiveTx(
+              walletId: id,
+              txid: tx.txid,
+              netSats: tx.netSats,
+              stage: stage,
+            ),
+          );
+    }
+
+    for (final tx in report.newTxs) {
+      record(tx, tx.confirmed ? TxStage.confirmed : TxStage.mempool);
+    }
+    for (final tx in report.confirmedTxs) {
+      record(tx, TxStage.confirmed);
+    }
+  }
+
+  /// Every claim, by wallet id, in order.
+  final List<String> claims = [];
+
+  /// Set, the next run is refused with it, as the core refuses one
+  /// while another caller holds the watch.
+  BridgeException? runRefusal;
+
+  @override
+  Stream<LiveEvent> liveRun() {
+    // Attached to the fake watch the moment the run is listened to, as
+    // the core holds its events for the one caller.
+    StreamSubscription<LiveEvent>? inner;
+    late final StreamController<LiveEvent> out;
+    out = StreamController<LiveEvent>(
+      onListen: () {
+        liveStartCalls++;
+        final refusal = runRefusal;
+        if (refusal != null) {
+          out
+            ..addError(refusal)
+            ..close();
+          return;
+        }
+        if (watchStatus.state == WatchState.off) {
+          watchStatus = const LiveWatchStatus(
+            state: WatchState.connected,
+            transport: WatchTransport.electrum,
+            server: 'electrum.example',
+          );
+        }
+        inner = liveController.stream.listen((event) {
+          out.add(event);
+          if (event is LiveStopped) {
+            inner?.cancel();
+            out.close();
+          }
+        });
+        _breakRun = (failure) {
+          inner?.cancel();
+          out
+            ..addError(failure)
+            ..close();
+        };
+      },
+      onCancel: () => inner?.cancel(),
+    );
+    return out.stream;
+  }
+
+  void Function(Object failure)? _breakRun;
+
+  /// Cuts the run being listened to short, as the bridge does when the
+  /// core panics in it: an error, then the end.
+  void breakRun([
+    Object failure = const BridgeException('internal', internalFailure),
+  ]) {
+    watchStatus = const LiveWatchStatus();
+    _breakRun?.call(failure);
+    _breakRun = null;
+  }
+
+  @override
+  Future<void> liveStop() async {
+    liveStopCalls++;
+    watchStatus = const LiveWatchStatus();
+    // What the watch still held when it was told to stop, then its end.
+    drainedOnStop.forEach(liveController.add);
+    drainedOnStop.clear();
+    liveController.add(const LiveStopped());
+  }
+
+  /// Events the watch hands out between a stop and its end.
+  final List<LiveEvent> drainedOnStop = [];
+
+  @override
+  Future<void> liveTick() async => liveTickCalls++;
+
+  @override
+  Future<LiveWatchStatus> liveStatus() async => watchStatus;
+
+  /// What the core's watch takes, for the words under "This is my node".
+  WatchLimitsChoice liveLimitsChoice = const WatchLimitsChoice(
+    any: WatchLimits(perWallet: 200, total: 2000),
+    ownNode: WatchLimits(perWallet: 20000, total: 20000),
+  );
+
+  @override
+  Future<WatchLimitsChoice> liveLimits() async => liveLimitsChoice;
+
+  @override
+  Stream<LiveEvent> liveEvents() => liveController.stream;
+
+  @override
+  Future<List<LiveTx>> claimAnnouncements(String walletId) async {
+    claims.add(walletId);
+    return news.remove(walletId) ?? const [];
+  }
+
+  /// Every batch handed to the core for its words, with what the app let
+  /// them say, in order.
+  final List<({List<LiveTx> txs, NoticeContext context})> noticeAsks = [];
+
+  /// What the core answers instead of the default below.
+  List<TxNotice> Function(List<LiveTx> txs, NoticeContext context)?
+  onLiveNotices;
+
+  /// One notice per transaction, whose words say which transaction at
+  /// which stage, under the wallet's name. The core's own words, and
+  /// what the context does to them, are tested in the core: here a test
+  /// reads what reached the core and what was posted of its answer.
+  @override
+  Future<List<TxNotice>> liveNotices(
+    List<LiveTx> txs,
+    NoticeContext context,
+  ) async {
+    noticeAsks.add((txs: txs, context: context));
+    final answer = onLiveNotices;
+    if (answer != null) return answer(txs, context);
+    return [
+      for (final tx in txs)
+        TxNotice(
+          title: context.names[tx.walletId] ?? tx.walletId,
+          body:
+              '${tx.txid} · ${switch (tx.stage) {
+                TxStage.mempool => 'pending',
+                TxStage.confirmed => 'confirmed',
+                TxStage.dropped => 'no longer coming',
+              }}',
+          kind: tx.stage == TxStage.dropped
+              ? NoticeKind.dropped
+              : NoticeKind.transaction,
+          payment: (walletId: tx.walletId, txid: tx.payment),
+          walletId: tx.walletId,
+        ),
+    ];
+  }
+
+  @override
+  Future<bool> usesTor() async => usesTorValue;
+
+  /// The core's side of the update check; by default nothing is due
+  /// and nothing newer is out.
+  final FakeUpdates updates = FakeUpdates();
+
+  @override
+  Future<UpdateStatus> updateStatus(String currentVersion) async =>
+      updates.status;
+
+  @override
+  Future<UpdateStatus> updateSession(String currentVersion) async {
+    updates.sessions++;
+    if (updates.automatic && updates.due && updates.ask()) {
+      updates.due = false;
+    }
+    return updates.status;
+  }
+
+  @override
+  Future<UpdateStatus> checkUpdate(String currentVersion) async {
+    if (!updates.ask()) {
+      throw coreFailure('tor', 'tor: no proxy answers');
+    }
+    if (updates.offline) throw coreFailure('sync', 'offline');
+    // The answer is on screen: the core counts it as seen.
+    updates.dismissed = updates.available;
+    return updates.status;
+  }
+
+  @override
+  Future<void> dismissUpdate(String version) async {
+    updates.dismissed = version;
+  }
+
+  @override
+  Future<void> setUpdateAutomatic(bool automatic) async {
+    updates.automatic = automatic;
+  }
+
+  /// Preview hook; throw a [BridgeException] to simulate input the core
+  /// cannot decode. Without one, every input is refused as unreadable.
+  FutureOr<TxPreview> Function(String input, Network network)? onPreview;
+
+  /// Every preview call's input, for assertions.
+  final List<String> previewInputs = [];
+
+  @override
+  Future<TxPreview> previewTransaction(String input, Network network) async {
+    previewInputs.add(input);
+    final preview = onPreview;
+    if (preview == null) {
+      throw coreFailure(
+        'invalid_input',
+        'not a transaction: expected a PSBT (base64, hex or .psbt file) or '
+            'a signed transaction (hex or .txn file)',
+      );
+    }
+    return preview(input, network);
+  }
+
+  /// Broadcast hook; throw a [BridgeException] to simulate the node
+  /// refusing the transaction.
+  FutureOr<BroadcastReport> Function(Network network, String hex)? onBroadcast;
+
+  /// Every broadcast call's hex, for assertions.
+  final List<String> broadcastHexes = [];
+
+  /// What the vault keeps of the broadcasts, newest first, the way the
+  /// core keeps it: a send the network took at the head, in place of an
+  /// earlier one of the same txid.
+  final List<RecentBroadcast> keptBroadcasts = [];
+
+  @override
+  Future<BroadcastReport> broadcastTransaction(
+    Network network,
+    String hex,
+  ) async {
+    broadcastHexes.add(hex);
+    final broadcast = onBroadcast;
+    final report = broadcast != null
+        ? await broadcast(network, hex)
+        : BroadcastReport(
+            txid: fakeTxid,
+            backend: 'mempool.space',
+            at: 1755000000,
+          );
+    keptBroadcasts
+      ..removeWhere((kept) => kept.txid == report.txid)
+      ..insert(
+        0,
+        RecentBroadcast(
+          txid: report.txid,
+          network: network,
+          hex: hex,
+          backend: report.backend,
+          at: report.at,
+        ),
+      );
+    return report;
+  }
+
+  @override
+  Future<List<RecentBroadcast>> recentBroadcasts(Network network) async => [
+    for (final kept in keptBroadcasts)
+      if (kept.network == network) kept,
+  ];
+
+  @override
+  Future<void> forgetBroadcast(String txid) async {
+    keptBroadcasts.removeWhere((kept) => kept.txid == txid);
+  }
+
+  /// Status hook; the default reports the transaction waiting in the
+  /// mempool. Throw a [BridgeException] to simulate a backend that
+  /// cannot be reached.
+  FutureOr<BroadcastStatus> Function(Network network, String hex)? onStatus;
+
+  int statusCalls = 0;
+
+  @override
+  Future<BroadcastStatus> transactionStatus(Network network, String hex) async {
+    statusCalls += 1;
+    final status = onStatus;
+    if (status != null) return status(network, hex);
+    return BroadcastStatus(
+      txid: fakeTxid,
+      found: true,
+      confirmed: false,
+      confirmations: 0,
+      backend: 'mempool.space',
+      at: 1755000000,
+    );
+  }
+
+  /// Advanced import hook; the default routes to [parseInput] with the
+  /// script of the options, so screens keep their existing fakes.
+  FutureOr<ParsedInput> Function(String input, ImportOptions options)?
+  onParseWithOptions;
+
+  /// The options of every parseInputWithOptions call, for assertions.
+  final List<ImportOptions> parseOptions = [];
+
+  @override
+  Future<ParsedInput> parseInputWithOptions(
+    String input,
+    ImportOptions options,
+  ) async {
+    parseOptions.add(options);
+    final parse = onParseWithOptions;
+    if (parse != null) return parse(input, options);
+    return parseInput(input, script: options.script);
+  }
+
+  int rescanCalls = 0;
+
+  /// Rescan hook; the default behaves like a sync.
+  FutureOr<SyncReport> Function(String id)? onRescan;
+
+  @override
+  Future<SyncReport> rescanWallet(String id) async {
+    rescanCalls += 1;
+    final rescan = onRescan;
+    if (rescan == null) return syncWallet(id);
+    final report = await rescan(id);
+    recordNews(report);
+    return report;
+  }
+
+  /// The lock in place; null when none. Tests set it directly.
+  AppLock? lock;
+
+  /// The secret behind [lock]; every verify compares against it.
+  String lockSecret = '1234';
+  int lockFailures = 0;
+
+  /// Every lock operation, in order, for assertions.
+  final List<String> lockCalls = [];
+
+  @override
+  Future<AppLock?> appLock() async => lock;
+
+  @override
+  Future<void> setAppLock(
+    LockKind kind,
+    String secret, {
+    String? current,
+  }) async {
+    lockCalls.add('set:${kind.id}');
+    if (lock != null && current != lockSecret) {
+      throw const BridgeException('lock', 'wrong PIN or password');
+    }
+    lockSecret = secret;
+    lock = AppLock(kind: kind, biometric: lock?.biometric ?? false);
+  }
+
+  @override
+  Future<void> clearAppLock(String current) async {
+    lockCalls.add('clear');
+    if (current != lockSecret) {
+      throw const BridgeException('lock', 'wrong PIN or password');
+    }
+    lock = null;
+  }
+
+  /// Holds every verify until completed, the way the core's slow hash
+  /// holds a real one; null answers at once.
+  Completer<void>? verifyGate;
+
+  @override
+  Future<LockVerdict> verifyAppLock(String secret) async {
+    lockCalls.add('verify');
+    final gate = verifyGate;
+    if (gate != null) await gate.future;
+    if (lock == null) throw const BridgeException('lock', 'no lock is set');
+    if (secret == lockSecret) {
+      lockFailures = 0;
+      return const LockVerdict(unlocked: true, failures: 0, retryAfterSecs: 0);
+    }
+    lockFailures += 1;
+    return LockVerdict(
+      unlocked: false,
+      failures: lockFailures,
+      retryAfterSecs: lockFailures >= 3 ? 5 : 0,
+    );
+  }
+
+  @override
+  Future<void> setBiometricUnlock(bool enabled, String current) async {
+    lockCalls.add('biometric:$enabled');
+    final existing = lock;
+    if (existing == null) throw const BridgeException('lock', 'no lock is set');
+    if (current != lockSecret) {
+      throw const BridgeException('lock', 'wrong PIN or password');
+    }
+    lock = AppLock(kind: existing.kind, biometric: enabled);
+  }
+
+  /// Backup hooks. The defaults seal nothing: a bundle with one frame
+  /// per wallet, and a preview listing the fake's wallets.
+  FutureOr<BackupBundle> Function(BackupOptions options, String password)?
+  onExportBackup;
+  FutureOr<BackupPreview> Function(String source, String password)?
+  onPreviewBackup;
+  FutureOr<ImportReport> Function(
+    String source,
+    String password,
+    ImportChoices choices,
+  )?
+  onImportBackup;
+  final List<BackupOptions> backupExportCalls = [];
+  final List<ImportChoices> importCalls = [];
+
+  @override
+  Future<BackupBundle> exportBackup(
+    BackupOptions options,
+    String password,
+  ) async {
+    backupExportCalls.add(options);
+    final export = onExportBackup;
+    if (export != null) return export(options, password);
+    final ids = options.walletIds;
+    final chosen = ids == null
+        ? wallets
+        : wallets.where((w) => ids.contains(w.id)).toList();
+    return BackupBundle(
+      data: 'R0ZCQUNLVVA=',
+      frames: [
+        for (var i = 0; i < chosen.length; i++)
+          'ur:bytes/${i + 1}-${chosen.length}/fake',
+      ],
+      walletCount: chosen.length,
+      sizeBytes: 512,
+    );
+  }
+
+  @override
+  Future<BackupPreview> previewBackup(String source, String password) async {
+    final preview = onPreviewBackup;
+    if (preview != null) return preview(source, password);
+    return BackupPreview(
+      createdAt: 1755000000,
+      hasSettings: false,
+      wallets: [
+        for (final (i, w) in wallets.indexed)
+          BackupWalletPreview(
+            index: i,
+            name: w.name,
+            network: w.network,
+            kind: w.kind,
+            alreadyWatched: true,
+          ),
+      ],
+    );
+  }
+
+  @override
+  Future<ImportReport> importBackup(
+    String source,
+    String password,
+    ImportChoices choices,
+  ) async {
+    importCalls.add(choices);
+    final import = onImportBackup;
+    if (import != null) return import(source, password, choices);
+    return const ImportReport(added: [], skipped: 0, settingsApplied: false);
+  }
+
+  /// Tor hooks. The default status reports the settings' mode with
+  /// nothing running; connect answers a system route.
+  TorStatus Function(TorSettings settings)? onTorStatus;
+  FutureOr<TorRoute> Function()? onTorConnect;
+  final List<TorSettings> torSettingsCalls = [];
+
+  @override
+  Future<TorStatus> torStatus() async {
+    final status = onTorStatus;
+    if (status != null) return status(settings.tor);
+    return TorStatus(
+      mode: settings.tor.mode,
+      socksProxy: settings.tor.socksProxy ?? '127.0.0.1:9050',
+      via: null,
+      socks: null,
+      running: false,
+      bootstrapped: false,
+      bootstrapPercent: 0,
+      error: null,
+      embeddedAvailable: true,
+    );
+  }
+
+  @override
+  Future<void> setTorSettings(TorSettings tor) async {
+    torSettingsCalls.add(tor);
+    settings = Settings(
+      activeNetwork: settings.activeNetwork,
+      backends: settings.backends,
+      appPrefs: settings.appPrefs,
+      preferences: settings.preferences,
+      gapLimit: settings.gapLimit,
+      electrumCerts: settings.electrumCerts,
+      appLock: settings.appLock,
+      tor: tor,
+    );
+  }
+
+  @override
+  Future<TorRoute> torConnect() async {
+    final connect = onTorConnect;
+    if (connect != null) return connect();
+    return const TorRoute(socks: '127.0.0.1:9050', via: TorVia.system);
+  }
+}
+
+/// A bridge whose preference writes wait for the test to answer each
+/// one, in the order they were asked.
+class GatedBridge extends FakeBridge {
+  final List<PreferencesChange> asked = [];
+  final List<Completer<void>> _gates = [];
+
+  /// Lets the oldest write waiting through.
+  void release() => _gates.removeAt(0).complete();
+
+  /// Has the vault refuse the oldest write waiting.
+  void refuse() =>
+      _gates.removeAt(0).completeError(coreFailure('vault', 'disk full'));
+
+  @override
+  Future<Preferences> setPreferences(PreferencesChange change) async {
+    asked.add(change);
+    final gate = Completer<void>();
+    _gates.add(gate);
+    await gate.future;
+    return super.setPreferences(change);
+  }
+}
+
+/// A well-formed txid for previews and reports.
+const String fakeTxid =
+    'f1e2d3c4b5a60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
+
+/// A signed-looking preview: one input from a watched wallet, one
+/// payment, one change output, a modest fee.
+TxPreview makePreview({
+  bool ready = true,
+  TxReadiness? readiness,
+  TxSource source = TxSource.psbt,
+  Network network = Network.mainnet,
+  List<TxWarning> warnings = const [],
+  int? feeSats = 1000,
+  double? feeRate = 7.1,
+  FeeRateBasis feeRateBasis = FeeRateBasis.exact,
+  bool amountsDeclared = false,
+  bool amountsListed = false,
+  String? feeUnknownReason,
+  List<TxInputPreview>? inputs,
+  List<TxOutputPreview>? outputs,
+}) {
+  return TxPreview(
+    txid: fakeTxid,
+    source: source,
+    network: network,
+    inputs:
+        inputs ??
+        const [
+          TxInputPreview(
+            txid: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90',
+            vout: 1,
+            valueSats: 100000,
+            address: 'bc1qspentfromcoldstorage',
+            signed: true,
+            wallet: WalletRef(id: 'w1', name: 'Cold storage'),
+          ),
+        ],
+    outputs:
+        outputs ??
+        const [
+          TxOutputPreview(
+            index: 0,
+            valueSats: 90000,
+            address: 'bc1qexternalpayee',
+          ),
+          TxOutputPreview(
+            index: 1,
+            valueSats: 9000,
+            address: 'bc1qchangeback',
+            wallet: WalletRef(id: 'w1', name: 'Cold storage'),
+            change: true,
+          ),
+        ],
+    feeSats: feeSats,
+    feeRateSatVb: feeRate,
+    feeRateBasis: feeRateBasis,
+    amountsDeclared: amountsDeclared,
+    amountsListed: amountsListed,
+    feeUnknownReason: feeUnknownReason,
+    vsize: 141,
+    weight: 561,
+    size: 222,
+    version: 2,
+    locktime: 0,
+    rbf: true,
+    readiness: readiness ?? (ready ? TxReadiness.ready : TxReadiness.unsigned),
+    warnings: warnings,
+    hex: ready ? '0200000001deadbeef' : null,
+  );
+}
+
+/// The core's side of the update check, as a test sets it. Which
+/// release is newer, when a check is due and what counts as closed are
+/// the core's to decide, and tested there: this one does what the test
+/// tells it, so that the screens can be held to what it says.
+class FakeUpdates {
+  /// What a check finds: a release newer than the running one, or null
+  /// for nothing newer.
+  String? finds;
+
+  /// Checks get no answer.
+  bool offline = false;
+
+  /// Tor is needed and cannot be had: nothing goes out.
+  bool torDown = false;
+
+  /// The next session asks GitHub.
+  bool due = false;
+
+  bool automatic = true;
+
+  /// The newer release known.
+  String? available;
+
+  /// The release the notice was closed on.
+  String? dismissed;
+
+  bool torUnavailable = false;
+
+  /// How many sessions the app opened.
+  int sessions = 0;
+
+  /// How many times GitHub was asked.
+  int checks = 0;
+
+  UpdateStatus get status => UpdateStatus(
+    automatic: automatic,
+    announce: available != null && available != dismissed ? available : null,
+    available: available,
+    torUnavailable: torUnavailable,
+  );
+
+  /// One request to GitHub, as the core would make it; false when Tor
+  /// kept it from going.
+  bool ask() {
+    if (torDown) {
+      torUnavailable = true;
+      return false;
+    }
+    checks++;
+    torUnavailable = false;
+    if (!offline) available = finds;
+    return true;
+  }
+}
+
+/// Answers the phone's prompt the way a test asks it to: a strong
+/// biometric where [available], the outcome [passes] says, or [outcome]
+/// when set.
+class FakeBiometrics implements BiometricGate {
+  FakeBiometrics({
+    this.available = true,
+    this.passes = true,
+    this.outcome,
+    this.offers,
+  });
+
+  bool available;
+  bool passes;
+  BiometricOutcome? outcome;
+
+  /// What the Keystore says of the key the prompt unlocks.
+  KeyPresence keyed = KeyPresence.present;
+
+  /// What the phone offers, over what [available] says.
+  BiometricSupport? offers;
+  int prompts = 0;
+  int enrolls = 0;
+  int forgets = 0;
+
+  @override
+  Future<BiometricSupport> support() async =>
+      offers ?? (available ? BiometricSupport.strong : BiometricSupport.none);
+
+  @override
+  Future<bool> enroll(String reason) async {
+    enrolls++;
+    return passes;
+  }
+
+  @override
+  Future<BiometricOutcome> authenticate(String reason) async {
+    prompts++;
+    return outcome ??
+        (passes ? BiometricOutcome.passed : BiometricOutcome.refused);
+  }
+
+  @override
+  Future<KeyPresence> keyPresence() async => keyed;
+
+  @override
+  Future<void> forget() async => forgets++;
+}

@@ -1,0 +1,1003 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:gerfaut/app.dart';
+import 'package:gerfaut/widgets/notice.dart';
+import 'package:gerfaut/widgets/status_pill.dart';
+import 'package:gerfaut/widgets/sync_button.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:gerfaut/screens/wallet_home.dart';
+import 'package:gerfaut/src/bridge.dart';
+import 'package:gerfaut/src/format.dart';
+import 'package:gerfaut/src/models.dart';
+import 'package:gerfaut/src/state.dart';
+import 'package:gerfaut/theme/tokens.dart';
+
+import 'core_fixtures.dart';
+import 'fakes.dart';
+import 'menu.dart';
+import 'policy_fixtures.dart';
+
+void main() {
+  _utxoTests();
+
+  testWidgets('wallet home shows the balance and masks it on demand', (
+    tester,
+  ) async {
+    final meta = makeMeta(totalSats: 123456);
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta, totalSats: 123456)},
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [bridgeProvider.overrideWithValue(bridge)],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const WalletHomeScreen(walletId: 'w1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Cold storage'), findsOneWidget);
+    expect(
+      find.textContaining('0.00123456', findRichText: true),
+      findsOneWidget,
+    );
+    // One unit only: the balance never echoes the other unit.
+    expect(find.textContaining(formatSats(123456)), findsNothing);
+    expect(find.text('Never synced'), findsOneWidget);
+    // A wallet that never reached a backend never pretends to hold zero.
+    expect(find.text('Not synced yet.'), findsOneWidget);
+    expect(find.text('Receive'), findsOneWidget);
+
+    // The eye masks every amount, and the preference is persisted.
+    await pickFromMenu(tester, 'Hide balances');
+
+    expect(find.textContaining('0.00123456', findRichText: true), findsNothing);
+    expect(findMasked(), findsWidgets);
+    expect(bridge.preferences.masked, isTrue);
+  });
+
+  testWidgets('a mask the vault does not keep is said, and tried again', (
+    tester,
+  ) async {
+    // Room for the note above the page.
+    tester.view.physicalSize = const Size(800, 2400);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final meta = makeMeta(totalSats: 123456);
+    var refusals = 2;
+    final bridge =
+        FakeBridge(
+            wallets: [meta],
+            snapshots: {'w1': makeSnapshot(meta: meta, totalSats: 123456)},
+          )
+          ..onSetPreferences = (stored, change) {
+            if (refusals-- > 0) throw coreFailure('vault', 'disk full');
+            return coreChange(stored, change);
+          };
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [bridgeProvider.overrideWithValue(bridge)],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const WalletHomeScreen(walletId: 'w1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    const said = 'Balances are hidden in the app only.';
+    expect(find.text(said), findsNothing);
+
+    await pickFromMenu(tester, 'Hide balances');
+    // Hidden here all the same, and the screen does not pretend more.
+    expect(find.textContaining('0.00123456', findRichText: true), findsNothing);
+    expect(bridge.preferences.masked, isFalse);
+    expect(find.text(said), findsOneWidget);
+    // Nothing tries again on its own: the note says until when, and
+    // offers the try.
+    expect(
+      find.text(
+        'Gerfaut could not save the change. Until it is saved, the widget '
+        'and notifications may still show amounts.',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      tester.widget<GerfautNotice>(find.byType(GerfautNotice)).tone,
+      NoticeTone.alert,
+    );
+
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+    expect(bridge.preferences.masked, isTrue);
+    expect(find.text(said), findsNothing);
+    expect(findMasked(), findsWidgets);
+  });
+
+  testWidgets('a failed sync stays visible on the wallet screen', (
+    tester,
+  ) async {
+    const stamp = SyncStamp(
+      at: 1755000000,
+      tipHeight: 100,
+      backend: 'mempool.space',
+    );
+    final meta = makeMeta(totalSats: 123456, lastSync: stamp);
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta, totalSats: 123456)},
+    );
+    bridge.onSyncWallet = (_) =>
+        throw const BridgeException('sync', 'mempool.space: timed out');
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [bridgeProvider.overrideWithValue(bridge)],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const WalletHomeScreen(walletId: 'w1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Sync'));
+    await tester.pumpAndSettle();
+
+    // Freshness line, the reason under it, and the balance note: the
+    // snackbar is not the only trace of the failure.
+    expect(find.textContaining('Sync failed · last sync'), findsOneWidget);
+    expect(find.text('mempool.space: timed out'), findsOneWidget);
+    expect(
+      find.text('Sync failed: showing the last known balance.'),
+      findsOneWidget,
+    );
+    // The last known balance stays on screen.
+    expect(
+      find.textContaining('0.00123456', findRichText: true),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a false proof is said in words, not as the core logs it', (
+    tester,
+  ) async {
+    final meta = makeMeta();
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta)},
+    );
+    bridge.onSyncWallet = (_) => throw const BridgeException(
+      'false_proof',
+      'sync failed via electrum.example.org: the server sent a false proof '
+          'of a confirmation',
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [bridgeProvider.overrideWithValue(bridge)],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const WalletHomeScreen(walletId: 'w1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Sync'));
+    await tester.pumpAndSettle();
+
+    expect(find.text(falseProofMessage), findsOneWidget);
+    expect(find.textContaining('electrum.example.org'), findsNothing);
+  });
+
+  testWidgets('the header keeps the sync and menus the rest', (tester) async {
+    final meta = makeMeta();
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta)},
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [bridgeProvider.overrideWithValue(bridge)],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const WalletHomeScreen(walletId: 'w1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Two glyphs in the bar, and the name keeps everything the other
+    // three gave up: it starts against the back arrow.
+    expect(find.byTooltip('Sync'), findsOneWidget);
+    expect(find.byTooltip('More'), findsOneWidget);
+    expect(find.byTooltip('Hide balances'), findsNothing);
+    expect(find.byTooltip('Broadcast'), findsNothing);
+    expect(find.byTooltip('Export CSV'), findsNothing);
+    expect(
+      tester.getRect(find.text('Cold storage')).left,
+      lessThan(tester.getRect(find.byTooltip('Sync')).left),
+    );
+
+    await openMenu(tester);
+    // The differentiator first, the rarest last.
+    const order = [
+      'Policy',
+      'Rename wallet',
+      'Hide balances',
+      'Export CSV',
+      'Broadcast',
+    ];
+    double top(String label) => tester.getTopLeft(find.text(label)).dy;
+    for (var i = 1; i < order.length; i++) {
+      expect(top(order[i]), greaterThan(top(order[i - 1])));
+      // A menu row is as big a target as any other control.
+      expect(
+        menuRowHeight(tester, order[i]),
+        greaterThanOrEqualTo(GerfautTouch.target),
+      );
+    }
+
+    await tester.tap(find.text('Broadcast'));
+    await tester.pumpAndSettle();
+    expect(find.text('SIGNED TRANSACTION OR PSBT'), findsOneWidget);
+
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+
+    await pickFromMenu(tester, 'Export CSV');
+    expect(
+      find.text("This wallet's transaction history as a CSV file."),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('the menu renames the wallet, and only once it can', (
+    tester,
+  ) async {
+    final meta = makeMeta();
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta)},
+    );
+    final gate = Completer<void>();
+    bridge.snapshotGate = gate;
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [bridgeProvider.overrideWithValue(bridge)],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const WalletHomeScreen(walletId: 'w1'),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // Nothing to rename while the name is unknown: the entry is not
+    // offered rather than offered dead.
+    await openMenu(tester);
+    expect(find.text('Rename wallet'), findsNothing);
+    await tester.tapAt(const Offset(20, 500));
+    await tester.pumpAndSettle();
+
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    // Once loaded, the menu opens the dialog the title opens.
+    await pickFromMenu(tester, 'Rename wallet');
+    final field = find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byType(TextField),
+    );
+    expect(tester.widget<TextField>(field).controller?.text, 'Cold storage');
+    await tester.enterText(field, 'Vault');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(bridge.wallets.single.name, 'Vault');
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('a transaction row reads in one line, date included', (
+    tester,
+  ) async {
+    final meta = makeMeta(totalSats: 5000);
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {
+        'w1': makeSnapshot(
+          meta: meta,
+          totalSats: 5000,
+          txs: [
+            TxSummary(
+              txid: 'a' * 64,
+              netSats: 5000,
+              feeSats: 141,
+              status: TxStatus.confirmed(height: 100, timestamp: 1755000000),
+              confirmations: 10,
+            ),
+            TxSummary(
+              txid: 'b' * 64,
+              netSats: -2000,
+              feeSats: 141,
+              status: TxStatus.pending(),
+              confirmations: 0,
+            ),
+          ],
+        ),
+      },
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [bridgeProvider.overrideWithValue(bridge)],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const WalletHomeScreen(walletId: 'w1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The direction is already an arrow, a sign and a colour: the word
+    // would be a fourth telling, and it costs the date its room.
+    expect(find.text('Received'), findsNothing);
+    expect(find.text('Sent'), findsNothing);
+    expect(find.text(formatTimestamp(1755000000)), findsOneWidget);
+    expect(find.byType(StatusPill), findsNothing);
+    expect(find.byType(StatusGlyph), findsNWidgets(2));
+    // Shape, not colour: a check for a mined transaction, a clock for
+    // one still waiting.
+    expect(find.byIcon(LucideIcons.check), findsOneWidget);
+    expect(find.byIcon(LucideIcons.clock), findsOneWidget);
+    // The whole row still fits the list rhythm.
+    expect(
+      tester.getSize(find.byIcon(LucideIcons.arrowDownLeft)).height,
+      lessThanOrEqualTo(48),
+    );
+  });
+
+  testWidgets('tapping the title renames the wallet, over the page', (
+    tester,
+  ) async {
+    final meta = makeMeta();
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta)},
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [bridgeProvider.overrideWithValue(bridge)],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const WalletHomeScreen(walletId: 'w1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // No pencil next to the title: the ink under the finger and the
+    // spoken label are the whole affordance.
+    expect(find.byIcon(LucideIcons.pencil), findsNothing);
+    expect(find.byTooltip('Rename this wallet'), findsOneWidget);
+    // And the title still starts where every other page's does.
+    expect(tester.getRect(find.text('Cold storage')).height, greaterThan(0));
+
+    await tester.tap(find.text('Cold storage'));
+    await tester.pumpAndSettle();
+
+    // The page is still behind it: renaming never navigates away.
+    expect(find.text('Rename wallet'), findsOneWidget);
+    expect(find.text('Receive'), findsOneWidget);
+    final field = find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byType(TextField),
+    );
+    expect(tester.widget<TextField>(field).controller?.text, 'Cold storage');
+    expectKeyboardKeepsNothing(tester);
+
+    await tester.enterText(field, 'Vault');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(bridge.wallets.single.name, 'Vault');
+    expect(find.text('Wallet renamed'), findsOneWidget);
+    // The header carries the new name without a reopen.
+    expect(find.text('Vault'), findsOneWidget);
+    expect(find.text('Cold storage'), findsNothing);
+
+    // Flush the snackbar timer.
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('a refused name keeps the dialog up, with the reason', (
+    tester,
+  ) async {
+    final meta = makeMeta();
+    final bridge = _RefusingRename(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta)},
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [bridgeProvider.overrideWithValue(bridge)],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const WalletHomeScreen(walletId: 'w1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Cold storage'));
+    await tester.pumpAndSettle();
+    final field = find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byType(TextField),
+    );
+    await tester.enterText(field, 'Vault');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(find.text('the vault could not be written'), findsOneWidget);
+    expect(tester.widget<TextField>(field).controller?.text, 'Vault');
+    expect(find.text('Wallet renamed'), findsNothing);
+
+    bridge.refusing = false;
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.text('Wallet renamed'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('leaving mid-rename does not fault on a dead screen', (
+    tester,
+  ) async {
+    final meta = makeMeta();
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta)},
+    );
+    final gate = Completer<void>();
+    bridge.renameGate = gate;
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [bridgeProvider.overrideWithValue(bridge)],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const WalletHomeScreen(walletId: 'w1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Cold storage'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.byType(TextField),
+      ),
+      'Vault',
+    );
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+
+    // The screen goes while the core is still writing. All that is
+    // left to do is refresh a page that no longer exists.
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [bridgeProvider.overrideWithValue(bridge)],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const SizedBox.shrink(),
+        ),
+      ),
+    );
+    // Not settled: Save turns its spinner for as long as the core
+    // writes.
+    await tester.pump(const Duration(milliseconds: 500));
+
+    gate.complete();
+    await tester.pumpAndSettle();
+
+    // The name was written; nothing was thrown on the way back.
+    expect(bridge.wallets.single.name, 'Vault');
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('an empty or unchanged name writes nothing', (tester) async {
+    final meta = makeMeta();
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta)},
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [bridgeProvider.overrideWithValue(bridge)],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const WalletHomeScreen(walletId: 'w1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    Finder field() => find.descendant(
+      of: find.byType(AlertDialog),
+      matching: find.byType(TextField),
+    );
+
+    // Cancelling closes on the name it opened with.
+    await tester.tap(find.text('Cold storage'));
+    await tester.pumpAndSettle();
+    await tester.enterText(field(), 'Vault');
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(bridge.wallets.single.name, 'Cold storage');
+
+    // An empty field, and the same name again: both close in silence.
+    await tester.tap(find.text('Cold storage'));
+    await tester.pumpAndSettle();
+    await tester.enterText(field(), '   ');
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AlertDialog), findsNothing);
+    expect(find.text('Wallet renamed'), findsNothing);
+
+    await tester.tap(find.text('Cold storage'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(find.text('Wallet renamed'), findsNothing);
+    expect(bridge.wallets.single.name, 'Cold storage');
+  });
+
+  testWidgets('the sync icon turns while the sync runs', (tester) async {
+    final meta = makeMeta(totalSats: 5000);
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta, totalSats: 5000)},
+    );
+    final gate = Completer<void>();
+    bridge.syncGate = gate;
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [bridgeProvider.overrideWithValue(bridge)],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const WalletHomeScreen(walletId: 'w1'),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    RotationTransition spinner() => tester.widget<RotationTransition>(
+      find.descendant(
+        of: find.byType(SyncButton),
+        matching: find.byType(RotationTransition),
+      ),
+    );
+    expect(spinner().turns.value, 0);
+
+    await tester.tap(find.byTooltip('Sync'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+
+    // Turning, and saying so in words as well: motion is never the only
+    // channel.
+    expect(spinner().turns.value, greaterThan(0));
+    expect(find.byTooltip('Syncing…'), findsOneWidget);
+    expect(find.textContaining('Syncing…'), findsWidgets);
+
+    gate.complete();
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('Sync'), findsOneWidget);
+  });
+  Widget homeOf(FakeBridge bridge) => ProviderScope(
+    retry: noRetry,
+    overrides: [bridgeProvider.overrideWithValue(bridge)],
+    child: MaterialApp(
+      theme: themeFrom(GerfautTokens.light, Brightness.light),
+      home: const WalletHomeScreen(walletId: 'w1'),
+    ),
+  );
+  const synced = SyncStamp(
+    at: 1755000000,
+    tipHeight: 100,
+    backend: 'mempool.space',
+  );
+
+  testWidgets('a settled balance says nothing about being settled', (
+    tester,
+  ) async {
+    final meta = makeMeta(totalSats: 123456, lastSync: synced);
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta, totalSats: 123456)},
+    );
+    await tester.pumpWidget(homeOf(bridge));
+    await tester.pumpAndSettle();
+
+    // The normal state does not announce itself: no note, no clock.
+    expect(find.text('All funds confirmed.'), findsNothing);
+    expect(find.textContaining('pending'), findsNothing);
+    expect(find.byIcon(LucideIcons.clock), findsNothing);
+  });
+
+  testWidgets('what is still out of a block reads under the total, signed', (
+    tester,
+  ) async {
+    final meta = makeMeta(totalSats: 173456, lastSync: synced);
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {
+        'w1': makeSnapshot(
+          meta: meta,
+          totalSats: 173456,
+          pendingNetSats: 50000,
+        ),
+      },
+    );
+    await tester.pumpWidget(homeOf(bridge));
+    await tester.pumpAndSettle();
+
+    // The total already counts the arriving funds; the line under it
+    // says how much of it is still waiting, in the unit of the total.
+    expect(
+      find.textContaining('0.00173456', findRichText: true),
+      findsOneWidget,
+    );
+    final figure = formatAmountSigned(50000, AmountUnit.btc);
+    expect(find.text(figure), findsOneWidget);
+    expect(find.byIcon(LucideIcons.clock), findsOneWidget);
+    expect(
+      tester.widget<Text>(find.text(figure)).style!.color,
+      GerfautTokens.light.pending,
+    );
+    expect(
+      find.text('Includes pending funds not yet confirmed.'),
+      findsNothing,
+    );
+
+    // Masked, the figure hides and the clock stays: that something is
+    // in flight is not an amount.
+    await pickFromMenu(tester, 'Hide balances');
+    expect(find.text(figure), findsNothing);
+    expect(find.byIcon(LucideIcons.clock), findsOneWidget);
+  });
+
+  testWidgets('a spend the chain has not taken yet reads as a minus', (
+    tester,
+  ) async {
+    final meta = makeMeta(totalSats: 69000, lastSync: synced);
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {
+        'w1': makeSnapshot(
+          meta: meta,
+          totalSats: 69000,
+          pendingNetSats: -31000,
+        ),
+      },
+    );
+    await tester.pumpWidget(homeOf(bridge));
+    await tester.pumpAndSettle();
+
+    final figure = formatAmountSigned(-31000, AmountUnit.btc);
+    expect(figure, startsWith('-'));
+    expect(find.text(figure), findsOneWidget);
+    expect(find.byIcon(LucideIcons.clock), findsOneWidget);
+  });
+
+  testWidgets('a sync failure outranks the pending line', (tester) async {
+    final meta = makeMeta(totalSats: 173456, lastSync: synced);
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {
+        'w1': makeSnapshot(
+          meta: meta,
+          totalSats: 173456,
+          pendingNetSats: 50000,
+        ),
+      },
+    );
+    bridge.onSyncWallet = (_) =>
+        throw const BridgeException('sync', 'mempool.space: timed out');
+    await tester.pumpWidget(homeOf(bridge));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('Sync'));
+    await tester.pumpAndSettle();
+
+    // A figure whose source is in doubt is not one to detail.
+    expect(
+      find.text('Sync failed: showing the last known balance.'),
+      findsOneWidget,
+    );
+    expect(find.byIcon(LucideIcons.clock), findsNothing);
+  });
+
+  testWidgets('the menu links the policy page, digest and all', (tester) async {
+    final meta = makeMeta(totalSats: 5000);
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta, totalSats: 5000)},
+    );
+    bridge.policies['w1'] = PolicySnapshot.fromJson(multisigPolicyJson());
+    await tester.pumpWidget(homeOf(bridge));
+    await tester.pumpAndSettle();
+
+    // The balance card is down to the figure it is for.
+    expect(find.text('Policy'), findsNothing);
+
+    await openMenu(tester);
+    // What the row used to show rides under the label instead.
+    expect(find.text('Policy'), findsOneWidget);
+    expect(find.text('2 of 3 keys'), findsOneWidget);
+
+    // The digest is structure, not an amount: the eye leaves it alone.
+    await tester.tap(find.text('Hide balances'));
+    await tester.pumpAndSettle();
+    await openMenu(tester);
+    expect(find.text('2 of 3 keys'), findsOneWidget);
+
+    await tester.tap(find.text('Policy'));
+    await tester.pumpAndSettle();
+    expect(find.text('2 of 3 keys sign.'), findsOneWidget);
+  });
+
+  testWidgets('a screen reader can open the policy page from the menu', (
+    tester,
+  ) async {
+    final handle = tester.ensureSemantics();
+    final meta = makeMeta(totalSats: 5000);
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta, totalSats: 5000)},
+    );
+    bridge.policies['w1'] = PolicySnapshot.fromJson(multisigPolicyJson());
+    await tester.pumpWidget(homeOf(bridge));
+    await tester.pumpAndSettle();
+
+    // One node for the whole entry, and a double-tap that acts: the
+    // ink well's own tap is excluded with the child semantics.
+    await openMenu(tester);
+    final row = find.semantics.byLabel('Policy: 2 of 3 keys');
+    expect(
+      row,
+      isSemantics(
+        label: 'Policy: 2 of 3 keys',
+        isButton: true,
+        hasTapAction: true,
+      ),
+    );
+    tester.semantics.tap(row);
+    await tester.pumpAndSettle();
+    expect(find.text('2 of 3 keys sign.'), findsOneWidget);
+    handle.dispose();
+  });
+
+  testWidgets('a policy that cannot be read still opens its page', (
+    tester,
+  ) async {
+    final meta = makeMeta();
+    final bridge = FakeBridge(
+      wallets: [meta],
+      snapshots: {'w1': makeSnapshot(meta: meta)},
+    );
+    bridge.onWalletPolicy = (_) =>
+        throw const BridgeException('descriptor', 'the policy cannot be read');
+    await tester.pumpWidget(homeOf(bridge));
+    await tester.pumpAndSettle();
+
+    // The entry stands without its digest, never disabled and never
+    // spinning, and still leads to the page that says why.
+    await openMenu(tester);
+    expect(find.text('Policy'), findsOneWidget);
+    await tester.tap(find.text('Policy'));
+    await tester.pumpAndSettle();
+    expect(find.byType(GerfautNotice), findsOneWidget);
+    expect(find.text('the policy cannot be read'), findsOneWidget);
+  });
+}
+
+/// The bridge of [FakeBridge], whose UTXO reads can be held or refused.
+class _RefusingRename extends FakeBridge {
+  _RefusingRename({required super.wallets, required super.snapshots});
+
+  bool refusing = true;
+
+  @override
+  Future<void> renameWallet(String id, String name) async {
+    if (refusing) {
+      throw const BridgeException('storage', 'the vault could not be written');
+    }
+    return super.renameWallet(id, name);
+  }
+}
+
+class _UtxoBridge extends FakeBridge {
+  _UtxoBridge({required super.wallets, required super.snapshots, super.utxos});
+
+  Completer<void>? gate;
+  bool fails = false;
+  int reads = 0;
+
+  @override
+  Future<List<UtxoInfo>> utxos(String id) async {
+    reads++;
+    await gate?.future;
+    if (fails) throw const BridgeException('internal', 'vault read failed');
+    return super.utxos(id);
+  }
+}
+
+const _txid =
+    'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
+
+Future<_UtxoBridge> _openUtxos(
+  WidgetTester tester, {
+  List<UtxoInfo>? utxos,
+  bool fails = false,
+}) async {
+  final meta = makeMeta(totalSats: 150000);
+  final bridge = _UtxoBridge(
+    wallets: [meta],
+    snapshots: {'w1': makeSnapshot(meta: meta, totalSats: 150000)},
+    utxos: {
+      'w1':
+          utxos ??
+          const [
+            UtxoInfo(
+              txid: _txid,
+              vout: 1,
+              address: 'tb1q6rz28mcfaxtmd6v789l9rrlrusdprr9pqcpvkl',
+              valueSats: 100000,
+              status: TxStatus.confirmed(height: 200000),
+              keychain: 'external',
+              derivationIndex: 0,
+            ),
+            UtxoInfo(
+              txid: _txid,
+              vout: 0,
+              address: null,
+              valueSats: 50000,
+              status: TxStatus.pending(),
+              keychain: null,
+              derivationIndex: null,
+            ),
+          ],
+    },
+  )..fails = fails;
+  await tester.pumpWidget(
+    ProviderScope(
+      retry: noRetry,
+      overrides: [bridgeProvider.overrideWithValue(bridge)],
+      child: MaterialApp(
+        theme: themeFrom(GerfautTokens.light, Brightness.light),
+        home: const WalletHomeScreen(walletId: 'w1'),
+      ),
+    ),
+  );
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('UTXOs'));
+  await tester.pumpAndSettle();
+  return bridge;
+}
+
+void _utxoTests() {
+  group('the UTXOs tab', () {
+    testWidgets('one row per coin: outpoint, address, state, amount', (
+      tester,
+    ) async {
+      final semantics = tester.ensureSemantics();
+      await _openUtxos(tester);
+
+      expect(find.textContaining('a1b2c3d4'), findsNWidgets(2));
+      expect(find.text('Confirmed'), findsOneWidget);
+      expect(find.text('Pending'), findsOneWidget);
+      expect(find.textContaining('0.00100000', findRichText: true), findsOne);
+      // A coin with no address says so rather than leaving a gap.
+      expect(find.text('n/a'), findsOneWidget);
+      expect(find.bySemanticsLabel('No address'), findsOneWidget);
+      // TalkBack hears what each chip is; the outpoint shortened, the
+      // address in full, since hearing it is how it is checked.
+      expect(
+        find.bySemanticsLabel(RegExp(r'^Copy outpoint a1b2c3d4, output 1')),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel(RegExp(r'^Copy outpoint a1b2c3d4, output 0')),
+        findsOneWidget,
+      );
+      expect(
+        find.bySemanticsLabel(
+          RegExp(r'^Copy address tb1q6rz28mcfaxtmd6v789l9rrlrusdprr9pqcpvkl'),
+        ),
+        findsOneWidget,
+      );
+      semantics.dispose();
+    });
+
+    testWidgets('hidden balances hide the coins too', (tester) async {
+      await _openUtxos(tester);
+      await pickFromMenu(tester, 'Hide balances');
+      await tester.tap(find.text('UTXOs'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('0.00100000', findRichText: true),
+        findsNothing,
+      );
+      expect(
+        find.textContaining('0.00050000', findRichText: true),
+        findsNothing,
+      );
+      expect(find.text('Confirmed'), findsOneWidget);
+    });
+
+    testWidgets('the rows stay on screen while a sync reads them again', (
+      tester,
+    ) async {
+      final bridge = await _openUtxos(tester);
+      final gate = bridge.gate = Completer<void>();
+      final container = ProviderScope.containerOf(
+        tester.element(find.text('Confirmed')),
+      );
+      container.invalidate(utxosProvider('w1'));
+      await tester.pump();
+      await tester.pump();
+      expect(bridge.reads, 2);
+      expect(find.text('Loading UTXOs…'), findsNothing);
+      expect(find.text('Confirmed'), findsOneWidget);
+      gate.complete();
+      await tester.pumpAndSettle();
+      expect(find.text('Confirmed'), findsOneWidget);
+    });
+
+    testWidgets('a list that cannot be read says so, and asks again', (
+      tester,
+    ) async {
+      final bridge = await _openUtxos(tester, fails: true);
+      expect(find.text('The UTXOs could not be loaded.'), findsOneWidget);
+      expect(find.text('vault read failed'), findsOneWidget);
+      expect(find.text('No unspent outputs'), findsNothing);
+
+      bridge.fails = false;
+      await tester.tap(find.text('Try again'));
+      await tester.pumpAndSettle();
+      expect(find.text('The UTXOs could not be loaded.'), findsNothing);
+      expect(find.text('Confirmed'), findsOneWidget);
+    });
+
+    testWidgets('no coins: says what the tab is for', (tester) async {
+      await _openUtxos(tester, utxos: const []);
+      expect(find.text('No unspent outputs'), findsOneWidget);
+      expect(
+        find.text('UTXOs appear here as soon as the wallet holds coins.'),
+        findsOneWidget,
+      );
+    });
+  });
+}

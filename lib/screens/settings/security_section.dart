@@ -1,0 +1,611 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import '../../src/bridge.dart';
+import '../../src/disguise.dart';
+import '../../src/lock.dart';
+import '../../src/models.dart';
+import '../../src/notifications.dart';
+import '../../src/state.dart';
+import '../../theme/tokens.dart';
+import '../../widgets/buttons.dart';
+import '../../widgets/choice_group.dart';
+import '../../widgets/notice.dart';
+import '../../widgets/password_field.dart';
+import '../../widgets/section_card.dart';
+import '../../widgets/setting_switch.dart';
+
+/// Why "Unlock with biometrics" is greyed on a phone whose only
+/// biometric is a weak one.
+String biometricsWeakNote(LockKind kind) =>
+    'Android rates the face or fingerprint unlock of this phone as weak, '
+    'easy to fool. Your ${kind == LockKind.pin ? 'PIN' : 'password'} stays '
+    'the way in.';
+
+/// The settings card that turns the lock on and changes its secret.
+class SecuritySection extends ConsumerStatefulWidget {
+  const SecuritySection({super.key});
+
+  @override
+  ConsumerState<SecuritySection> createState() => _SecuritySectionState();
+}
+
+class _SecuritySectionState extends ConsumerState<SecuritySection> {
+  String? _error;
+
+  /// The vault is the source of truth: invalidating the settings is
+  /// what tells the lock screen, through the gate that watches them.
+  void _afterChange() => ref.invalidate(settingsProvider);
+
+  Future<void> _setLock({LockKind? kind}) async {
+    final chosen = await showModalBottomSheet<_NewSecret>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _SetLockSheet(kind: kind, asksCurrent: kind != null),
+    );
+    if (chosen == null) return;
+    setState(() => _error = null);
+    try {
+      // Replacing a secret needs the one in place: an unlocked phone in
+      // the wrong hands must not be able to set a new PIN.
+      await ref
+          .read(bridgeProvider)
+          .setAppLock(chosen.kind, chosen.secret, current: chosen.current);
+      _afterChange();
+    } on BridgeException catch (error) {
+      if (mounted) setState(() => _error = error.message);
+    }
+  }
+
+  Future<void> _turnOff(LockKind kind) async {
+    // A disguise has no meaning without the PIN that opens it, so
+    // removing the lock takes the disguise off first, and the sheet
+    // says so before the secret is asked.
+    final disguised = ref.read(disguiseProvider).disguised;
+    final current = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _ConfirmSecretSheet(
+        kind: kind,
+        title: 'Turn off the app lock',
+        action: 'Turn off',
+        note: disguised
+            ? 'This also turns the disguise off: the calculator goes, and '
+                  'Gerfaut is back in the launcher.'
+            : null,
+      ),
+    );
+    if (current == null) return;
+    setState(() => _error = null);
+    try {
+      await ref.read(bridgeProvider).clearAppLock(current);
+    } on BridgeException catch (error) {
+      if (mounted) setState(() => _error = error.message);
+      return;
+    }
+    // The biometric key opened the lock, and goes with it.
+    await ref.read(biometricGateProvider).forget();
+    // Only once the core accepts: the launcher face is restored after
+    // the lock is gone, never before it is agreed.
+    if (disguised) await _swapFace(false);
+    _afterChange();
+  }
+
+  /// Puts the disguise on behind a confirmation, or takes it off at
+  /// once. The switch only offers "on" where a PIN lock stands.
+  Future<void> _setDisguise(bool on) async {
+    setState(() => _error = null);
+    if (!on) {
+      await _swapFace(false);
+      return;
+    }
+    final confirmed = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => DisguiseSheet(
+        liveOn: ref.read(backgroundCheckProvider) == BackgroundCheck.live,
+      ),
+    );
+    if (confirmed != true) return;
+    await _swapFace(true);
+  }
+
+  /// Asks the platform for the other launcher face. A package manager
+  /// that refuses is reported under the card; the switch stays where it
+  /// was, since the state only moves once the platform has.
+  Future<void> _swapFace(bool disguised) async {
+    try {
+      await ref.read(disguiseProvider.notifier).set(disguised);
+    } on PlatformException catch (error) {
+      if (mounted) {
+        setState(
+          () => _error =
+              error.message ?? 'The launcher entry could not be changed.',
+        );
+      }
+    }
+  }
+
+  /// Asks for the secret in place and hands it back, or null when the
+  /// sheet was dismissed.
+  Future<String?> _askSecret(LockKind kind, String title) {
+    setState(() => _error = null);
+    return showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _ConfirmSecretSheet(kind: kind, title: title),
+    );
+  }
+
+  Future<void> _setBiometric(bool on, LockKind kind) async {
+    // The secret first: whoever has their own finger enrolled on this
+    // phone must not be able to make it a key to this vault.
+    final current = await _askSecret(kind, 'Unlock with biometrics');
+    if (current == null) return;
+    final gate = ref.read(biometricGateProvider);
+    // Then make the key a strong biometric alone unlocks, and prove the
+    // phone answers on it, before storing a promise it cannot keep.
+    if (on && !await gate.enroll('Unlock Gerfaut')) {
+      if (mounted) {
+        setState(() => _error = 'The phone did not confirm. Nothing changed.');
+      }
+      return;
+    }
+    try {
+      await ref.read(bridgeProvider).setBiometricUnlock(on, current);
+    } on BridgeException catch (error) {
+      // The vault said no: a key made for nothing is not kept.
+      if (on) await gate.forget();
+      if (mounted) setState(() => _error = error.message);
+      return;
+    }
+    if (!on) await gate.forget();
+    _afterChange();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    // The vault is the source of truth for what is set; the lock
+    // provider only knows whether the screen is up right now.
+    final lock = ref.watch(settingsProvider).value?.appLock;
+    final biometrics = ref.watch(biometricSupportProvider).value;
+    final weakOnly = biometrics == BiometricSupport.weakOnly;
+    final disguised = ref.watch(disguiseProvider).disguised;
+    final pinLock = lock?.kind == LockKind.pin;
+
+    return SectionCard(
+      icon: LucideIcons.lock,
+      title: 'Security',
+      children: [
+        SettingSwitch(
+          title: 'App lock',
+          hint:
+              'Asked when Gerfaut opens and every time it comes back from '
+              'the background. The vault is encrypted either way; the lock '
+              'is what stops someone holding your unlocked phone.',
+          value: lock != null,
+          onChanged: (on) => on ? _setLock() : _turnOff(lock!.kind),
+        ),
+        if (lock != null) ...[
+          const SizedBox(height: GerfautSpacing.sm),
+          // Locking is the everyday gesture, changing the secret a
+          // rare one: one filled action, its counterpart beside it. A
+          // Wrap, so a large text size puts them on two lines.
+          Wrap(
+            spacing: GerfautSpacing.sm,
+            runSpacing: GerfautSpacing.sm,
+            children: [
+              SecondaryButton(
+                label: lock.kind == LockKind.pin
+                    ? 'Change PIN'
+                    : 'Change password',
+                icon: LucideIcons.pencil,
+                onPressed: () => _setLock(kind: lock.kind),
+              ),
+              PrimaryButton(
+                label: 'Lock now',
+                icon: LucideIcons.lock,
+                onPressed: ref.read(lockProvider.notifier).lockNow,
+              ),
+            ],
+          ),
+          // Shown wherever a biometric is set up. A weak one can be
+          // fooled, by a photograph for most face unlocks: it is never
+          // offered, and the card says why rather than leave the user
+          // looking for the switch. A sensor that cannot answer for now
+          // changes nothing: the switch stays as it is.
+          if (biometrics != null && biometrics != BiometricSupport.none) ...[
+            const SizedBox(height: GerfautSpacing.md),
+            SettingSwitch(
+              title: 'Unlock with biometrics',
+              hint: weakOnly ? biometricsWeakNote(lock.kind) : null,
+              value: !weakOnly && lock.biometric,
+              onChanged: weakOnly ? null : (on) => _setBiometric(on, lock.kind),
+            ),
+          ],
+          const SizedBox(height: GerfautSpacing.md),
+          SettingSwitch(
+            title: 'Disguise the app',
+            hint:
+                'Shows a calculator in the launcher. Open the wallet by '
+                'typing your PIN, then =.',
+            value: disguised,
+            // A password is not something you type into a calculator: the
+            // disguise needs a PIN lock.
+            onChanged: pinLock ? _setDisguise : null,
+          ),
+          if (!pinLock) ...[
+            const SizedBox(height: GerfautSpacing.xs),
+            Text(
+              'Needs a PIN lock: the PIN is what you type into the '
+              'calculator.',
+              style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+            ),
+          ],
+        ],
+        if (_error != null) ...[
+          const SizedBox(height: GerfautSpacing.sm),
+          // Said aloud as it appears.
+          Semantics(
+            liveRegion: true,
+            child: Text(
+              _error!,
+              style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// What a set-lock sheet comes back with.
+typedef _NewSecret = ({LockKind kind, String secret, String? current});
+
+/// Asks for a new secret, and for the current one when there is a lock
+/// to replace.
+class _SetLockSheet extends StatefulWidget {
+  const _SetLockSheet({this.kind, this.asksCurrent = false});
+
+  /// Fixed when changing an existing lock, chosen when turning it on.
+  final LockKind? kind;
+  final bool asksCurrent;
+
+  @override
+  State<_SetLockSheet> createState() => _SetLockSheetState();
+}
+
+class _SetLockSheetState extends State<_SetLockSheet> {
+  late LockKind _kind = widget.kind ?? LockKind.pin;
+  final _currentController = TextEditingController();
+  final _secretController = TextEditingController();
+  final _confirmController = TextEditingController();
+  String? _problem;
+
+  @override
+  void dispose() {
+    _currentController.dispose();
+    _secretController.dispose();
+    _confirmController.dispose();
+    super.dispose();
+  }
+
+  /// What is wrong with the pair, in the core's own terms so the screen
+  /// never promises something the core would refuse.
+  /// The core's own rules, checked before the sheet closes: a refusal
+  /// after it would take the typing with it. Lengths are counted in
+  /// characters, as the core counts them, not in UTF-16 units.
+  String? _check() {
+    final secret = _secretController.text;
+    final length = secret.characters.length;
+    if (_kind == LockKind.pin) {
+      if (length < 4 || length > 12 || !RegExp(r'^\d+$').hasMatch(secret)) {
+        return 'A PIN is 4 to 12 digits.';
+      }
+    } else if (length < 8) {
+      return 'A password is at least 8 characters.';
+    }
+    if (_confirmController.text != secret) return 'The two entries differ.';
+    return null;
+  }
+
+  void _submit() {
+    final problem = _check();
+    if (problem != null) {
+      setState(() => _problem = problem);
+      return;
+    }
+    Navigator.of(context).pop((
+      kind: _kind,
+      secret: _secretController.text,
+      current: widget.asksCurrent ? _currentController.text : null,
+    ));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    return Padding(
+      padding: EdgeInsets.only(
+        left: GerfautSpacing.md,
+        right: GerfautSpacing.md,
+        top: GerfautSpacing.md,
+        bottom: MediaQuery.viewInsetsOf(context).bottom + GerfautSpacing.md,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              widget.asksCurrent
+                  ? 'Change the app lock'
+                  : 'Turn on the app lock',
+              style: tokens.h2,
+            ),
+            const SizedBox(height: GerfautSpacing.md),
+            if (widget.kind == null) ...[
+              ChoiceGroup<LockKind>(
+                label: 'Kind',
+                value: _kind,
+                options: const [
+                  ChoiceOption(value: LockKind.pin, label: 'PIN'),
+                  ChoiceOption(value: LockKind.password, label: 'Password'),
+                ],
+                onChanged: (kind) => setState(() {
+                  _kind = kind;
+                  _problem = null;
+                }),
+              ),
+              const SizedBox(height: GerfautSpacing.xs),
+              Text(
+                _kind == LockKind.pin
+                    ? '4 to 12 digits'
+                    : 'At least 8 characters',
+                style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+              ),
+              const SizedBox(height: GerfautSpacing.md),
+            ],
+            if (widget.asksCurrent) ...[
+              PasswordField(
+                key: const Key('lock.current'),
+                label: _kind == LockKind.pin
+                    ? 'Current PIN'
+                    : 'Current password',
+                pin: _kind == LockKind.pin,
+                controller: _currentController,
+                onChanged: () => setState(() => _problem = null),
+              ),
+              const SizedBox(height: GerfautSpacing.md),
+            ],
+            PasswordField(
+              key: const Key('lock.secret'),
+              label: _kind == LockKind.pin ? 'New PIN' : 'New password',
+              pin: _kind == LockKind.pin,
+              controller: _secretController,
+              onChanged: () => setState(() => _problem = null),
+            ),
+            const SizedBox(height: GerfautSpacing.md),
+            PasswordField(
+              key: const Key('lock.confirm'),
+              label: 'Confirm',
+              pin: _kind == LockKind.pin,
+              controller: _confirmController,
+              onChanged: () => setState(() => _problem = null),
+              onSubmitted: _submit,
+            ),
+            if (_problem != null) ...[
+              const SizedBox(height: GerfautSpacing.sm),
+              // Said aloud as it appears.
+              Semantics(
+                liveRegion: true,
+                child: Text(
+                  _problem!,
+                  style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+                ),
+              ),
+            ],
+            const SizedBox(height: GerfautSpacing.md),
+            PrimaryButton(
+              label: widget.asksCurrent ? 'Change' : 'Turn on',
+              expand: true,
+              onPressed: _submit,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Asks only for the secret in place: turning the lock off is an unlock
+/// like any other.
+class _ConfirmSecretSheet extends StatefulWidget {
+  const _ConfirmSecretSheet({
+    required this.kind,
+    required this.title,
+    this.action = 'Confirm',
+    this.note,
+  });
+
+  final LockKind kind;
+  final String title;
+  final String action;
+
+  /// A line under the title, when turning the lock off does more than
+  /// that — taking a disguise off with it.
+  final String? note;
+
+  @override
+  State<_ConfirmSecretSheet> createState() => _ConfirmSecretSheetState();
+}
+
+class _ConfirmSecretSheetState extends State<_ConfirmSecretSheet> {
+  final _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    return Padding(
+      padding: EdgeInsets.only(
+        left: GerfautSpacing.md,
+        right: GerfautSpacing.md,
+        top: GerfautSpacing.md,
+        bottom: MediaQuery.viewInsetsOf(context).bottom + GerfautSpacing.md,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(widget.title, style: tokens.h2),
+          if (widget.note != null) ...[
+            const SizedBox(height: GerfautSpacing.sm),
+            Text(
+              widget.note!,
+              style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+            ),
+          ],
+          const SizedBox(height: GerfautSpacing.md),
+          PasswordField(
+            key: const Key('lock.current'),
+            label: widget.kind == LockKind.pin ? 'PIN' : 'Password',
+            pin: widget.kind == LockKind.pin,
+            controller: _controller,
+            autofocus: true,
+            onSubmitted: () => Navigator.of(context).pop(_controller.text),
+          ),
+          const SizedBox(height: GerfautSpacing.md),
+          PrimaryButton(
+            label: widget.action,
+            expand: true,
+            onPressed: () => Navigator.of(context).pop(_controller.text),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// The confirmation for turning the disguise on: what changes and what
+/// stays, said once as plain facts, and the one consequence that bites
+/// in a note of its own. Five amber panels in a row read as a wall of
+/// warnings, and a wall is skipped; one panel is read.
+class DisguiseSheet extends StatelessWidget {
+  const DisguiseSheet({super.key, this.liveOn = false});
+
+  /// Live watch is what looks for transactions right now: the sheet
+  /// says it is about to stop.
+  final bool liveOn;
+
+  /// What stops with the disguise when Live is on. Its permanent
+  /// notification is headed with the app's name, so it cannot stay, and
+  /// taking the disguise off later does not bring it back by itself.
+  static const String liveFact =
+      'Live watch is turned off. Turn it back on in Notifications once the '
+      'disguise is off.';
+
+  /// Every notification of the app's own is headed with its name.
+  static const String silenceFact =
+      'Gerfaut posts no notification while disguised: one would show its '
+      'name. Background checks stay silent, and home-screen widgets are '
+      'turned off.';
+
+  /// What Android keeps of the notifications posted before, out of the
+  /// app's reach: its history lists them under the app's name.
+  static const String historyFact =
+      "Android's notification history, if you turned it on, still lists "
+      "Gerfaut's earlier notifications. Turning it off in Android's "
+      'notification settings clears it.';
+
+  /// From Android 13 the recent apps keep no picture of the disguised
+  /// app (MainActivity.applyRecentsScreenshot); before, an older one
+  /// stays until replaced.
+  static const String recentsFact =
+      'Below Android 13, clear your recent apps once: Android may still '
+      'show an older Gerfaut thumbnail.';
+
+  static const List<String> facts = [
+    'The launcher will show a calculator named "Calculator".',
+    'Open the wallet by typing your PIN into it, then =.',
+    'Settings → Apps and the app store still list "Gerfaut".',
+    silenceFact,
+    historyFact,
+    recentsFact,
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    final muted = tokens.bodySmall.copyWith(color: tokens.textMuted);
+    return Padding(
+      padding: EdgeInsets.only(
+        left: GerfautSpacing.md,
+        right: GerfautSpacing.md,
+        top: GerfautSpacing.md,
+        bottom: MediaQuery.viewInsetsOf(context).bottom + GerfautSpacing.md,
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('Disguise the app', style: tokens.h2),
+            const SizedBox(height: GerfautSpacing.sm),
+            Text(
+              'Gerfaut hides behind a working calculator. What that means:',
+              style: tokens.body,
+            ),
+            const SizedBox(height: GerfautSpacing.sm),
+            for (final fact in [...facts, if (liveOn) liveFact])
+              Padding(
+                padding: const EdgeInsets.only(bottom: GerfautSpacing.xs),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    FirstLine(
+                      style: muted,
+                      child: Icon(
+                        LucideIcons.dot,
+                        size: 16,
+                        color: tokens.textMuted,
+                      ),
+                    ),
+                    const SizedBox(width: GerfautSpacing.sm),
+                    Expanded(child: Text(fact, style: muted)),
+                  ],
+                ),
+              ),
+            const SizedBox(height: GerfautSpacing.sm),
+            const GerfautNotice(
+              tone: NoticeTone.info,
+              message:
+                  'Forget the PIN and the app cannot be opened: it is the '
+                  'only way in.',
+            ),
+            const SizedBox(height: GerfautSpacing.md),
+            PrimaryButton(
+              label: 'Turn on the disguise',
+              expand: true,
+              onPressed: () => Navigator.of(context).pop(true),
+            ),
+            const SizedBox(height: GerfautSpacing.sm),
+            SecondaryButton(
+              label: 'Cancel',
+              expand: true,
+              onPressed: () => Navigator.of(context).pop(false),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
