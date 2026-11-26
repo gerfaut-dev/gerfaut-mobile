@@ -1190,6 +1190,61 @@ void main() {
       expect(newAddress, findsOneWidget);
     });
 
+    testWidgets('never offers an address shown in this visit, even when '
+        'keeping it failed', (tester) async {
+      useTallSurface(tester);
+      final bridge = revealedBridge()
+        ..revealError = const BridgeException('internal', 'vault busy');
+      await tester.pumpWidget(receiveApp(bridge));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Next address'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Next address'));
+      await tester.pumpAndSettle();
+      expect(find.text('UNUSED ADDRESS · INDEX 6'), findsOneWidget);
+      expect(bridge.revealCalls, contains(('w1', 6)));
+      await tester.tap(find.text('First unused'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(newAddress);
+      await tester.pumpAndSettle();
+      expect(find.text('UNUSED ADDRESS · INDEX 7'), findsOneWidget);
+    });
+
+    testWidgets('a sync brings New address back after none was found', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final meta = makeMeta(gapLimit: 500);
+      final bridge = FakeBridge(
+        wallets: [meta],
+        snapshots: {'w1': makeSnapshot(meta: meta)},
+        addresses: {
+          'w1': [
+            for (var i = 0; i <= maxReceivePeek; i++)
+              AddressEntry(
+                index: i,
+                address: 'tb1qgiven$i',
+                used: false,
+                revealed: true,
+              ),
+          ],
+        },
+      );
+      await tester.pumpWidget(receiveApp(bridge));
+      await tester.pumpAndSettle();
+      await tester.tap(newAddress);
+      await tester.pumpAndSettle();
+      expect(find.text(noneInReach), findsOneWidget);
+
+      // What a finished sync does: the wallet is read again.
+      ProviderScope.containerOf(tester.element(find.byType(ReceiveScreen)))
+          .invalidate(snapshotProvider('w1'));
+      await tester.pumpAndSettle();
+      expect(find.text(noneInReach), findsNothing);
+      expect(newAddress, findsOneWidget);
+    });
+
     testWidgets('a press before a wallet switch changes nothing in the '
         'other wallet', (tester) async {
       useTallSurface(tester);

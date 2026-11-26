@@ -83,6 +83,11 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
   /// asked once each, and again the next time one shows after a failure.
   final Set<(String, int)> _revealAsked = {};
 
+  /// Every address shown in this visit, by wallet and index: New address
+  /// passes them over before the core has kept them revealed, and even
+  /// if it failed to.
+  final Set<(String, int)> _shownHere = {};
+
   /// The list last on screen, kept while the next one is read: a longer
   /// peek is another request, and the address stays in view meanwhile.
   List<AddressEntry>? _shown;
@@ -129,7 +134,8 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
       if (!mounted || !identical(_newAddress, seek)) return;
       var fresh = -1;
       for (var at = position + 1; at < list.length; at++) {
-        if (!list[at].revealed) {
+        if (!list[at].revealed &&
+            !_shownHere.contains((widget.walletId, list[at].index))) {
           fresh = at;
           break;
         }
@@ -148,8 +154,9 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
   /// On screen: kept revealed. A single address has nothing to reveal
   /// and says it was always given.
   void _keepRevealed(AddressEntry entry) {
-    if (entry.revealed) return;
     final key = (widget.walletId, entry.index);
+    _shownHere.add(key);
+    if (entry.revealed) return;
     if (!_revealAsked.add(key)) return;
     final container = ProviderScope.containerOf(context, listen: false);
     keepReceiveAddressRevealed(container, key.$1, key.$2).catchError((_) {
@@ -180,6 +187,14 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
     final meta = ref.watch(snapshotProvider(widget.walletId)).value?.meta;
     final single = meta?.isSingleAddress ?? false;
     final gapLimit = meta?.gapLimit ?? 20;
+    // A sync read the wallet again since none was found: a payment may
+    // have freed addresses within reach, so New address comes back.
+    ref.listen(snapshotProvider(widget.walletId), (before, after) {
+      final reread = (before?.isLoading ?? false) && !after.isLoading;
+      if (reread && _newAddress is _NewAddressNone) {
+        setState(() => _newAddress = const _NewAddressIdle());
+      }
+    });
     // One more than the address on display: whether the core has a next
     // one to give is then known before the button is pressed. As far as
     // the screen looks while New address seeks one never shown.
