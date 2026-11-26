@@ -95,8 +95,8 @@ class PlatformFeatures {
   /// Home-screen widgets, and the periodic task that repaints them.
   final bool homeWidgets;
 
-  /// Gerfaut asks GitHub for its latest release and points to it. A
-  /// GitHub release holds the APKs and the desktop builds: on a system
+  /// Gerfaut asks the site for its latest release and points to its
+  /// download page, which holds the APKs: on a system
   /// whose store delivers the app, the app asks nothing and says
   /// nothing of versions.
   final bool releaseChecks;

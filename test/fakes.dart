@@ -2187,7 +2187,7 @@ class FakeUpdates {
   /// Tor is needed and cannot be had: nothing goes out.
   bool torDown = false;
 
-  /// The next session asks GitHub.
+  /// The next session asks the site.
   bool due = false;
 
   bool automatic = true;
@@ -2203,7 +2203,7 @@ class FakeUpdates {
   /// How many sessions the app opened.
   int sessions = 0;
 
-  /// How many times GitHub was asked.
+  /// How many times the site was asked.
   int checks = 0;
 
   UpdateStatus get status => UpdateStatus(
@@ -2213,7 +2213,7 @@ class FakeUpdates {
     torUnavailable: torUnavailable,
   );
 
-  /// One request to GitHub, as the core would make it; false when Tor
+  /// One request to the site, as the core would make it; false when Tor
   /// kept it from going.
   bool ask() {
     if (torDown) {

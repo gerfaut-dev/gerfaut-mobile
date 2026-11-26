@@ -22,8 +22,7 @@ import 'package:url_launcher_platform_interface/url_launcher_platform_interface.
 
 import 'fakes.dart';
 
-const String _releases =
-    'https://github.com/gerfaut-dev/gerfaut-mobile/releases/latest';
+const String _releases = 'https://gerfaut-wallet.com/download#android';
 
 /// A vault with one wallet, whose core already knows of [known], a
 /// newer release, and finds [finds] when a session asks.
@@ -211,7 +210,7 @@ void main() {
       expect(bridge.updates.checks, 0);
     });
 
-    testWidgets('the button opens the release page and nothing else', (
+    testWidgets('the button opens the download page and nothing else', (
       tester,
     ) async {
       final launcher = FakeUrlLauncher();
@@ -254,7 +253,7 @@ void main() {
       // One node each: the name, the hint and the tap together.
       for (final (label, hint) in [
         ('Later', 'Hides this notice until the next release'),
-        ('View release', 'Opens the release page in your browser'),
+        ('View release', 'Opens the download page in your browser'),
       ]) {
         final node = tester.getSemantics(
           find
@@ -369,8 +368,8 @@ void main() {
       // Two sentences, the most a setting's line may take.
       expect(
         find.text(
-          'Asks GitHub for the latest release at most once a day while '
-          'Gerfaut is unlocked, and downloads nothing. With a .onion node '
+          'Asks gerfaut-wallet.com for the latest version at most once '
+          'a day while Gerfaut is unlocked, and downloads nothing. With a .onion node '
           'it goes through Tor or not at all, and never while the app is '
           'disguised.',
         ),
@@ -390,7 +389,7 @@ void main() {
       expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
     });
 
-    testWidgets('its own button opens the release page and nothing else', (
+    testWidgets('its own button opens the download page and nothing else', (
       tester,
     ) async {
       final launcher = FakeUrlLauncher();
@@ -462,7 +461,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(bridge.updates.checks, 0);
       expect(find.textContaining('Tor could not be reached'), findsOne);
-      expect(find.textContaining('Could not reach the release'), findsNothing);
+      expect(find.textContaining('Could not check for updates'), findsNothing);
 
       // A check that goes out takes the line away.
       bridge.updates
@@ -493,7 +492,7 @@ void main() {
       await tester.tap(find.text('Check for updates'));
       await tester.pumpAndSettle();
       expect(
-        find.text('Could not reach the release page. Try again later.'),
+        find.text('Could not check for updates. Try again later.'),
         findsOneWidget,
       );
     });

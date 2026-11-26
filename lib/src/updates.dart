@@ -2,7 +2,7 @@
 // the app tells it that a session is open.
 //
 // The core decides all of it and keeps it in the vault: when it asks
-// GitHub on its own (at most once a day, never within a day of the
+// the site (gerfaut-wallet.com/releases/android.json) on its own (at most once a day, never within a day of the
 // first session, and a day Tor is needed and not running does not
 // count), which release is worth announcing (never a pre-release) and
 // which one the user closed. The request takes the route the syncs
@@ -32,10 +32,10 @@ import 'state.dart';
 /// release never announces itself to the people already running it.
 const String appVersion = '0.1.0';
 
-/// Where "View release" goes. The one place to change when the app is
-/// listed on a store.
-const String releasePageUrl =
-    'https://github.com/gerfaut-dev/gerfaut-mobile/releases/latest';
+/// Where "View release" and "Get" go: the Android card of the download
+/// page of the site. The one place to change when the app is listed on a
+/// store.
+const String releasePageUrl = 'https://gerfaut-wallet.com/download#android';
 
 /// Where "Report a problem" goes: the issues of this repository.
 const String issuesPageUrl =
@@ -73,7 +73,7 @@ class UpdateController extends Notifier<UpdateState> {
 
   GerfautBridge get _bridge => ref.read(bridgeProvider);
 
-  /// Reads what the core says, asking GitHub nothing. A core that does
+  /// Reads what the core says, asking the site nothing. A core that does
   /// not answer leaves everything as it was.
   Future<void> load() async {
     try {
@@ -90,7 +90,7 @@ class UpdateController extends Notifier<UpdateState> {
   ///
   /// Nothing while disguised: the notice names Gerfaut.
   Future<void> sessionStarted() async {
-    // Where the store delivers the app, GitHub is not asked at all.
+    // Where the store delivers the app, the site is not asked at all.
     if (!ref.read(platformFeaturesProvider).releaseChecks) return;
     final disguise = ref.read(disguiseProvider);
     if (!disguise.loaded || disguise.disguised) {

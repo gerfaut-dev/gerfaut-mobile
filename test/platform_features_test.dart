@@ -428,7 +428,7 @@ void main() {
   });
 
   group('the releases on iOS', () {
-    test('a session asks GitHub nothing', () async {
+    test('a session asks the site nothing', () async {
       final bridge = _fromAndroid();
       final container = ProviderContainer(
         retry: noRetry,

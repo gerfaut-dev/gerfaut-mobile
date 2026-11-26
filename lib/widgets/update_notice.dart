@@ -95,7 +95,7 @@ class UpdateNotice extends ConsumerWidget {
                     ),
                   ),
                   _Hinted(
-                    hint: 'Opens the release page in your browser',
+                    hint: 'Opens the download page in your browser',
                     child: PrimaryButton(
                       label: 'View release',
                       icon: LucideIcons.externalLink,
