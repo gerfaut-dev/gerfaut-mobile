@@ -7,10 +7,10 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../src/bridge.dart';
 import '../src/documents.dart';
+import '../src/import_files.dart';
 import '../src/lock.dart';
 import '../src/models.dart';
 import '../src/state.dart';
-import '../src/wallet_files.dart';
 import '../theme/tokens.dart';
 import '../widgets/app_bar.dart';
 import '../widgets/buttons.dart';
