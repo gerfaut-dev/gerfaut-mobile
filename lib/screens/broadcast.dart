@@ -9,6 +9,7 @@ import '../src/bridge.dart';
 import '../src/documents.dart';
 import '../src/explorer.dart';
 import '../src/format.dart';
+import '../src/import_files.dart';
 import '../src/lock.dart';
 import '../src/models.dart';
 import '../src/state.dart';
@@ -432,10 +433,16 @@ class _BroadcastScreenState extends ConsumerState<BroadcastScreen> {
                 spacing: GerfautSpacing.sm,
                 runSpacing: GerfautSpacing.sm,
                 children: [
-                  SecondaryButton(
-                    label: 'Import a file',
-                    icon: LucideIcons.fileUp,
-                    onPressed: decoding ? null : _importFile,
+                  // The line below is the button's hint, read with it.
+                  MergeSemantics(
+                    child: Semantics(
+                      hint: transactionFileHint,
+                      child: SecondaryButton(
+                        label: 'Import a file',
+                        icon: LucideIcons.fileUp,
+                        onPressed: decoding ? null : _importFile,
+                      ),
+                    ),
                   ),
                   SecondaryButton(
                     label: 'Scan a QR code',
@@ -443,6 +450,15 @@ class _BroadcastScreenState extends ConsumerState<BroadcastScreen> {
                     onPressed: decoding ? null : _scan,
                   ),
                 ],
+              ),
+              const SizedBox(height: GerfautSpacing.sm),
+              // Said before the picker opens, in sight: a tooltip would
+              // wait for a long press nobody thinks of.
+              ExcludeSemantics(
+                child: Text(
+                  transactionFileHint,
+                  style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+                ),
               ),
               if (recent.isNotEmpty) ...[
                 const SizedBox(height: GerfautSpacing.lg),

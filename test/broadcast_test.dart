@@ -12,6 +12,7 @@ import 'package:file_selector/file_selector.dart';
 import 'package:gerfaut/screens/broadcast.dart';
 import 'package:gerfaut/src/bridge.dart';
 import 'package:gerfaut/src/format.dart';
+import 'package:gerfaut/src/import_files.dart';
 import 'package:gerfaut/src/lock.dart';
 import 'package:gerfaut/src/models.dart';
 import 'package:gerfaut/src/state.dart';
@@ -124,6 +125,28 @@ void main() {
       final bytes = Uint8List.fromList([0x02, 0x00, 0x00, 0x00, 0x01]);
       expect(transactionTextOf(bytes), '0200000001');
     });
+  });
+
+  testWidgets('says which files Import a file opens, under the button', (
+    tester,
+  ) async {
+    await tester.pumpWidget(broadcastApp(FakeBridge()));
+    await tester.pumpAndSettle();
+    final button = tester.getRect(find.text('Import a file'));
+    final hint = find.text(transactionFileHint);
+    expect(hint, findsOneWidget);
+    // Under the two ways in, in sight before the picker opens.
+    expect(tester.getRect(hint).top, greaterThan(button.bottom));
+    // Read with the button, once.
+    expect(
+      tester.getSemantics(find.text('Import a file')),
+      isSemantics(
+        label: 'Import a file',
+        hint: transactionFileHint,
+        isButton: true,
+      ),
+    );
+    expect(find.bySemanticsLabel(transactionFileHint), findsNothing);
   });
 
   testWidgets('the preview needs something to decode', (tester) async {
