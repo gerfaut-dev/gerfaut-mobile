@@ -398,6 +398,17 @@ pub async fn receive_addresses(id: String, lookahead: u32) -> String {
     }
 }
 
+/// Keeps every receive address up to `index` revealed: shown on screen,
+/// it counts as handed out, a sync watches it, and it is never offered
+/// as new again. A wallet with a single address has nothing to reveal.
+pub async fn reveal_receive_address(id: String, index: u32) -> String {
+    let manager = try_json!(manager());
+    match manager.reveal_receive_address(&id, index).await {
+        Ok(()) => ok_json(),
+        Err(e) => core_error_json(&e),
+    }
+}
+
 /// Revealed addresses of a wallet, by keychain, with usage and balance.
 /// Capped by the core: an audit view, not an infinite scroll.
 pub async fn address_list(id: String) -> String {
