@@ -369,9 +369,9 @@ void main() {
       expect(
         find.text(
           'Asks gerfaut-wallet.com for the latest version at most once '
-          'a day while Gerfaut is unlocked, and downloads nothing. With a .onion node '
-          'it goes through Tor or not at all, and never while the app is '
-          'disguised.',
+          'a day while Gerfaut is unlocked, and downloads nothing. '
+          'With a .onion node it goes through Tor or not at all, and '
+          'never while the app is disguised.',
         ),
         findsOne,
       );

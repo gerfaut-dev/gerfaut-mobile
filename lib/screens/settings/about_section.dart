@@ -232,9 +232,9 @@ class _AboutSectionState extends ConsumerState<AboutSection> {
         // Worded as on the desktop; the disguise is the phone's alone.
         hint:
             'Asks gerfaut-wallet.com for the latest version at most once '
-            'a day while Gerfaut is unlocked, and downloads nothing. With a .onion '
-            'node it goes through Tor or not at all, and never while the '
-            'app is disguised.',
+            'a day while Gerfaut is unlocked, and downloads nothing. '
+            'With a .onion node it goes through Tor or not at all, and '
+            'never while the app is disguised.',
         value: automatic,
         onChanged: (on) => ref.read(updateProvider.notifier).setAutomatic(on),
       ),

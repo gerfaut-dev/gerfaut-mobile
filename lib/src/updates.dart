@@ -2,13 +2,14 @@
 // the app tells it that a session is open.
 //
 // The core decides all of it and keeps it in the vault: when it asks
-// the site (gerfaut-wallet.com/releases/android.json) on its own (at most once a day, never within a day of the
-// first session, and a day Tor is needed and not running does not
-// count), which release is worth announcing (never a pre-release) and
-// which one the user closed. The request takes the route the syncs
-// take: with a .onion node configured it goes through Tor, and with Tor
-// out of reach it does not go at all. The check of a session never
-// starts the built-in Tor for itself, as the price widget does not: it
+// the site (gerfaut-wallet.com/releases/android.json) on its own (at
+// most once a day, never within a day of the first session, and a day
+// Tor is needed and not running does not count), which release is
+// worth announcing (never a pre-release) and which one the user closed.
+// The request takes the route the syncs take: with a .onion node
+// configured it goes through Tor, and with Tor out of reach it does not
+// go at all. The check of a session never starts the built-in Tor for
+// itself, as the price widget does not: it
 // waits for the one a sync or Live brought up, and the next return to
 // the screen asks again. The app says when the wallets come on screen,
 // never while it is locked or disguised, and shows what comes back.

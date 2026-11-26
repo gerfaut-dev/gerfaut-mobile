@@ -96,9 +96,8 @@ class PlatformFeatures {
   final bool homeWidgets;
 
   /// Gerfaut asks the site for its latest release and points to its
-  /// download page, which holds the APKs: on a system
-  /// whose store delivers the app, the app asks nothing and says
-  /// nothing of versions.
+  /// download page, which holds the APKs: on a system whose store
+  /// delivers the app, the app asks nothing and says nothing of versions.
   final bool releaseChecks;
 
   /// The file pickers, the save dialog and the share sheet are screens
