@@ -35,11 +35,11 @@ const String appVersion = '0.1.0';
 /// Where "View release" goes. The one place to change when the app is
 /// listed on a store.
 const String releasePageUrl =
-    'https://github.com/gerfaut-wallet/gerfaut-mobile/releases/latest';
+    'https://github.com/gerfaut-dev/gerfaut-mobile/releases/latest';
 
 /// Where "Report a problem" goes: the issues of this repository.
 const String issuesPageUrl =
-    'https://github.com/gerfaut-wallet/gerfaut-mobile/issues';
+    'https://github.com/gerfaut-dev/gerfaut-mobile/issues';
 
 /// Whether a version of this app is a beta: every 0.x version is, and
 /// the label goes away by itself at 1.0.0.

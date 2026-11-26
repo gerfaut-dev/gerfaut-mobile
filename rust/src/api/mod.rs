@@ -1144,7 +1144,7 @@ pub async fn retry_price() -> String {
 }
 
 /// GitHub repository whose releases this build follows.
-const UPDATE_REPO: &str = "gerfaut-wallet/gerfaut-mobile";
+const UPDATE_REPO: &str = "gerfaut-dev/gerfaut-mobile";
 
 /// What to say about releases to someone running `current_version`, as
 /// the core decides it from what the vault keeps. Reads only. Returns a

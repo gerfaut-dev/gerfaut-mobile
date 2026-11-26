@@ -23,7 +23,7 @@ import 'package:url_launcher_platform_interface/url_launcher_platform_interface.
 import 'fakes.dart';
 
 const String _releases =
-    'https://github.com/gerfaut-wallet/gerfaut-mobile/releases/latest';
+    'https://github.com/gerfaut-dev/gerfaut-mobile/releases/latest';
 
 /// A vault with one wallet, whose core already knows of [known], a
 /// newer release, and finds [finds] when a session asks.
@@ -439,7 +439,7 @@ void main() {
       await tester.tap(find.text('Report a problem'));
       await tester.pumpAndSettle();
       expect(launcher.launched, [
-        'https://github.com/gerfaut-wallet/gerfaut-mobile/issues',
+        'https://github.com/gerfaut-dev/gerfaut-mobile/issues',
       ]);
     });
 
