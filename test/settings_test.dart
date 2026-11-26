@@ -311,6 +311,10 @@ void main() {
       await tester.pump();
       expect(bridge.retryPriceCalls, 1);
       expect(find.text('Trying…'), findsOneWidget);
+      expect(
+        tester.widget<SecondaryButton>(find.byType(SecondaryButton)).busy,
+        isTrue,
+      );
       // Pressed again while it runs, it asks nothing more.
       await tester.tap(find.text('Trying…'));
       await tester.pump();

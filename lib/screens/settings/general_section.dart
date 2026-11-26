@@ -220,7 +220,10 @@ class _RatePreviewState extends ConsumerState<_RatePreview> {
     // A failure of the bridge itself vouches for no reading: said as
     // the wait for one, which the next minute asks again.
     final reading = price.hasError ? null : price.value;
-    final quote = reading?.quote;
+    // In the currency chosen, like the amounts: while a new pair is
+    // asked, the reading in hand is still the old one's.
+    final chosen = ref.watch(fiatCurrencyProvider);
+    final quote = reading?.quote?.currency == chosen ? reading?.quote : null;
     final trouble = reading?.trouble;
     final Widget? rate = quote == null
         // The rate on screen is the source's: the screen credits it.
@@ -256,7 +259,10 @@ class _RatePreviewState extends ConsumerState<_RatePreview> {
           ? null
           : SecondaryButton(
               label: _trying ? 'Trying…' : 'Try again',
-              onPressed: _trying ? null : _retry,
+              // Busy, not off: it keeps its fill and its focus, and a
+              // press while it runs does nothing.
+              busy: _trying,
+              onPressed: _retry,
             ),
       actionsBelow: true,
     );
