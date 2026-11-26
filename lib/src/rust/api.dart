@@ -153,6 +153,12 @@ Future<String> utxos({required String id}) =>
 Future<String> receiveAddresses({required String id, required int lookahead}) =>
     RustLib.instance.api.crateApiReceiveAddresses(id: id, lookahead: lookahead);
 
+/// Keeps every receive address up to `index` revealed: shown on screen,
+/// it counts as handed out, a sync watches it, and it is never offered
+/// as new again. A wallet with a single address has nothing to reveal.
+Future<String> revealReceiveAddress({required String id, required int index}) =>
+    RustLib.instance.api.crateApiRevealReceiveAddress(id: id, index: index);
+
 /// Revealed addresses of a wallet, by keychain, with usage and balance.
 /// Capped by the core: an audit view, not an infinite scroll.
 Future<String> addressList({required String id}) =>

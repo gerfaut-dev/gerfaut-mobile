@@ -79,6 +79,19 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
   final _portController = TextEditingController(text: '50002');
   bool _tls = true;
 
+  /// The TLS switch follows the typed port, by the core's reading, until
+  /// the person sets it or a saved or scanned server fills the form. It
+  /// follows again only when the form starts over empty.
+  bool _tlsFollowsPort = true;
+
+  /// What the switch showed before the port first moved it; null while
+  /// it shows what it did then.
+  bool? _tlsBeforeFollowed;
+
+  /// Why the port moved the switch, said under it until it is touched
+  /// or back where it was.
+  String? _tlsNote;
+
   /// "This is my node", for a server of the user's own. Seeded from the
   /// saved backend and sent with every save of a custom one: a save that
   /// left it out would turn it off.
@@ -161,6 +174,10 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
     _hostController.text = electrum.host;
     _portController.text = electrum.port.isEmpty ? '50002' : electrum.port;
     _tls = electrum.tls;
+    // A saved Electrum server says its own TLS; an empty form lets the
+    // port say it.
+    _stopFollowingPort();
+    _tlsFollowsPort = config is! CustomElectrum;
     _ownNode = switch (config) {
       CustomEsplora(:final ownNode) ||
       CustomElectrum(:final ownNode) => ownNode,
@@ -229,6 +246,98 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
       _saveError = null;
       _scannedOnion = false;
     });
+  }
+
+  /// The host or the port of the Electrum form was typed in.
+  void _onElectrumFieldChanged() {
+    _onBackendFieldChanged();
+    _followPort();
+  }
+
+  /// `host:port` as typed, the way a scan hands it to the core; null
+  /// while either is still missing, or while the host holds a scheme of
+  /// its own, which would answer for TLS in the port's place.
+  String? get _electrumAddress {
+    final host = _hostController.text.trim();
+    final port = _portController.text.trim();
+    if (host.isEmpty || host.contains('://')) return null;
+    if (!RegExp(r'^\d+$').hasMatch(port)) return null;
+    return '$host:$port';
+  }
+
+  /// Lets the TLS switch follow the typed address while it is still the
+  /// form's to set. The core says what the address implies, with the
+  /// same reading a scan gets, so the port conventions live in one
+  /// place. A host it does not read as an address (a bare name such as
+  /// `umbrel`, half a name, an IPv6 literal out of its brackets) leaves
+  /// the port to decide alone. With no port to read either, the switch
+  /// goes back to where it was: a reason given for an address since
+  /// changed would no longer be true.
+  Future<void> _followPort() async {
+    if (!_tlsFollowsPort) return;
+    final address = _electrumAddress;
+    if (address == null) {
+      setState(_unfollowedTls);
+      return;
+    }
+    final port = int.parse(_portController.text.trim());
+    final bridge = ref.read(bridgeProvider);
+    Future<ScannedBackend?> read(String candidate) async {
+      try {
+        final backend = await bridge.parseBackend(candidate);
+        return backend.kind == 'electrum' && backend.port == port
+            ? backend
+            : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    final backend = await read(address) ?? await read('electrum.invalid:$port');
+    if (!mounted ||
+        !_tlsFollowsPort ||
+        _backendKind != 'custom_electrum' ||
+        _electrumAddress != address) {
+      return;
+    }
+    if (backend == null) {
+      setState(_unfollowedTls);
+      return;
+    }
+    setState(() {
+      final before = _tlsBeforeFollowed ?? _tls;
+      _tls = backend.tls;
+      if (_tls == before) {
+        _tlsBeforeFollowed = null;
+        _tlsNote = null;
+        return;
+      }
+      _tlsBeforeFollowed = before;
+      // The same words as the desktop: an onion is said for what it is,
+      // whatever its port.
+      _tlsNote = _tls
+          ? 'TLS turned on: port ${backend.port} usually runs with it.'
+          : backend.onion
+          ? 'TLS turned off: Tor already encrypts the connection to an '
+                'onion server.'
+          : 'TLS turned off: port ${backend.port} usually runs without it.';
+    });
+  }
+
+  /// The switch back where it was before the address moved it, and no
+  /// reason under it.
+  void _unfollowedTls() {
+    _tls = _tlsBeforeFollowed ?? _tls;
+    _tlsBeforeFollowed = null;
+    _tlsNote = null;
+  }
+
+  /// The TLS switch is no longer the form's to set: the person set it,
+  /// or a saved or scanned server did.
+  void _stopFollowingPort() {
+    _tlsFollowsPort = false;
+    _tlsBeforeFollowed = null;
+    _tlsNote = null;
   }
 
   /// Reads a server address off a QR code: the one a node prints beside
@@ -300,6 +409,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
         _hostController.text = host.contains(':') ? '[$host]' : host;
         _portController.text = '${backend.port ?? ''}';
         _tls = backend.tls;
+        _stopFollowingPort();
       }
     });
   }
@@ -358,6 +468,11 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
         await bridge.setBackend(network, config);
       }
       container.invalidate(settingsProvider);
+      // Saved, it is a stored server: its switch is no longer the form's
+      // to set, as when the page reopens on it.
+      if (mounted && config is CustomElectrum) {
+        setState(_stopFollowingPort);
+      }
       messenger.showSnackBar(Toast('Setting saved'));
       // Stored: whether it answers is the test's to say, wherever the
       // person is by then.
@@ -684,7 +799,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
               ),
               if (_scanError != null) ...[
                 const SizedBox(height: GerfautSpacing.sm),
-                _ScanRefusal(reason: _scanError!, tokens: tokens),
+                _LiveHint(reason: _scanError!, tokens: tokens),
               ],
               if (_scannedOnion) ...[
                 const SizedBox(height: GerfautSpacing.sm),
@@ -704,7 +819,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
                       label: 'Host',
                       controller: _hostController,
                       hint: 'node.example.org or xxxxxxxx.onion',
-                      onChanged: _onBackendFieldChanged,
+                      onChanged: _onElectrumFieldChanged,
                       tokens: tokens,
                     ),
                   ),
@@ -714,7 +829,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
               ),
               if (_scanError != null) ...[
                 const SizedBox(height: GerfautSpacing.sm),
-                _ScanRefusal(reason: _scanError!, tokens: tokens),
+                _LiveHint(reason: _scanError!, tokens: tokens),
               ],
               const SizedBox(height: GerfautSpacing.sm),
               // Five digits whole at any text size; the TLS switch goes
@@ -743,7 +858,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
                           controller: _portController,
                           hint: '50002',
                           numeric: true,
-                          onChanged: _onBackendFieldChanged,
+                          onChanged: _onElectrumFieldChanged,
                           tokens: tokens,
                         ),
                       ],
@@ -760,7 +875,10 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
                             value: _tls,
                             onChanged: (value) {
                               _clearTest();
-                              setState(() => _tls = value);
+                              setState(() {
+                                _tls = value;
+                                _stopFollowingPort();
+                              });
                             },
                           ),
                           const SizedBox(width: GerfautSpacing.xs),
@@ -771,6 +889,10 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
                   ),
                 ],
               ),
+              if (_tlsNote != null) ...[
+                const SizedBox(height: GerfautSpacing.sm),
+                _LiveHint(reason: _tlsNote!, tokens: tokens),
+              ],
               if (_scannedOnion) ...[
                 const SizedBox(height: GerfautSpacing.sm),
                 _OnionNote(mode: settings.tor.mode, tokens: tokens),
@@ -793,13 +915,15 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
                 },
               ),
               const SizedBox(height: GerfautSpacing.md),
-              // The card below is the one that knows which Tor is used
-              // and can test it; this line only says a .onion will take
-              // that route. Naming a port and asking for Orbot outlived
-              // the built-in client.
+              // The card below is the one that knows which Tor is used;
+              // this line only says a .onion will take that route. Its
+              // test checks Tor, not the server — Save backend does that —
+              // so pointing at it from here read as a test of the server.
+              // Naming a port and asking for Orbot outlived the built-in
+              // client.
               Text(
                 'An address ending in .onion goes through Tor; the Tor '
-                'card below says which one and lets you test it.',
+                'card below says which one.',
                 style: tokens.bodySmall.copyWith(color: tokens.textMuted),
               ),
             ],
@@ -821,7 +945,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
             ),
             if (_saveError != null) ...[
               const SizedBox(height: GerfautSpacing.sm),
-              _ScanRefusal(reason: _saveError!, tokens: tokens),
+              _LiveHint(reason: _saveError!, tokens: tokens),
             ],
             _BackendTestStatus(
               network: network,
@@ -1265,16 +1389,17 @@ class _NetworkCard extends StatelessWidget {
   }
 }
 
-/// Why the core refused the last code read, in its own words, under the
-/// field the scan was meant to fill.
+/// A line under a field about something the form just did or refused:
+/// why the core turned a scanned code or a save down, in its own words,
+/// or why the TLS switch moved with the port.
 ///
 /// A hint, not a panel: nothing was lost, and the text belongs to the
 /// field it explains. It is announced all the same — it lands in
-/// reaction to a scan the person just made, and the camera has closed
-/// by the time it appears, so nothing else on screen says the code was
-/// turned down.
-class _ScanRefusal extends StatelessWidget {
-  const _ScanRefusal({required this.reason, required this.tokens});
+/// reaction to something else (a scan made behind a camera that has
+/// closed by then, a keystroke in another field), so nothing else on
+/// screen says it happened.
+class _LiveHint extends StatelessWidget {
+  const _LiveHint({required this.reason, required this.tokens});
 
   final String reason;
   final GerfautTokens tokens;

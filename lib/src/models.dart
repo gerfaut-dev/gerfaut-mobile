@@ -844,6 +844,7 @@ class AddressEntry {
     required this.address,
     required this.used,
     this.derivation,
+    this.revealed = false,
   });
 
   factory AddressEntry.fromJson(Map<String, dynamic> json) {
@@ -852,12 +853,18 @@ class AddressEntry {
       address: json['address'] as String,
       used: json['used'] as bool,
       derivation: json['derivation'] as String?,
+      revealed: json['revealed'] as bool,
     );
   }
 
   final int index;
   final String address;
   final bool used;
+
+  /// Handed out before the list was asked for, by an earlier visit or a
+  /// sync: the first entry where it is false is an address nobody has
+  /// been given yet. Always true for a watched single address.
+  final bool revealed;
 
   /// Absolute or relative derivation path (`m/84'/1'/0'/0/5` or `0/5`);
   /// null for a single watched address.
