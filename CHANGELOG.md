@@ -19,7 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - On a wallet's page, the wallet's icon sits next to its name. Tap the icon to choose another one, without going through the Wallets settings.
 - Settings > Security has a "Lock when away" choice: Immediately, 1 min, 5 min or 15 min, 1 min by default. On Android, turning the screen off still locks Gerfaut at once, and the calculator disguise still locks at every trip away. A fresh launch always opens locked.
 - A PIN lock is typed on Gerfaut's own keypad, so the phone's keyboard never sees the PIN. The digits change places each time the lock opens and after a wrong PIN. Turn off "Shuffle the keypad" to keep them in order; with a screen reader on, they always are.
-- When you save a backend in Settings › Network, Gerfaut tests the connection and says what it found under Save backend. A server that answers shows its block height and software. One that does not gets the reason and what to change, such as a port that expects TLS or a server on another network. "Test again" runs the test once more. It replaces the note that said the certificate of a server that did not answer was unchecked.
+- When you save a backend in Settings › Network, Gerfaut tests the connection and says what it found under Save backend. A server that answers shows its block height and software. One that does not gets the reason and what to change, such as a port that expects TLS or a server on another network. "Test again" runs the test once more. It replaces the note that said the certificate of a server that did not answer was unchecked. While a test runs, "Cancel" stops it. The backend stays saved, untested. Editing the form during a test stops it too.
 
 ### Changed
 

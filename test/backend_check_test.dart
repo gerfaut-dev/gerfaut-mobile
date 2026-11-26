@@ -4,6 +4,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:gerfaut/app.dart' show themeFrom;
@@ -67,6 +68,30 @@ bool _saveBusy(WidgetTester tester) => tester
     .busy;
 
 final Finder _testAgain = find.widgetWithText(SecondaryButton, 'Test again');
+final Finder _cancel = find.widgetWithText(SecondaryButton, 'Cancel');
+
+/// Saves the backend in the form, and stops while its test runs.
+Future<void> _saveAndWait(WidgetTester tester) async {
+  await tester.tap(find.text('Save backend'));
+  // The spinner turns: settling would never end.
+  await tester.pump();
+  await tester.pump();
+}
+
+void _expectCancelled() {
+  expect(find.text('Test cancelled'), findsOneWidget);
+  expect(find.text('The backend is saved, but not tested.'), findsOneWidget);
+  expect(_testAgain, findsOneWidget);
+  expect(find.text('Testing the connection…'), findsNothing);
+  expect(_cancel, findsNothing);
+  // Nothing went wrong: no panel, no icon.
+  expect(find.byType(GerfautNotice), findsNothing);
+}
+
+/// The focus node of the button labelled [label], as the keyboard
+/// sees it.
+FocusNode _focusOf(WidgetTester tester, String label) =>
+    Focus.of(tester.element(find.text(label)));
 
 /// What the core sends for a failure of [problem] on node.local.
 BackendCheck _failed(
@@ -284,29 +309,175 @@ void main() {
     expect(_testAgain, findsNothing);
   });
 
-  testWidgets('an edit during a test drops its answer, the test runs on', (
+  group('Cancel', () {
+    testWidgets('is offered under the wait, and read out with what it stops', (
+      tester,
+    ) async {
+      final handle = tester.ensureSemantics();
+      final bridge = _ownElectrum();
+      bridge.checkBackendGate = Completer<void>();
+      await _open(tester, bridge);
+      await _saveAndWait(tester);
+
+      expect(_cancel, findsOneWidget);
+      // Under the words, the phone being narrow.
+      expect(
+        tester.getTopLeft(_cancel).dy,
+        greaterThan(
+          tester.getBottomLeft(find.text('Testing the connection…')).dy,
+        ),
+      );
+      expect(
+        find.bySemanticsLabel('Cancel the connection test'),
+        findsOneWidget,
+      );
+      handle.dispose();
+    });
+
+    for (final late in ['reached_electrum', 'refused', 'cancelled']) {
+      testWidgets('stops the test at once, a late $late answer dropped', (
+        tester,
+      ) async {
+        final bridge = _ownElectrum();
+        final gate = Completer<void>();
+        bridge.checkBackendGate = gate;
+        bridge.onCheckBackend = (_) => backendCheckCase(late);
+        await _open(tester, bridge);
+        await _saveAndWait(tester);
+        expect(_saveBusy(tester), isTrue);
+
+        await tester.tap(_cancel);
+        await tester.pump();
+        _expectCancelled();
+        expect(bridge.cancelledBackendChecks, [Network.mainnet]);
+        expect(_saveBusy(tester), isFalse);
+        // The backend stays saved: Cancel takes nothing back.
+        expect(bridge.savedBackends, hasLength(1));
+
+        gate.complete();
+        await tester.pumpAndSettle();
+        _expectCancelled();
+        expect(bridge.cancelledBackendChecks, hasLength(1));
+      });
+    }
+
+    testWidgets('Test again after it tests once more', (tester) async {
+      final bridge = _ownElectrum();
+      bridge.checkBackendGate = Completer<void>();
+      await _open(tester, bridge);
+      await _saveAndWait(tester);
+      await tester.tap(_cancel);
+      await tester.pump();
+
+      bridge.checkBackendGate = null;
+      await tester.tap(_testAgain);
+      await tester.pumpAndSettle();
+      expect(bridge.checkedBackends, [Network.mainnet, Network.mainnet]);
+      expect(
+        find.text(
+          'Connected to electrum.example.org:50002',
+          findRichText: true,
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('pressed from the keyboard hands the focus to Test again', (
+      tester,
+    ) async {
+      final bridge = _ownElectrum();
+      bridge.checkBackendGate = Completer<void>();
+      await _open(tester, bridge);
+      await _saveAndWait(tester);
+
+      _focusOf(tester, 'Cancel').requestFocus();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Test cancelled'), findsOneWidget);
+      expect(_focusOf(tester, 'Test again').hasFocus, isTrue);
+
+      // And back: Test again pressed hands it to the new Cancel.
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pump();
+      await tester.pump();
+      expect(_cancel, findsOneWidget);
+      expect(_focusOf(tester, 'Cancel').hasFocus, isTrue);
+    });
+
+    testWidgets('focused as the test ends, the focus goes to Test again', (
+      tester,
+    ) async {
+      final bridge = _ownElectrum();
+      final gate = Completer<void>();
+      bridge.checkBackendGate = gate;
+      await _open(tester, bridge);
+      await _saveAndWait(tester);
+      _focusOf(tester, 'Cancel').requestFocus();
+      await tester.pump();
+
+      gate.complete();
+      await tester.pumpAndSettle();
+      expect(_focusOf(tester, 'Test again').hasFocus, isTrue);
+      expect(bridge.cancelledBackendChecks, isEmpty);
+    });
+  });
+
+  testWidgets('a test the core cancelled says so the same way', (tester) async {
+    final bridge = _ownElectrum();
+    bridge.onCheckBackend = (_) => backendCheckCase('cancelled');
+    await _open(tester, bridge);
+    await _save(tester);
+
+    _expectCancelled();
+    expect(bridge.cancelledBackendChecks, isEmpty);
+  });
+
+  testWidgets('an edit during a test cancels it, and that network\'s alone', (
     tester,
   ) async {
-    final bridge = _ownElectrum();
+    final bridge = FakeBridge(
+      settings: Settings(
+        preferences: kPreferences,
+        activeNetwork: Network.mainnet,
+        backends: {
+          Network.mainnet: const CustomElectrum(url: 'ssl://node.local:50002'),
+          Network.signet: const CustomElectrum(url: 'ssl://node.local:60002'),
+        },
+        appPrefs: const {},
+      ),
+    );
     final gate = Completer<void>();
     bridge.checkBackendGate = gate;
     await _open(tester, bridge);
-    await tester.tap(find.text('Save backend'));
+    await _saveAndWait(tester);
+    await tester.tap(find.text('Signet'));
     await tester.pump();
     await tester.pump();
+    await _saveAndWait(tester);
+    expect(bridge.checkedBackends, [Network.mainnet, Network.signet]);
 
     await tester.enterText(find.byType(TextField).first, 'other.local');
     await tester.pump();
-    // Still one test at a time: the one under way keeps the button.
-    expect(_saveBusy(tester), isTrue);
+    expect(bridge.cancelledBackendChecks, [Network.signet]);
+    expect(find.text('Testing the connection…'), findsNothing);
+    expect(find.text('Test cancelled'), findsNothing);
+    expect(_testAgain, findsNothing);
+    expect(_saveBusy(tester), isFalse);
 
+    // Mainnet's test runs on, and its answer still lands.
+    await tester.tap(find.text('Mainnet'));
+    await tester.pump();
+    await tester.pump();
+    expect(find.text('Testing the connection…'), findsOneWidget);
     gate.complete();
     await tester.pumpAndSettle();
     expect(
-      find.textContaining('Connected to', findRichText: true),
-      findsNothing,
+      find.text('Connected to electrum.example.org:50002', findRichText: true),
+      findsOneWidget,
     );
-    expect(_saveBusy(tester), isFalse);
+    expect(bridge.cancelledBackendChecks, [Network.signet]);
   });
 
   testWidgets('the result outlives the page, and is its network\'s own', (
@@ -337,6 +508,8 @@ void main() {
       find.text('Connected to electrum.example.org:50002', findRichText: true),
       findsOneWidget,
     );
+    // Leaving did not cancel it.
+    expect(bridge.cancelledBackendChecks, isEmpty);
 
     // Another network has no result of its own yet.
     await tester.tap(find.text('Signet'));

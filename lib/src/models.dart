@@ -2177,24 +2177,23 @@ enum BackendProblem {
 }
 
 /// What testing the stored backend of a network found, mirroring
-/// `BackendCheck` in gerfaut-core.
+/// `BackendCheck` in gerfaut-core. The outcome is read first: a test
+/// cancelled sends nothing else.
 sealed class BackendCheck {
-  const BackendCheck({required this.host, required this.tor});
+  const BackendCheck();
 
   factory BackendCheck.fromJson(Map<String, dynamic> json) {
-    final host = json['host'] as String;
-    final tor = json['tor'] as bool;
     return switch (json['outcome'] as String) {
       'reached' => BackendReached(
-        host: host,
-        tor: tor,
+        host: json['host'] as String,
+        tor: json['tor'] as bool,
         height: json['height'] as int,
         software: json['software'] as String?,
         millis: json['millis'] as int,
       ),
       'failed' => BackendFailed(
-        host: host,
-        tor: tor,
+        host: json['host'] as String,
+        tor: json['tor'] as bool,
         // A problem a later core names and this build does not know is
         // said with the core's words, as any other failure.
         problem:
@@ -2206,27 +2205,27 @@ sealed class BackendCheck {
           null => null,
         },
       ),
+      'cancelled' => const BackendCancelled(),
       final other => throw FormatException('unknown outcome: $other'),
     };
   }
-
-  /// The server that answered, or the last one tried: `host:port`, or a
-  /// host alone. Empty when the test never got as far as one.
-  final String host;
-
-  /// Reached, or tried, through Tor.
-  final bool tor;
 }
 
 /// The server answered as a backend of this network.
 class BackendReached extends BackendCheck {
   const BackendReached({
-    required super.host,
-    required super.tor,
+    required this.host,
+    required this.tor,
     required this.height,
     required this.software,
     required this.millis,
   });
+
+  /// The server that answered: `host:port`, or a host alone.
+  final String host;
+
+  /// Reached through Tor.
+  final bool tor;
 
   /// The height of its chain's tip.
   final int height;
@@ -2241,12 +2240,19 @@ class BackendReached extends BackendCheck {
 /// It did not: what stands in the way, and the core's words on it.
 class BackendFailed extends BackendCheck {
   const BackendFailed({
-    required super.host,
-    required super.tor,
+    required this.host,
+    required this.tor,
     required this.problem,
     required this.detail,
     this.serverNetwork,
   });
+
+  /// The last server tried: `host:port`, or a host alone. Empty when the
+  /// test never got as far as one.
+  final String host;
+
+  /// Tried through Tor.
+  final bool tor;
 
   final BackendProblem problem;
 
@@ -2256,6 +2262,12 @@ class BackendFailed extends BackendCheck {
   /// The network the server follows, with
   /// [BackendProblem.anotherNetwork] when the core knows it.
   final Network? serverNetwork;
+}
+
+/// Stopped before it found anything: by Cancel, an edit of the form, or
+/// a newer test of the same network. The backend is saved all the same.
+class BackendCancelled extends BackendCheck {
+  const BackendCancelled();
 }
 
 /// Where a fiat quote comes from. All endpoints are public and keyless.

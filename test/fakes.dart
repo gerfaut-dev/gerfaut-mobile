@@ -1317,6 +1317,15 @@ class FakeBridge implements GerfautBridge {
     return backendCheckCase('reached_electrum');
   }
 
+  /// Every network whose test was cancelled, in order.
+  final List<Network> cancelledBackendChecks = [];
+
+  @override
+  bool cancelBackendCheck(Network network) {
+    cancelledBackendChecks.add(network);
+    return true;
+  }
+
   /// Catalogue hook; throw a [BridgeException] to simulate a bridge
   /// that cannot answer. The default serves [defaultPublicServers].
   List<PublicServer> Function(Network network)? onPublicServers;

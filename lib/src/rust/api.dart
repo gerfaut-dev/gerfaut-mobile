@@ -240,6 +240,12 @@ Future<String> setBackendTrusting({
 Future<String> checkBackend({required String network}) =>
     RustLib.instance.api.crateApiCheckBackend(network: network);
 
+/// Stops the test of a network's backend under way, which then answers
+/// `cancelled`: whether one was running. The backend stays saved. Sync,
+/// so a test asked for right after it is never the one it stops.
+bool cancelBackendCheck({required String network}) =>
+    RustLib.instance.api.crateApiCancelBackendCheck(network: network);
+
 /// The public servers offered for a network, in settings order.
 /// Returns a serialized `Vec<PublicServer>`, empty on regtest, which
 /// has no public server by definition.
