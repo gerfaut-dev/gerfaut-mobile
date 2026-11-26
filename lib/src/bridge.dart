@@ -225,6 +225,11 @@ abstract class GerfautBridge {
   Future<List<UtxoInfo>> utxos(String id);
   Future<List<AddressEntry>> receiveAddresses(String id, int lookahead);
 
+  /// Keeps every receive address up to [index] revealed: shown, it
+  /// counts as handed out and is never offered as new again. Already
+  /// revealed, or a single-address wallet: nothing changes.
+  Future<void> revealReceiveAddress(String id, int index);
+
   /// Revealed addresses by keychain, with usage and the balance on
   /// each. Capped by the core to 200 rows per keychain.
   Future<AddressList> addressList(String id);
@@ -555,6 +560,11 @@ class RustBridge implements GerfautBridge {
   Future<List<AddressEntry>> receiveAddresses(String id, int lookahead) async {
     final raw = await rust.receiveAddresses(id: id, lookahead: lookahead);
     return _list(raw).map(AddressEntry.fromJson).toList();
+  }
+
+  @override
+  Future<void> revealReceiveAddress(String id, int index) async {
+    _ok(await rust.revealReceiveAddress(id: id, index: index));
   }
 
   @override

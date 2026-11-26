@@ -71,9 +71,98 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
 
   /// Peek distance past the next unused address, in addresses offered:
   /// the core skips one a payment already reached, so this is not an
-  /// index. Skipping retires nothing, and leaving the screen returns to
-  /// the first unused one.
+  /// index. Each address the screen shows is kept revealed: shown, it
+  /// counts as handed out, a sync watches it, and New address never
+  /// offers it again. Leaving the screen returns to the first unused one.
   int _offset = 0;
+
+  /// What New address is doing.
+  _NewAddress _newAddress = const _NewAddressIdle();
+
+  /// Addresses already asked to be kept revealed, by wallet and index:
+  /// asked once each, and again the next time one shows after a failure.
+  final Set<(String, int)> _revealAsked = {};
+
+  /// Every address shown in this visit, by wallet and index: New address
+  /// passes them over before the core has kept them revealed, and even
+  /// if it failed to.
+  final Set<(String, int)> _shownHere = {};
+
+  /// The list last on screen, kept while the next one is read: a longer
+  /// peek is another request, and the address stays in view meanwhile.
+  List<AddressEntry>? _shown;
+
+  @override
+  void didUpdateWidget(ReceiveScreen old) {
+    super.didUpdateWidget(old);
+    // Another wallet: offsets are not comparable, and what New address
+    // was doing concerns the one left.
+    if (old.walletId != widget.walletId) {
+      _offset = 0;
+      _newAddress = const _NewAddressIdle();
+      _shown = null;
+    }
+  }
+
+  /// Moves to [offset], and New address starts over from there.
+  void _moveTo(int offset) {
+    setState(() {
+      _offset = offset;
+      _newAddress = const _NewAddressIdle();
+    });
+  }
+
+  /// New address: reads every upcoming address afresh, the list asked
+  /// after the press and not one cached before it.
+  void _seekNewAddress() {
+    ref.invalidate(
+      receiveProvider((walletId: widget.walletId, lookahead: maxReceivePeek)),
+    );
+    setState(() => _newAddress = _NewAddressSeeking());
+  }
+
+  /// The long list is in: the screen moves to the first address past the
+  /// one shown that was never revealed. None within reach: it stays, and
+  /// says so.
+  void _settleSeek(
+    _NewAddressSeeking seek,
+    List<AddressEntry> list,
+    int position,
+  ) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // Another press, a move or a wallet switch came first.
+      if (!mounted || !identical(_newAddress, seek)) return;
+      var fresh = -1;
+      for (var at = position + 1; at < list.length; at++) {
+        if (!list[at].revealed &&
+            !_shownHere.contains((widget.walletId, list[at].index))) {
+          fresh = at;
+          break;
+        }
+      }
+      setState(() {
+        if (fresh < 0) {
+          _newAddress = const _NewAddressNone();
+        } else {
+          _newAddress = const _NewAddressIdle();
+          _offset = fresh;
+        }
+      });
+    });
+  }
+
+  /// On screen: kept revealed. A single address has nothing to reveal
+  /// and says it was always given.
+  void _keepRevealed(AddressEntry entry) {
+    final key = (widget.walletId, entry.index);
+    _shownHere.add(key);
+    if (entry.revealed) return;
+    if (!_revealAsked.add(key)) return;
+    final container = ProviderScope.containerOf(context, listen: false);
+    keepReceiveAddressRevealed(container, key.$1, key.$2).catchError((_) {
+      _revealAsked.remove(key);
+    });
+  }
 
   Future<void> _copy(String address) async {
     await Clipboard.setData(ClipboardData(text: address));
@@ -98,18 +187,35 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
     final meta = ref.watch(snapshotProvider(widget.walletId)).value?.meta;
     final single = meta?.isSingleAddress ?? false;
     final gapLimit = meta?.gapLimit ?? 20;
+    // A sync read the wallet again since none was found: a payment may
+    // have freed addresses within reach, so New address comes back.
+    ref.listen(snapshotProvider(widget.walletId), (before, after) {
+      final reread = (before?.isLoading ?? false) && !after.isLoading;
+      if (reread && _newAddress is _NewAddressNone) {
+        setState(() => _newAddress = const _NewAddressIdle());
+      }
+    });
     // One more than the address on display: whether the core has a next
-    // one to give is then known before the button is pressed.
+    // one to give is then known before the button is pressed. As far as
+    // the screen looks while New address seeks one never shown.
+    final seek = _newAddress;
     final addresses = ref.watch(
       receiveProvider((
         walletId: widget.walletId,
-        lookahead: min(_offset + 1, maxReceivePeek),
+        lookahead: seek is _NewAddressSeeking
+            ? maxReceivePeek
+            : min(_offset + 1, maxReceivePeek),
       )),
     );
-    final list = addresses.value;
-    final entry = list == null || list.isEmpty
-        ? null
-        : list[min(_offset, list.length - 1)];
+    final fresh = addresses.value;
+    if (fresh != null) _shown = fresh;
+    final list = _shown;
+    final position = list == null ? 0 : min(_offset, list.length - 1);
+    if (seek is _NewAddressSeeking && fresh != null && !addresses.isLoading) {
+      _settleSeek(seek, fresh, position);
+    }
+    final entry = list == null || list.isEmpty ? null : list[position];
+    if (entry != null) _keepRevealed(entry);
     // A descriptor without a wildcard has one address, and the core
     // gives it once: nothing to skip to, ever.
     final oneAddress = single || (list != null && list.length == 1);
@@ -148,10 +254,10 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
                       copied: _copied,
                       onCopy: () => _copy(entry.address),
                       onEnlarge: () => _enlarge(entry.address),
-                      onNext: () => setState(
-                        () => _offset = min(_offset + 1, maxReceivePeek),
-                      ),
-                      onFirst: () => setState(() => _offset = 0),
+                      onNext: () => _moveTo(min(_offset + 1, maxReceivePeek)),
+                      onFirst: () => _moveTo(0),
+                      newAddress: seek,
+                      onNewAddress: _seekNewAddress,
                     ),
                     const SizedBox(height: GerfautSpacing.lg),
                     ..._auditCards(tokens, audit, single, meta?.network),
@@ -225,6 +331,25 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
   }
 }
 
+/// What New address is doing.
+sealed class _NewAddress {
+  const _NewAddress();
+}
+
+/// Waiting for a press.
+final class _NewAddressIdle extends _NewAddress {
+  const _NewAddressIdle();
+}
+
+/// Reading every upcoming address for one never shown. Each press makes
+/// its own: an answer for an earlier press is told apart and dropped.
+final class _NewAddressSeeking extends _NewAddress {}
+
+/// Every upcoming address within reach was shown before.
+final class _NewAddressNone extends _NewAddress {
+  const _NewAddressNone();
+}
+
 /// The address on offer: a small QR code beside its identity, the full
 /// address in mono, the actions, and the warnings that go with it.
 class _AddressBlock extends StatelessWidget {
@@ -241,6 +366,8 @@ class _AddressBlock extends StatelessWidget {
     required this.onEnlarge,
     required this.onNext,
     required this.onFirst,
+    required this.newAddress,
+    required this.onNewAddress,
   });
 
   final AddressEntry entry;
@@ -262,6 +389,10 @@ class _AddressBlock extends StatelessWidget {
   final VoidCallback onEnlarge;
   final VoidCallback onNext;
   final VoidCallback onFirst;
+
+  /// What New address is doing.
+  final _NewAddress newAddress;
+  final VoidCallback onNewAddress;
 
   @override
   Widget build(BuildContext context) {
@@ -359,6 +490,35 @@ class _AddressBlock extends StatelessWidget {
               ],
             ],
           ),
+          // Shown on an address handed out before: the screen starts at
+          // the oldest unused one, which may already sit in someone's
+          // records. Not where the screen can go no further, nor once it
+          // found none within reach.
+          if (entry.revealed && hasNext && newAddress is! _NewAddressNone) ...[
+            const SizedBox(height: GerfautSpacing.sm),
+            SecondaryButton(
+              label: 'New address',
+              icon: LucideIcons.plus,
+              expand: true,
+              busy: newAddress is _NewAddressSeeking,
+              onPressed: onNewAddress,
+            ),
+          ],
+          if (newAddress is _NewAddressNone) ...[
+            const SizedBox(height: GerfautSpacing.sm),
+            // It lands in reaction to the tap, and nothing else on the
+            // screen says why the address did not change.
+            Semantics(
+              container: true,
+              liveRegion: true,
+              child: Text(
+                'Every address within $maxReceivePeek of the first unused '
+                'one was shown before. Use one of them, or wait for a '
+                'payment to free the next ones.',
+                style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+              ),
+            ),
+          ],
           if (!hasNext && offset > 0) ...[
             const SizedBox(height: GerfautSpacing.sm),
             Text(

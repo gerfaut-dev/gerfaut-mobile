@@ -107,6 +107,24 @@ final receiveProvider = FutureProvider.autoDispose
           .receiveAddresses(key.walletId, key.lookahead);
     });
 
+/// Keeps the receive address at [index] of wallet [walletId] revealed,
+/// with every one before it. The upcoming addresses and the audit list
+/// both change: it now counts as handed out.
+///
+/// Takes the [container] rather than a ref: the screen that asks may be
+/// left before the core answers, and the lists still need reading again.
+Future<void> keepReceiveAddressRevealed(
+  ProviderContainer container,
+  String walletId,
+  int index,
+) async {
+  await container.read(bridgeProvider).revealReceiveAddress(walletId, index);
+  container
+    // Keyed by more than the wallet: all of them are read again.
+    ..invalidate(receiveProvider)
+    ..invalidate(addressListProvider(walletId));
+}
+
 // --- preferences -------------------------------------------------------
 
 /// Theme preference. Light is the default; dark and system are options.

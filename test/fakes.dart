@@ -967,17 +967,62 @@ class FakeBridge implements GerfautBridge {
     final wanted = (lookahead < 200 ? lookahead : 200) + 1;
     for (var step = 1; entries.length < wanted; step++) {
       if (paid.contains(first.index + step)) continue;
-      entries.add(
-        step < base.length
-            ? base[step]
-            : AddressEntry(
-                index: first.index + step,
-                address: '${first.address}$step',
-                used: false,
-              ),
-      );
+      entries.add(_receiveEntry(base, step));
     }
-    return entries;
+    // An index New address handed out counts as revealed from then on.
+    final through = revealedThrough[id];
+    if (through == null) return entries;
+    return [
+      for (final entry in entries)
+        entry.index <= through && !entry.revealed
+            ? AddressEntry(
+                index: entry.index,
+                address: entry.address,
+                used: entry.used,
+                derivation: entry.derivation,
+                revealed: true,
+              )
+            : entry,
+    ];
+  }
+
+  /// The configured entry [step] places past the first, or one made up
+  /// past the end of the list.
+  AddressEntry _receiveEntry(List<AddressEntry> base, int step) {
+    final first = base.first;
+    return step < base.length
+        ? base[step]
+        : AddressEntry(
+            index: first.index + step,
+            address: '${first.address}$step',
+            used: false,
+          );
+  }
+
+  /// The last receive index kept revealed, by wallet.
+  final Map<String, int> revealedThrough = {};
+
+  /// Wallet and index of every revealReceiveAddress call, for assertions.
+  final List<(String, int)> revealCalls = [];
+
+  /// When set, a reveal waits for it before answering.
+  Completer<void>? revealGate;
+
+  /// When set, a reveal fails with it.
+  Object? revealError;
+
+  @override
+  Future<void> revealReceiveAddress(String id, int index) async {
+    revealCalls.add((id, index));
+    final gate = revealGate;
+    if (gate != null) await gate.future;
+    final error = revealError;
+    if (error != null) throw error;
+    // Mirrors the core: every address up to the index stays revealed; a
+    // wallet with one address has nothing to reveal.
+    if (withoutWildcard.contains(id)) return;
+    final through = revealedThrough[id];
+    if (through == null || index > through) revealedThrough[id] = index;
   }
 
   @override
