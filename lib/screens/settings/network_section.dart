@@ -268,28 +268,40 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
   /// Lets the TLS switch follow the typed address while it is still the
   /// form's to set. The core says what the address implies, with the
   /// same reading a scan gets, so the port conventions live in one
-  /// place. An address it refuses, or one that changed while it was
-  /// read, leaves the switch alone.
+  /// place. A host it does not read as an address (a bare name such as
+  /// `umbrel`, half a name, an IPv6 literal out of its brackets) leaves
+  /// the port to decide alone. With no port to read either, the switch
+  /// goes back to where it was: a reason given for an address since
+  /// changed would no longer be true.
   Future<void> _followPort() async {
+    if (!_tlsFollowsPort) return;
     final address = _electrumAddress;
-    if (!_tlsFollowsPort || address == null) return;
-    final bridge = ref.read(bridgeProvider);
-    final ScannedBackend backend;
-    try {
-      backend = await bridge.parseBackend(address);
-    } catch (_) {
-      // Half an address, read on every keystroke: the switch waits for
-      // the rest rather than saying anything.
+    if (address == null) {
+      setState(_unfollowedTls);
       return;
     }
+    final port = int.parse(_portController.text.trim());
+    final bridge = ref.read(bridgeProvider);
+    Future<ScannedBackend?> read(String candidate) async {
+      try {
+        final backend = await bridge.parseBackend(candidate);
+        return backend.kind == 'electrum' && backend.port == port
+            ? backend
+            : null;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    final backend = await read(address) ?? await read('electrum.invalid:$port');
     if (!mounted ||
         !_tlsFollowsPort ||
         _backendKind != 'custom_electrum' ||
-        backend.kind != 'electrum' ||
-        _electrumAddress != address ||
-        // An IPv6 literal out of its brackets swallows the port: the
-        // core then read an address other than the two fields.
-        backend.port != int.tryParse(_portController.text.trim())) {
+        _electrumAddress != address) {
+      return;
+    }
+    if (backend == null) {
+      setState(_unfollowedTls);
       return;
     }
     setState(() {
@@ -310,6 +322,14 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
                 'onion server.'
           : 'TLS turned off: port ${backend.port} usually runs without it.';
     });
+  }
+
+  /// The switch back where it was before the address moved it, and no
+  /// reason under it.
+  void _unfollowedTls() {
+    _tls = _tlsBeforeFollowed ?? _tls;
+    _tlsBeforeFollowed = null;
+    _tlsNote = null;
   }
 
   /// The TLS switch is no longer the form's to set: the person set it,
@@ -448,6 +468,11 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
         await bridge.setBackend(network, config);
       }
       container.invalidate(settingsProvider);
+      // Saved, it is a stored server: its switch is no longer the form's
+      // to set, as when the page reopens on it.
+      if (mounted && config is CustomElectrum) {
+        setState(_stopFollowingPort);
+      }
       messenger.showSnackBar(Toast('Setting saved'));
       // Stored: whether it answers is the test's to say, wherever the
       // person is by then.

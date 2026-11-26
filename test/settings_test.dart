@@ -3137,6 +3137,10 @@ void main() {
         throw const BridgeException('server', 'not an address');
       }
       final host = input.substring(0, colon);
+      // A bare name is not read as an address, as the core refuses it.
+      if (!host.contains('.') && host != 'localhost') {
+        throw const BridgeException('server', 'not an address');
+      }
       final onion = host.endsWith('.onion');
       final tls = switch (port) {
         50001 || 60001 || 20001 || 50003 => false,
@@ -3232,6 +3236,66 @@ void main() {
       // Back to where it started: nothing left to explain.
       await typePort(tester, '50002');
       expect(tlsOn(tester), isTrue);
+      expect(find.textContaining('TLS turned'), findsNothing);
+    });
+
+    /// A name of the local network, with no dot: the core does not read
+    /// it as an address, so the port decides alone.
+    testWidgets('a bare host name leaves the port to decide', (tester) async {
+      final bridge = withBackends(const {});
+      await openElectrumForm(tester, bridge);
+      await typeHost(tester, 'umbrel');
+      await typePort(tester, '50001');
+
+      expect(bridge.parsedBackends, contains('electrum.invalid:50001'));
+      expect(tlsOn(tester), isFalse);
+      expect(find.text(offFor50001), findsOneWidget);
+    });
+
+    /// An onion turned TLS off; the host is then replaced by one the
+    /// onion reason no longer covers. The switch must not stay off with
+    /// a reason that is no longer true.
+    testWidgets('TLS comes back on when the address that turned it off is '
+        'gone', (tester) async {
+      final bridge = withBackends(const {});
+      await openElectrumForm(tester, bridge);
+      await typeHost(tester, 'gerfautexample123.onion');
+      await typePort(tester, '50005');
+      expect(tlsOn(tester), isFalse);
+
+      await typeHost(tester, 'umbrel');
+      expect(tlsOn(tester), isTrue);
+      expect(find.textContaining('TLS turned'), findsNothing);
+
+      // And with no address left to read at all.
+      await typeHost(tester, 'gerfautexample123.onion');
+      expect(tlsOn(tester), isFalse);
+      await typePort(tester, '');
+      expect(tlsOn(tester), isTrue);
+      expect(find.textContaining('TLS turned'), findsNothing);
+    });
+
+    /// Saved, it is a stored server, as when the page reopens on it.
+    testWidgets('a server saved in this visit keeps its TLS', (tester) async {
+      final bridge = withBackends(const {});
+      await openElectrumForm(tester, bridge);
+      await typeHost(tester, 'node.example.org');
+      await typePort(tester, '50001');
+      expect(tlsOn(tester), isFalse);
+
+      await tester.tap(find.text('Save backend'));
+      await tester.pumpAndSettle();
+      expect(
+        bridge.savedBackends[Network.mainnet],
+        isA<CustomElectrum>().having(
+          (config) => config.url,
+          'url',
+          'tcp://node.example.org:50001',
+        ),
+      );
+
+      await typePort(tester, '50002');
+      expect(tlsOn(tester), isFalse);
       expect(find.textContaining('TLS turned'), findsNothing);
     });
 
