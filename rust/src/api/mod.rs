@@ -601,6 +601,17 @@ pub async fn check_backend(network: String) -> String {
     }
 }
 
+/// Stops the test of a network's backend under way, which then answers
+/// `cancelled`: whether one was running. The backend stays saved. Sync,
+/// so a test asked for right after it is never the one it stops.
+#[flutter_rust_bridge::frb(sync)]
+pub fn cancel_backend_check(network: String) -> bool {
+    let (Ok(manager), Ok(network)) = (manager(), parse_network(&network)) else {
+        return false;
+    };
+    manager.cancel_backend_check(network)
+}
+
 /// The public servers offered for a network, in settings order.
 /// Returns a serialized `Vec<PublicServer>`, empty on regtest, which
 /// has no public server by definition.

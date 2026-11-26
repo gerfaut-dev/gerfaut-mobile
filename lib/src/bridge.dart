@@ -287,6 +287,11 @@ abstract class GerfautBridge {
   /// minutes.
   Future<BackendCheck> checkBackend(Network network);
 
+  /// Stops the test of [network]'s backend under way, which then
+  /// answers [BackendCancelled]: whether one was running. The backend
+  /// stays saved. Returns before a test asked for next can start.
+  bool cancelBackendCheck(Network network);
+
   /// Public servers offered for a network, in settings order. Empty on
   /// regtest, which has no public server.
   Future<List<PublicServer>> publicServers(Network network);
@@ -665,6 +670,10 @@ class RustBridge implements GerfautBridge {
     final raw = await rust.checkBackend(network: network.id);
     return BackendCheck.fromJson(_object(raw));
   }
+
+  @override
+  bool cancelBackendCheck(Network network) =>
+      rust.cancelBackendCheck(network: network.id);
 
   @override
   Future<List<PublicServer>> publicServers(Network network) async {

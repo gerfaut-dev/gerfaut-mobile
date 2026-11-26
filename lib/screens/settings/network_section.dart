@@ -213,8 +213,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
   }
 
   /// The form of this network changed: what the last test found is no
-  /// longer about what it holds. A test under way runs on, and its
-  /// answer is dropped.
+  /// longer about what it holds. A test under way is cancelled.
   void _clearTest() {
     final network = _seededFor;
     if (network != null) ref.read(backendTestsProvider.notifier).clear(network);
@@ -827,6 +826,8 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
             _BackendTestStatus(
               network: network,
               test: test,
+              onCancel: () =>
+                  ref.read(backendTestsProvider.notifier).cancel(network),
               onTestAgain: () => ref
                   .read(backendTestsProvider.notifier)
                   .test(
@@ -938,24 +939,59 @@ String _ownNodeHint(WatchLimitsChoice? limits) {
 }
 
 /// Under Save backend, what the test of the stored backend found: the
-/// wait, the block the server is at, or what stands in the way and what
-/// to do. A setting that does not work loses no funds and tells no one
-/// anything, so a failure reads in the amber of things worth reading,
-/// never in red. Always in the tree, so a screen reader hears it change.
-class _BackendTestStatus extends StatelessWidget {
+/// wait and its Cancel, the block the server is at, what stands in the
+/// way and what to do, or that it was cancelled. A setting that does not
+/// work loses no funds and tells no one anything, so a failure reads in
+/// the amber of things worth reading, never in red. Always in the tree,
+/// so a screen reader hears it change.
+class _BackendTestStatus extends StatefulWidget {
   const _BackendTestStatus({
     required this.network,
     required this.test,
+    required this.onCancel,
     required this.onTestAgain,
   });
 
   final Network network;
   final BackendTest? test;
+  final VoidCallback onCancel;
   final VoidCallback onTestAgain;
 
   @override
+  State<_BackendTestStatus> createState() => _BackendTestStatusState();
+}
+
+class _BackendTestStatusState extends State<_BackendTestStatus> {
+  final FocusNode _cancel = FocusNode(debugLabel: 'Cancel');
+  final FocusNode _testAgain = FocusNode(debugLabel: 'Test again');
+
+  @override
+  void didUpdateWidget(_BackendTestStatus old) {
+    super.didUpdateWidget(old);
+    // The button that had the keyboard leaves: Cancel pressed, or the
+    // test ended on its own, or Test again pressed. The one that takes
+    // its place takes the focus. Read now, while it is still on screen.
+    final FocusNode? next = switch (widget.test) {
+      BackendTesting() when _testAgain.hasFocus => _cancel,
+      BackendTested() when _cancel.hasFocus => _testAgain,
+      _ => null,
+    };
+    if (next == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) next.requestFocus();
+    });
+  }
+
+  @override
+  void dispose() {
+    _cancel.dispose();
+    _testAgain.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final test = this.test;
+    final test = widget.test;
     return Semantics(
       container: true,
       liveRegion: true,
@@ -970,30 +1006,69 @@ class _BackendTestStatus extends StatelessWidget {
 
   Widget _outcome(BuildContext context, BackendTest test) {
     final tokens = Theme.of(context).extension<GerfautTokens>()!;
-    final again = SecondaryButton(label: 'Test again', onPressed: onTestAgain);
+    final again = SecondaryButton(
+      label: 'Test again',
+      focusNode: _testAgain,
+      onPressed: widget.onTestAgain,
+    );
+    final title = tokens.bodySmall.copyWith(
+      fontWeight: FontWeight.w500,
+      fontVariations: const [FontVariation('wght', 500)],
+    );
+    final muted = tokens.bodySmall.copyWith(color: tokens.textMuted);
     switch (test) {
       case BackendTesting(:final backend):
-        return Row(
+        return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            FirstLine(style: tokens.bodySmall, child: const _Spinner()),
-            const SizedBox(width: GerfautSpacing.sm),
-            Expanded(
-              child: Text(
-                backend.onion
-                    ? 'Testing the connection through Tor. This can take a '
-                          'minute or two.'
-                    : 'Testing the connection…',
-                style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                FirstLine(style: tokens.bodySmall, child: const _Spinner()),
+                const SizedBox(width: GerfautSpacing.sm),
+                Expanded(
+                  child: Text(
+                    backend.onion
+                        ? 'Testing the connection through Tor. This can take '
+                              'a minute or two.'
+                        : 'Testing the connection…',
+                    style: muted,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: GerfautSpacing.sm),
+            // The way out beside Save backend, busy while it runs. Read
+            // out with what it stops; the word on it stays "Cancel".
+            Semantics(
+              container: true,
+              button: true,
+              enabled: true,
+              focusable: true,
+              label: 'Cancel the connection test',
+              onTap: widget.onCancel,
+              excludeSemantics: true,
+              child: SecondaryButton(
+                label: 'Cancel',
+                focusNode: _cancel,
+                onPressed: widget.onCancel,
               ),
             ),
           ],
         );
-      case BackendTested(check: final BackendReached check):
-        final title = tokens.bodySmall.copyWith(
-          fontWeight: FontWeight.w500,
-          fontVariations: const [FontVariation('wght', 500)],
+      case BackendTested(check: BackendCancelled()):
+        // No colour and no icon: nothing went wrong, nothing was found.
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Test cancelled', style: title),
+            const SizedBox(height: 2),
+            Text('The backend is saved, but not tested.', style: muted),
+            const SizedBox(height: GerfautSpacing.sm),
+            again,
+          ],
         );
+      case BackendTested(check: final BackendReached check):
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -1046,7 +1121,7 @@ class _BackendTestStatus extends StatelessWidget {
           hint: backendFailureWords(
             check,
             electrum: test.backend.electrum,
-            network: network,
+            network: widget.network,
           ),
           action: again,
           actionsBelow: true,

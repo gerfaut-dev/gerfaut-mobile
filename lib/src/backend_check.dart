@@ -60,17 +60,16 @@ sealed class BackendTest {
   final TestedBackend backend;
 }
 
-/// Under way. Once the form changed since, it is [stale]: it still
-/// keeps Save backend busy, and its answer is dropped.
+/// Under way.
 class BackendTesting extends BackendTest {
-  const BackendTesting(super.backend, {required this.run, this.stale = false});
+  const BackendTesting(super.backend, {required this.run});
 
   /// Tells one test from the next, for the answer that lands late.
   final int run;
-  final bool stale;
 }
 
-/// Done: what the server answered, or what stands in the way.
+/// Done: what the server answered, what stands in the way, or that it
+/// was cancelled.
 class BackendTested extends BackendTest {
   const BackendTested(super.backend, this.check);
 
@@ -89,9 +88,9 @@ class BackendTests extends Notifier<Map<Network, BackendTest>> {
 
   /// Tests the backend stored for [network], unless a test of it is
   /// already under way: one at a time per network. Its answer lands
-  /// whatever page is open, unless a newer test or an edit of the form
-  /// took its place meanwhile. A command that fails says so as a failed
-  /// test, in its own words.
+  /// whatever page is open, unless the test was cancelled, or a newer
+  /// one took its place, meanwhile. A command that fails says so as a
+  /// failed test, in its own words.
   Future<void> test(Network network, TestedBackend backend) async {
     if (testing(network)) return;
     final run = ++_runs;
@@ -111,22 +110,35 @@ class BackendTests extends Notifier<Map<Network, BackendTest>> {
     if (!ref.mounted) return;
     final current = state[network];
     if (current is! BackendTesting || current.run != run) return;
-    _put(network, current.stale ? null : BackendTested(backend, check));
+    _put(network, BackendTested(backend, check));
   }
 
-  /// Takes back what the last test of [network] found: the form no
-  /// longer holds what it was about. A test under way runs to its end,
-  /// one at a time, and its answer is dropped.
+  /// Cancel: the test of [network] under way stops, in the core and on
+  /// screen at once, and says so. The backend stays saved, untested;
+  /// the answer still on its way is dropped.
+  void cancel(Network network) {
+    final current = state[network];
+    if (current is! BackendTesting) return;
+    _put(network, BackendTested(current.backend, const BackendCancelled()));
+    _cancelInCore(network);
+  }
+
+  /// Takes back what the last test of [network] found, or stops the one
+  /// under way: the form no longer holds what it was about.
   void clear(Network network) {
-    switch (state[network]) {
-      case null:
-        return;
-      case BackendTesting(stale: true):
-        return;
-      case BackendTesting(:final backend, :final run):
-        _put(network, BackendTesting(backend, run: run, stale: true));
-      case BackendTested():
-        _put(network, null);
+    final current = state[network];
+    if (current == null) return;
+    _put(network, null);
+    if (current is BackendTesting) _cancelInCore(network);
+  }
+
+  /// Stops the test of [network] in the core, its connections with it.
+  /// Nothing to say if that fails: the screen already let it go.
+  void _cancelInCore(Network network) {
+    try {
+      ref.read(bridgeProvider).cancelBackendCheck(network);
+    } catch (_) {
+      // Already said on screen; the late answer is dropped by its run.
     }
   }
 

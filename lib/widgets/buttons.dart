@@ -83,6 +83,7 @@ class SecondaryButton extends StatelessWidget {
     this.icon,
     this.expand = false,
     this.busy = false,
+    this.focusNode,
   });
 
   final String label;
@@ -92,6 +93,9 @@ class SecondaryButton extends StatelessWidget {
 
   /// As [PrimaryButton.busy].
   final bool busy;
+
+  /// For a screen that hands the keyboard's focus on to it.
+  final FocusNode? focusNode;
 
   @override
   Widget build(BuildContext context) {
@@ -115,6 +119,7 @@ class SecondaryButton extends StatelessWidget {
             ),
       ink: tokens.text,
       edge: onTint ? tokens.border : null,
+      focusNode: focusNode,
     );
   }
 }
@@ -295,6 +300,7 @@ class _FilledAction extends StatefulWidget {
     required this.pressedFill,
     required this.ink,
     this.edge,
+    this.focusNode,
   });
 
   final String label;
@@ -308,6 +314,7 @@ class _FilledAction extends StatefulWidget {
 
   /// A hairline around the fill, for the secondary on a tint.
   final Color? edge;
+  final FocusNode? focusNode;
 
   @override
   State<_FilledAction> createState() => _FilledActionState();
@@ -432,6 +439,7 @@ class _FilledActionState extends State<_FilledAction>
           curve: Curves.easeOut,
           child: FilledButton(
             style: style,
+            focusNode: widget.focusNode,
             onFocusChange: (focused) {
               if (_focused != focused) setState(() => _focused = focused);
             },
