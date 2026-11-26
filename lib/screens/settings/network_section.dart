@@ -1,0 +1,1465 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import '../../src/backend_check.dart';
+import '../../src/bridge.dart';
+import '../../src/electrum.dart';
+import '../../src/format.dart';
+import '../../src/live.dart';
+import '../../src/models.dart';
+import '../../src/state.dart';
+import '../../theme/tokens.dart';
+import '../../widgets/buttons.dart';
+import '../../widgets/facts.dart';
+import '../../widgets/notice.dart';
+import '../../widgets/section_card.dart';
+import '../../widgets/select_field.dart';
+import '../../widgets/setting_switch.dart';
+import '../scan.dart';
+import 'certificates.dart';
+import 'fields.dart';
+import 'tor_section.dart';
+import '../../widgets/toast.dart';
+import '../../widgets/dialog.dart';
+
+/// Said once a server without TLS is saved: an Electrum server over
+/// plain TCP, or an Esplora one over plain HTTP outside Tor. Both read
+/// the same to anything on the path.
+const String _inTheClearNote =
+    'No TLS: what Gerfaut asks this server and '
+    'what it answers travel in the clear.';
+
+const List<({Network network, String hint})> _networkHints = [
+  (network: Network.mainnet, hint: 'The Bitcoin network'),
+  (network: Network.signet, hint: 'Test network, reliable blocks'),
+  (network: Network.testnet4, hint: 'Public test network'),
+  (network: Network.regtest, hint: 'Local development chain'),
+];
+
+/// Where a press of Save backend stands.
+enum _BackendSave {
+  idle,
+
+  /// The server's certificate is being looked at, over the network:
+  /// nothing is written yet, and leaving drops the choice.
+  checking,
+
+  /// The server's certificate is on screen for the person to decide:
+  /// nothing turns while they read it.
+  asking,
+
+  /// The choice is on its way to the vault, a moment's work.
+  writing,
+}
+
+/// The Network section: which chain, which backend serves it, how Tor is
+/// reached, and the certificates accepted along the way.
+class NetworkSection extends ConsumerStatefulWidget {
+  const NetworkSection({super.key, @visibleForTesting this.cameraBuilder});
+
+  /// What the scanner expects when it is opened for a server address.
+  static const String backendScanCaption =
+      'Point the camera at the QR code your node prints beside its '
+      'Electrum or Esplora app.';
+
+  /// Replaces the camera view of the scanner; tests push frames by hand.
+  final CameraBuilder? cameraBuilder;
+
+  @override
+  ConsumerState<NetworkSection> createState() => _NetworkSectionState();
+}
+
+class _NetworkSectionState extends ConsumerState<NetworkSection> {
+  // Backend form.
+  final _esploraController = TextEditingController();
+  final _hostController = TextEditingController();
+  final _portController = TextEditingController(text: '50002');
+  bool _tls = true;
+
+  /// "This is my node", for a server of the user's own. Seeded from the
+  /// saved backend and sent with every save of a custom one: a save that
+  /// left it out would turn it off.
+  bool _ownNode = false;
+  String _backendKind = 'public_esplora';
+
+  /// Chosen public server id; null is the automatic rotation.
+  String? _publicServer;
+  Network? _seededFor;
+  _BackendSave _saving = _BackendSave.idle;
+
+  /// The question asked when the page is left while the server is
+  /// checked; its answer, once given, is true to leave. A save waits for
+  /// it before it writes anything.
+  Future<bool>? _leavePrompt;
+
+  /// Leaving without saving was chosen: nothing is written after that.
+  bool _left = false;
+
+  /// Back was pressed while the choice was being written: the page goes
+  /// once it is, and stays if the vault refuses it, with the reason.
+  bool _popWhenWritten = false;
+
+  /// What the last save had to say about the server being reached in
+  /// the clear, when it is. Cleared at the start of the next save.
+  String? _certificateNote;
+
+  /// Why the core refused the last scanned code, in its own words. Shown
+  /// under the field the scan was meant to fill.
+  String? _scanError;
+
+  /// Why the core refused the last save, in its own words: an address
+  /// it cannot read, such as a host with a port still in it. Shown under
+  /// the button that asked, until the form changes.
+  String? _saveError;
+
+  /// Why the last switch of network was refused.
+  String? _networkError;
+
+  /// The last scanned address names a Tor hidden service. Said under the
+  /// fields for as long as they hold what was scanned: a keystroke or
+  /// another backend option and the fact no longer describes them.
+  bool _scannedOnion = false;
+
+  /// Host whose accepted certificate is one tap from being forgotten.
+  String? _forgettingHost;
+
+  @override
+  void dispose() {
+    _esploraController.dispose();
+    _hostController.dispose();
+    _portController.dispose();
+    super.dispose();
+  }
+
+  void _seedBackendForm(Settings settings) {
+    if (_seededFor == settings.activeNetwork) return;
+    _seededFor = settings.activeNetwork;
+    // Another network, another backend: what the last save said about a
+    // certificate no longer applies.
+    _certificateNote = null;
+    final config = settings.backendFor(settings.activeNetwork);
+    _backendKind = switch (config) {
+      PublicEsplora() => 'public_esplora',
+      CustomEsplora() => 'custom_esplora',
+      CustomElectrum() => 'custom_electrum',
+    };
+    _publicServer = switch (config) {
+      PublicEsplora(:final server) => server,
+      _ => null,
+    };
+    _esploraController.text = switch (config) {
+      CustomEsplora(:final url) => url,
+      _ => '',
+    };
+    final electrum = switch (config) {
+      CustomElectrum(:final url) => parseElectrumUrl(url),
+      _ => (host: '', port: '50002', tls: true),
+    };
+    _hostController.text = electrum.host;
+    _portController.text = electrum.port.isEmpty ? '50002' : electrum.port;
+    _tls = electrum.tls;
+    _ownNode = switch (config) {
+      CustomEsplora(:final ownNode) ||
+      CustomElectrum(:final ownNode) => ownNode,
+      PublicEsplora() => false,
+    };
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(Toast(message));
+  }
+
+  /// Switches the workspace network. A refusal is said under the
+  /// cards; the lists are read again even if the page was left meanwhile.
+  Future<void> _setNetwork(Network network) async {
+    final container = ProviderScope.containerOf(context, listen: false);
+    setState(() => _networkError = null);
+    try {
+      await ref.read(bridgeProvider).setActiveNetwork(network);
+    } on BridgeException catch (error) {
+      if (mounted) setState(() => _networkError = error.message);
+      return;
+    }
+    container.invalidate(settingsProvider);
+    container.invalidate(walletsProvider);
+    if (mounted) _toast('Setting saved');
+  }
+
+  bool get _backendValid {
+    return switch (_backendKind) {
+      'custom_esplora' => _esploraController.text.trim().isNotEmpty,
+      'custom_electrum' =>
+        _hostController.text.trim().isNotEmpty &&
+            RegExp(r'^\d+$').hasMatch(_portController.text.trim()),
+      _ => true,
+    };
+  }
+
+  /// Switches the backend form. What the last save said about a
+  /// certificate belongs to that backend, so it goes with it, and so
+  /// does a refused scan.
+  void _pickBackendKind(String kind) {
+    _clearTest();
+    setState(() {
+      _backendKind = kind;
+      _certificateNote = null;
+      _scanError = null;
+      _saveError = null;
+      _scannedOnion = false;
+    });
+  }
+
+  /// The form of this network changed: what the last test found is no
+  /// longer about what it holds. A test under way runs on, and its
+  /// answer is dropped.
+  void _clearTest() {
+    final network = _seededFor;
+    if (network != null) ref.read(backendTestsProvider.notifier).clear(network);
+  }
+
+  /// A backend field was typed in: the Save button follows what it now
+  /// holds, and neither a refused scan nor an onion fact describes it
+  /// any more.
+  void _onBackendFieldChanged() {
+    _clearTest();
+    setState(() {
+      _scanError = null;
+      _saveError = null;
+      _scannedOnion = false;
+    });
+  }
+
+  /// Reads a server address off a QR code: the one a node prints beside
+  /// its Electrum app, or an Esplora endpoint. The core says which of
+  /// the two it is and the form follows — a scanned `https://` while
+  /// Electrum is selected picks Esplora rather than being refused,
+  /// which is plainly what was meant. Nothing is saved: the fields are
+  /// filled and the person still presses Save.
+  Future<void> _scanBackend() async {
+    final scanned = await Navigator.of(context).push<QrProgress>(
+      MaterialPageRoute<QrProgress>(
+        builder: (_) => ScanScreen(
+          caption: NetworkSection.backendScanCaption,
+          privateKey: privateKeyNotAServer,
+          // A test seam of ScanScreen; this screen only forwards its
+          // own, which is null outside a test.
+          // ignore: invalid_use_of_visible_for_testing_member
+          cameraBuilder: widget.cameraBuilder,
+        ),
+      ),
+    );
+    final text = scanned?.text;
+    if (text == null || text.trim().isEmpty || !mounted) return;
+    final ScannedBackend backend;
+    try {
+      backend = await ref.read(bridgeProvider).parseBackend(text.trim());
+    } catch (error) {
+      // Pointing the wrong QR at it is the likely slip, so the refusal
+      // names what was read instead: a BridgeException prints the words
+      // the core refused it in; a private key in this screen's words.
+      if (mounted) {
+        setState(
+          () => _scanError =
+              error is BridgeException && error.kind == 'private_material'
+              ? privateKeyNotAServer
+              : '$error',
+        );
+      }
+      return;
+    }
+    if (!mounted) return;
+    final settings = ref.read(settingsProvider).value;
+    final stored = settings?.backendFor(settings.activeNetwork);
+    _clearTest();
+    setState(() {
+      _scanError = null;
+      _certificateNote = null;
+      _scannedOnion = backend.onion;
+      // Another server is not the user's node until they say so: left
+      // on, the switch would have Live hand it up to 20 000 addresses.
+      // The stored server read again keeps it.
+      _ownNode = switch (stored) {
+        CustomEsplora(:final url, :final ownNode) ||
+        CustomElectrum(
+          :final url,
+          :final ownNode,
+        ) => ownNode && url == backend.url,
+        _ => false,
+      };
+      if (backend.kind == 'esplora') {
+        _backendKind = 'custom_esplora';
+        _esploraController.text = backend.url;
+      } else {
+        _backendKind = 'custom_electrum';
+        // An IPv6 literal goes back into its brackets: host and port are
+        // joined again on save, and without them the two cannot be told
+        // apart.
+        final host = backend.host;
+        _hostController.text = host.contains(':') ? '[$host]' : host;
+        _portController.text = '${backend.port ?? ''}';
+        _tls = backend.tls;
+      }
+    });
+  }
+
+  Future<void> _saveBackend(Network network) async {
+    // Read from the provider, not this build: a test started a moment
+    // ago holds the button before it is drawn busy.
+    final tests = ref.read(backendTestsProvider.notifier);
+    if (_saving != _BackendSave.idle || tests.testing(network)) return;
+    tests.clear(network);
+    // Held before the first await: the page can be gone by the time the
+    // vault answers, and `ref` goes with it. The toast is the app's, so
+    // it still shows on the page that comes back, and so is the test.
+    final container = ProviderScope.containerOf(context, listen: false);
+    final bridge = ref.read(bridgeProvider);
+    final messenger = ScaffoldMessenger.of(context);
+    final config = switch (_backendKind) {
+      'custom_esplora' => CustomEsplora(
+        url: _esploraController.text.trim(),
+        ownNode: _ownNode,
+      ),
+      'custom_electrum' => CustomElectrum(
+        url: buildElectrumUrl(_hostController.text, _portController.text, _tls),
+        ownNode: _ownNode,
+      ),
+      _ => PublicEsplora(server: _publicServer),
+    };
+    final endpoint = _certificateEndpoint(config, network);
+    setState(() {
+      _saving = endpoint != null ? _BackendSave.checking : _BackendSave.writing;
+      // An Esplora server has no certificate to check here, but its
+      // scheme already says whether it is reached in the clear.
+      _certificateNote = config is CustomEsplora && isPlainHttp(config.url)
+          ? _inTheClearNote
+          : null;
+      _saveError = null;
+      _left = false;
+      _popWhenWritten = false;
+    });
+    try {
+      String? accepted;
+      if (endpoint != null) {
+        final settled = await _settleCertificate(endpoint);
+        if (!settled.proceed) return;
+        accepted = settled.fingerprint;
+      }
+      // A certificate accepted a moment ago goes in with its backend, as
+      // the person asked, whatever happens to the page meanwhile.
+      if (_saving != _BackendSave.writing && await _leftMeanwhile()) return;
+      if (mounted) setState(() => _saving = _BackendSave.writing);
+      if (accepted != null) {
+        // One write, both or neither: a backend the core refuses leaves
+        // its certificate untrusted, as Cancel would.
+        await bridge.setBackendTrusting(network, config, endpoint!, accepted);
+      } else {
+        await bridge.setBackend(network, config);
+      }
+      container.invalidate(settingsProvider);
+      messenger.showSnackBar(Toast('Setting saved'));
+      // Stored: whether it answers is the test's to say, wherever the
+      // person is by then.
+      unawaited(
+        tests.test(
+          network,
+          TestedBackend.of(
+            config,
+            container.read(publicServersProvider(network)).value,
+          ),
+        ),
+      );
+      if (_popWhenWritten && mounted) _leavePage();
+    } on BridgeException catch (error) {
+      // Nothing was saved. A note about a certificate the check could
+      // not look at says nothing next to an address that was refused.
+      if (mounted) {
+        setState(() {
+          _certificateNote = null;
+          _saveError = error.kind == 'private_material'
+              ? privateKeyNotAServer
+              : error.message;
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _saving = _BackendSave.idle);
+    }
+  }
+
+  /// Whether the page was left while the server was checked. If the
+  /// question is still on screen, its answer is waited for: a check
+  /// that ends meanwhile writes nothing until the person has said to
+  /// stay. A page the lock took away is left too: no certificate
+  /// question opens over the lock.
+  Future<bool> _leftMeanwhile() async {
+    final asking = _leavePrompt;
+    if (asking != null) await asking;
+    return _left || !mounted || !(ModalRoute.isActiveOf(context) ?? false);
+  }
+
+  /// Takes this page off, never the first route of the app. Popped
+  /// when it is in front; removed when something opened over it while
+  /// the choice was being written, so that something stays.
+  void _leavePage() {
+    final route = ModalRoute.of(context);
+    if (route == null || !route.isActive || route.isFirst) return;
+    final navigator = Navigator.of(context);
+    if (route.isCurrent) {
+      navigator.pop();
+    } else {
+      navigator.removeRoute(route);
+    }
+  }
+
+  /// Back, from the system, the gesture or the arrow, while a save is
+  /// under way. A check can take a minute against a server that answers
+  /// slowly, and leaving used to drop the choice without a word: the
+  /// person is asked, and staying is the default. Writing takes a
+  /// moment: the page goes once it is done.
+  void _onBlockedBack(bool didPop) {
+    if (didPop) return;
+    switch (_saving) {
+      case _BackendSave.idle:
+        // The save ended between the press and the next frame.
+        _leavePage();
+      case _BackendSave.writing:
+        _popWhenWritten = true;
+      case _BackendSave.checking || _BackendSave.asking:
+        _askBeforeLeaving();
+    }
+  }
+
+  Future<void> _askBeforeLeaving() async {
+    if (_leavePrompt != null) return;
+    final prompt = showGerfautDialog<bool>(
+      context: context,
+      builder: (_) => const _LeaveUnsavedDialog(),
+    ).then((leave) => _left = leave ?? false);
+    _leavePrompt = prompt;
+    final leave = await prompt;
+    _leavePrompt = null;
+    if (leave && mounted) _leavePage();
+  }
+
+  /// The name of the server chosen on [network] that the core no longer
+  /// offers, while that choice is the one in the form: picking another
+  /// server, or Automatic, takes the note away before it is saved.
+  String? _retiredServer(Settings settings, Network network) {
+    final name = settings.retiredServers[network];
+    final config = settings.backendFor(network);
+    if (name == null || config is! PublicEsplora) return null;
+    return _backendKind == 'public_esplora' && _publicServer == config.server
+        ? name
+        : null;
+  }
+
+  /// The server in the catalogue behind an identifier, or null when the
+  /// list is not in yet or no longer carries it.
+  PublicServer? _publicServerById(Network network, String? id) {
+    if (id == null) return null;
+    final servers = ref.read(publicServersProvider(network)).value;
+    for (final server in servers ?? const <PublicServer>[]) {
+      if (server.id == id) return server;
+    }
+    return null;
+  }
+
+  /// The endpoint whose certificate has to be settled before this
+  /// backend is written, or null when there is nothing to settle: an
+  /// Esplora instance is reached over the web PKI like any web site,
+  /// and a public Electrum server a public authority vouches for needs
+  /// no decision from the user.
+  String? _certificateEndpoint(BackendConfig config, Network network) {
+    switch (config) {
+      case CustomElectrum(:final url):
+        return url;
+      case PublicEsplora(:final server):
+        final chosen = _publicServerById(network, server);
+        return chosen?.protocol == ServerProtocol.electrum ? chosen!.url : null;
+      case CustomEsplora():
+        return null;
+    }
+  }
+
+  /// Settles what the server's certificate amounts to before the
+  /// backend is written. Writes nothing: a certificate the person
+  /// accepts comes back as the fingerprint to write with the backend.
+  /// Stops only when they backed out or left: nothing is saved, and
+  /// nothing is trusted.
+  Future<({bool proceed, String? fingerprint})> _settleCertificate(
+    String url,
+  ) async {
+    const go = (proceed: true, fingerprint: null);
+    const stop = (proceed: false, fingerprint: null);
+    final bridge = ref.read(bridgeProvider);
+    final CertificateReport report;
+    try {
+      report = await bridge.inspectCertificate(url);
+    } catch (_) {
+      // The check itself could not run. A server can be down, and the
+      // choice of backend is still the user's: the test that follows the
+      // save says what stands in the way.
+      return go;
+    }
+    if (await _leftMeanwhile() || !mounted) return stop;
+    switch (report.status) {
+      case TrustedCertificate():
+      case PinnedCertificate():
+      case TorCertificate():
+        return go;
+      case NotTlsCertificate():
+        _certificateNote = _inTheClearNote;
+        return go;
+      case UnreachableCertificate():
+        // The test that follows the save says why it was not reached.
+        return go;
+      case UnknownCertificate(:final fingerprint) && final status:
+        setState(() => _saving = _BackendSave.asking);
+        final accepted = await showGerfautDialog<bool>(
+          context: context,
+          builder: (_) =>
+              UnknownCertificateDialog(host: report.host, status: status),
+        );
+        if (accepted != true || !mounted) return stop;
+        setState(() => _saving = _BackendSave.writing);
+        return (proceed: true, fingerprint: fingerprint);
+      case ChangedCertificate(:final presented) && final status:
+        setState(() => _saving = _BackendSave.asking);
+        final accepted = await showGerfautDialog<bool>(
+          context: context,
+          builder: (_) =>
+              ChangedCertificateDialog(host: report.host, status: status),
+        );
+        if (accepted != true || !mounted) return stop;
+        setState(() => _saving = _BackendSave.writing);
+        return (proceed: true, fingerprint: presented);
+    }
+  }
+
+  Future<void> _forgetCertificate(String host) async {
+    await ref.read(bridgeProvider).forgetCertificate(host);
+    ref.invalidate(settingsProvider);
+    if (!mounted) return;
+    setState(() => _forgettingHost = null);
+    _toast('Certificate forgotten');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    final settings = ref.watch(settingsProvider).value;
+    if (settings == null) {
+      return const SettingsPending(what: 'The network settings');
+    }
+    _seedBackendForm(settings);
+    final network = settings.activeNetwork;
+    final test = ref.watch(backendTestsProvider.select((t) => t[network]));
+
+    return PopScope(
+      canPop: _saving == _BackendSave.idle,
+      onPopInvokedWithResult: (didPop, _) => _onBlockedBack(didPop),
+      child: _sections(context, tokens, settings, network, test),
+    );
+  }
+
+  Widget _sections(
+    BuildContext context,
+    GerfautTokens tokens,
+    Settings settings,
+    Network network,
+    BackendTest? test,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SectionCard(
+          icon: LucideIcons.globe,
+          title: 'Network',
+          children: [
+            for (var row = 0; row < _networkHints.length; row += 2) ...[
+              IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(
+                      child: _NetworkCard(
+                        entry: _networkHints[row],
+                        selected: _networkHints[row].network == network,
+                        onTap: () => _setNetwork(_networkHints[row].network),
+                      ),
+                    ),
+                    const SizedBox(width: GerfautSpacing.sm),
+                    Expanded(
+                      child: _NetworkCard(
+                        entry: _networkHints[row + 1],
+                        selected: _networkHints[row + 1].network == network,
+                        onTap: () =>
+                            _setNetwork(_networkHints[row + 1].network),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (row + 2 < _networkHints.length)
+                const SizedBox(height: GerfautSpacing.sm),
+            ],
+            const SizedBox(height: GerfautSpacing.sm),
+            Text(
+              'Only wallets on the selected network are shown.',
+              style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+            ),
+            if (_networkError != null) ...[
+              const SizedBox(height: GerfautSpacing.xs),
+              Semantics(
+                liveRegion: true,
+                child: Text(
+                  _networkError!,
+                  style: tokens.bodySmall.copyWith(color: tokens.pending),
+                ),
+              ),
+            ],
+          ],
+        ),
+        SectionCard(
+          icon: LucideIcons.server,
+          title: 'Backend · ${network.label}',
+          children: [
+            _BackendOption(
+              value: 'public_esplora',
+              groupValue: _backendKind,
+              label: 'Public API',
+              hint:
+                  'Public servers, no setup: the one that answers sees '
+                  "this wallet's addresses.",
+              onChanged: _pickBackendKind,
+            ),
+            _BackendOption(
+              value: 'custom_esplora',
+              groupValue: _backendKind,
+              label: 'My own Esplora',
+              hint: 'An Esplora-compatible HTTP endpoint you run yourself.',
+              onChanged: _pickBackendKind,
+            ),
+            _BackendOption(
+              value: 'custom_electrum',
+              groupValue: _backendKind,
+              label: 'My own Electrum server',
+              hint: 'electrs or Fulcrum, reachable over TLS or plain TCP.',
+              onChanged: _pickBackendKind,
+            ),
+            if (_backendKind == 'public_esplora') ...[
+              const SizedBox(height: GerfautSpacing.sm),
+              FieldLabel('Server', tokens: tokens),
+              const SizedBox(height: GerfautSpacing.sm),
+              _PublicServerField(
+                network: network,
+                selected: _publicServer,
+                onChanged: (id) {
+                  _clearTest();
+                  setState(() => _publicServer = id);
+                },
+              ),
+            ],
+            if (_backendKind == 'custom_esplora') ...[
+              const SizedBox(height: GerfautSpacing.sm),
+              // The field below says its own name; the caption is for
+              // the eye.
+              ExcludeSemantics(child: FieldLabel('Server URL', tokens: tokens)),
+              const SizedBox(height: GerfautSpacing.sm),
+              Row(
+                children: [
+                  Expanded(
+                    child: MonoField(
+                      label: 'Server URL',
+                      controller: _esploraController,
+                      hint: 'https://node.example.org:3002/api',
+                      onChanged: _onBackendFieldChanged,
+                      tokens: tokens,
+                    ),
+                  ),
+                  const SizedBox(width: GerfautSpacing.sm),
+                  _ScanButton(onPressed: _scanBackend),
+                ],
+              ),
+              if (_scanError != null) ...[
+                const SizedBox(height: GerfautSpacing.sm),
+                _ScanRefusal(reason: _scanError!, tokens: tokens),
+              ],
+              if (_scannedOnion) ...[
+                const SizedBox(height: GerfautSpacing.sm),
+                _OnionNote(mode: settings.tor.mode, tokens: tokens),
+              ],
+            ],
+            if (_backendKind == 'custom_electrum') ...[
+              const SizedBox(height: GerfautSpacing.sm),
+              // The field below says its own name; the caption is for
+              // the eye.
+              ExcludeSemantics(child: FieldLabel('Host', tokens: tokens)),
+              const SizedBox(height: GerfautSpacing.sm),
+              Row(
+                children: [
+                  Expanded(
+                    child: MonoField(
+                      label: 'Host',
+                      controller: _hostController,
+                      hint: 'node.example.org or xxxxxxxx.onion',
+                      onChanged: _onBackendFieldChanged,
+                      tokens: tokens,
+                    ),
+                  ),
+                  const SizedBox(width: GerfautSpacing.sm),
+                  _ScanButton(onPressed: _scanBackend),
+                ],
+              ),
+              if (_scanError != null) ...[
+                const SizedBox(height: GerfautSpacing.sm),
+                _ScanRefusal(reason: _scanError!, tokens: tokens),
+              ],
+              const SizedBox(height: GerfautSpacing.sm),
+              // Five digits whole at any text size; the TLS switch goes
+              // under the port when the two no longer fit side by side.
+              Wrap(
+                spacing: GerfautSpacing.md,
+                runSpacing: GerfautSpacing.sm,
+                crossAxisAlignment: WrapCrossAlignment.end,
+                children: [
+                  SizedBox(
+                    width: MonoField.widthFor(
+                      context,
+                      tokens,
+                      characters: 5,
+                      atLeast: 120,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ExcludeSemantics(
+                          child: FieldLabel('Port', tokens: tokens),
+                        ),
+                        const SizedBox(height: GerfautSpacing.sm),
+                        MonoField(
+                          label: 'Port',
+                          controller: _portController,
+                          hint: '50002',
+                          numeric: true,
+                          onChanged: _onBackendFieldChanged,
+                          tokens: tokens,
+                        ),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: GerfautSpacing.sm),
+                    // One node: the switch is read with its name.
+                    child: MergeSemantics(
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          GerfautSwitch(
+                            value: _tls,
+                            onChanged: (value) {
+                              _clearTest();
+                              setState(() => _tls = value);
+                            },
+                          ),
+                          const SizedBox(width: GerfautSpacing.xs),
+                          Text('TLS', style: tokens.bodySmall),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              if (_scannedOnion) ...[
+                const SizedBox(height: GerfautSpacing.sm),
+                _OnionNote(mode: settings.tor.mode, tokens: tokens),
+              ],
+            ],
+            if (_backendKind != 'public_esplora') ...[
+              const SizedBox(height: GerfautSpacing.md),
+              // Declared, never detected: a public server typed in by
+              // hand looks exactly like a node of one's own.
+              SettingSwitch(
+                title: 'This is my node',
+                hint: _ownNodeHint(ref.watch(liveLimitsProvider).value),
+                value: _ownNode,
+                onChanged: (on) {
+                  _clearTest();
+                  setState(() {
+                    _ownNode = on;
+                    _saveError = null;
+                  });
+                },
+              ),
+              const SizedBox(height: GerfautSpacing.md),
+              // The card below is the one that knows which Tor is used
+              // and can test it; this line only says a .onion will take
+              // that route. Naming a port and asking for Orbot outlived
+              // the built-in client.
+              Text(
+                'An address ending in .onion goes through Tor; the Tor '
+                'card below says which one and lets you test it.',
+                style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+              ),
+            ],
+            const SizedBox(height: GerfautSpacing.md),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: PrimaryButton(
+                label: switch (_saving) {
+                  _BackendSave.idle || _BackendSave.asking => 'Save backend',
+                  _BackendSave.checking => 'Checking the certificate…',
+                  _BackendSave.writing => 'Saving…',
+                },
+                busy:
+                    _saving == _BackendSave.checking ||
+                    _saving == _BackendSave.writing ||
+                    test is BackendTesting,
+                onPressed: _backendValid ? () => _saveBackend(network) : null,
+              ),
+            ),
+            if (_saveError != null) ...[
+              const SizedBox(height: GerfautSpacing.sm),
+              _ScanRefusal(reason: _saveError!, tokens: tokens),
+            ],
+            _BackendTestStatus(
+              network: network,
+              test: test,
+              onTestAgain: () => ref
+                  .read(backendTestsProvider.notifier)
+                  .test(
+                    network,
+                    TestedBackend.of(
+                      settings.backendFor(network),
+                      ref.read(publicServersProvider(network)).value,
+                    ),
+                  ),
+            ),
+            if (_certificateNote != null) ...[
+              const SizedBox(height: GerfautSpacing.sm),
+              Text(
+                _certificateNote!,
+                style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+              ),
+            ],
+          ],
+        ),
+        if (_retiredServer(settings, network) case final name?)
+          // Apart from the card it is about, as every notice is.
+          Padding(
+            padding: const EdgeInsets.only(bottom: GerfautSpacing.gutter),
+            child: GerfautNotice(
+              tone: NoticeTone.info,
+              message:
+                  'The server you chose, $name, is no longer offered. '
+                  'Gerfaut tries the public servers in turn until you choose '
+                  'another.',
+            ),
+          ),
+        const TorSection(),
+        if (settings.electrumCerts.isNotEmpty)
+          SectionCard(
+            icon: LucideIcons.shieldCheck,
+            title: 'Trusted certificates',
+            children: [
+              Text(
+                'Servers whose certificate you accepted. Each one must '
+                'keep presenting it; anything else is refused.',
+                style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+              ),
+              const SizedBox(height: GerfautSpacing.md),
+              for (final entry in settings.electrumCerts.entries)
+                CertificateRow(
+                  host: entry.key,
+                  fingerprint: entry.value,
+                  tokens: tokens,
+                  confirming: _forgettingHost == entry.key,
+                  onForgetStart: () =>
+                      setState(() => _forgettingHost = entry.key),
+                  onForgetConfirm: () => _forgetCertificate(entry.key),
+                  onCancel: () => setState(() => _forgettingHost = null),
+                ),
+            ],
+          ),
+      ],
+    );
+  }
+}
+
+/// Asked when the page is left while the server of a new backend is
+/// still being checked. Staying is the default: the primary button, and
+/// what Back or a tap outside answers.
+class _LeaveUnsavedDialog extends StatelessWidget {
+  const _LeaveUnsavedDialog();
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    return AlertDialog(
+      backgroundColor: tokens.surface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(GerfautRadius.lg),
+      ),
+      // Large text on a small phone: the sentence scrolls, it does not
+      // spill over the buttons.
+      scrollable: true,
+      title: Text('Leave without saving?', style: tokens.h2),
+      content: Text(
+        'Gerfaut is still checking the server, which can take a minute '
+        'when it answers slowly. If you leave now, nothing is saved and '
+        'the backend in use stays the same.',
+        style: tokens.bodySmall,
+      ),
+      actions: [
+        SecondaryButton(
+          label: 'Leave',
+          onPressed: () => Navigator.of(context).pop(true),
+        ),
+        PrimaryButton(
+          label: 'Stay',
+          onPressed: () => Navigator.of(context).pop(false),
+        ),
+      ],
+    );
+  }
+}
+
+/// What "This is my node" does and when to leave it off, in the limits
+/// the core keeps; the first sentence waits for them.
+String _ownNodeHint(WatchLimitsChoice? limits) {
+  const leaveOff =
+      'Leave it off for a server you do not run: it would refuse most of '
+      'them, and learn every one.';
+  if (limits == null) return leaveOff;
+  return 'Live then follows up to ${groupThousands('${limits.ownNode.total}')} '
+      'addresses instead of ${groupThousands('${limits.any.total}')}. $leaveOff';
+}
+
+/// Under Save backend, what the test of the stored backend found: the
+/// wait, the block the server is at, or what stands in the way and what
+/// to do. A setting that does not work loses no funds and tells no one
+/// anything, so a failure reads in the amber of things worth reading,
+/// never in red. Always in the tree, so a screen reader hears it change.
+class _BackendTestStatus extends StatelessWidget {
+  const _BackendTestStatus({
+    required this.network,
+    required this.test,
+    required this.onTestAgain,
+  });
+
+  final Network network;
+  final BackendTest? test;
+  final VoidCallback onTestAgain;
+
+  @override
+  Widget build(BuildContext context) {
+    final test = this.test;
+    return Semantics(
+      container: true,
+      liveRegion: true,
+      child: test == null
+          ? const SizedBox.shrink()
+          : Padding(
+              padding: const EdgeInsets.only(top: GerfautSpacing.sm),
+              child: _outcome(context, test),
+            ),
+    );
+  }
+
+  Widget _outcome(BuildContext context, BackendTest test) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    final again = SecondaryButton(label: 'Test again', onPressed: onTestAgain);
+    switch (test) {
+      case BackendTesting(:final backend):
+        return Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            FirstLine(style: tokens.bodySmall, child: const _Spinner()),
+            const SizedBox(width: GerfautSpacing.sm),
+            Expanded(
+              child: Text(
+                backend.onion
+                    ? 'Testing the connection through Tor. This can take a '
+                          'minute or two.'
+                    : 'Testing the connection…',
+                style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+              ),
+            ),
+          ],
+        );
+      case BackendTested(check: final BackendReached check):
+        final title = tokens.bodySmall.copyWith(
+          fontWeight: FontWeight.w500,
+          fontVariations: const [FontVariation('wght', 500)],
+        );
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                FirstLine(
+                  style: title,
+                  child: Icon(
+                    LucideIcons.circleCheck,
+                    size: 16,
+                    color: tokens.confirmed,
+                  ),
+                ),
+                const SizedBox(width: GerfautSpacing.sm),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text.rich(
+                        TextSpan(
+                          text: 'Connected to ',
+                          style: title,
+                          children: [_host(check.host, title, tokens)],
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        backendReachedLine(check),
+                        style: tokens.bodySmall.copyWith(
+                          color: tokens.textMuted,
+                          fontFeatures: const [FontFeature.tabularFigures()],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: GerfautSpacing.sm),
+            again,
+          ],
+        );
+      case BackendTested(check: final BackendFailed check):
+        return GerfautNotice(
+          tone: NoticeTone.info,
+          message: check.host.isEmpty
+              ? 'Could not connect'
+              : 'Could not connect to ${check.host}',
+          hint: backendFailureWords(
+            check,
+            electrum: test.backend.electrum,
+            network: network,
+          ),
+          action: again,
+          actionsBelow: true,
+        );
+    }
+  }
+
+  /// The host as an identifier, the way the screens print one: mono,
+  /// at the size of the words around it.
+  static TextSpan _host(String host, TextStyle around, GerfautTokens tokens) {
+    return TextSpan(
+      text: host,
+      style: tokens.data.copyWith(
+        fontSize: around.fontSize,
+        height: around.height,
+        color: around.color,
+      ),
+    );
+  }
+}
+
+/// The loader of a busy button, beside a line that says what is under
+/// way: one turn a second, still when the phone turns animations off.
+class _Spinner extends StatefulWidget {
+  const _Spinner();
+
+  @override
+  State<_Spinner> createState() => _SpinnerState();
+}
+
+class _SpinnerState extends State<_Spinner>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _turn = AnimationController(
+    vsync: this,
+    duration: const Duration(seconds: 1),
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _turn.stop();
+    } else if (!_turn.isAnimating) {
+      _turn.repeat();
+    }
+  }
+
+  @override
+  void dispose() {
+    _turn.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    return RotationTransition(
+      turns: _turn,
+      child: Icon(LucideIcons.loaderCircle, size: 16, color: tokens.textMuted),
+    );
+  }
+}
+
+class _NetworkCard extends StatelessWidget {
+  const _NetworkCard({
+    required this.entry,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final ({Network network, String hint}) entry;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    // One of four, read as such: which one is in use, among how many.
+    return MergeSemantics(
+      child: Semantics(
+        button: true,
+        inMutuallyExclusiveGroup: true,
+        selected: selected,
+        // The ripple is drawn on a Material over the box: on the page
+        // under it, the box's fill would hide it.
+        child: Container(
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+            color: selected ? tokens.surfaceSunken : tokens.surface,
+            borderRadius: BorderRadius.circular(GerfautRadius.md),
+            border: Border.all(
+              color: selected ? tokens.primary : tokens.border,
+            ),
+          ),
+          child: Material(
+            type: MaterialType.transparency,
+            child: InkWell(
+              onTap: selected ? null : onTap,
+              child: Padding(
+                padding: const EdgeInsets.all(
+                  GerfautSpacing.sm + GerfautSpacing.xs,
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            entry.network.label,
+                            style: tokens.bodySmall.copyWith(
+                              color: selected ? tokens.primary : tokens.text,
+                              fontWeight: FontWeight.w500,
+                              fontVariations: const [
+                                FontVariation('wght', 500),
+                              ],
+                            ),
+                          ),
+                        ),
+                        if (selected)
+                          Icon(
+                            LucideIcons.check,
+                            size: 16,
+                            color: tokens.primary,
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      entry.hint,
+                      style: tokens.label.copyWith(color: tokens.textMuted),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Why the core refused the last code read, in its own words, under the
+/// field the scan was meant to fill.
+///
+/// A hint, not a panel: nothing was lost, and the text belongs to the
+/// field it explains. It is announced all the same — it lands in
+/// reaction to a scan the person just made, and the camera has closed
+/// by the time it appears, so nothing else on screen says the code was
+/// turned down.
+class _ScanRefusal extends StatelessWidget {
+  const _ScanRefusal({required this.reason, required this.tokens});
+
+  final String reason;
+  final GerfautTokens tokens;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      liveRegion: true,
+      child: Text(
+        reason,
+        style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+      ),
+    );
+  }
+}
+
+/// What the core read off the scanned address: a Tor hidden service,
+/// so this backend is reached through Tor and nothing else. Names the
+/// Tor mode in force, which the card below is the place to change.
+class _OnionNote extends StatelessWidget {
+  const _OnionNote({required this.mode, required this.tokens});
+
+  final TorMode mode;
+  final GerfautTokens tokens;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Sits on the first line of the text, whatever its size.
+        FirstLine(
+          style: tokens.bodySmall,
+          child: Icon(LucideIcons.eyeOff, size: 16, color: tokens.textMuted),
+        ),
+        const SizedBox(width: GerfautSpacing.sm),
+        Expanded(
+          child: Text(
+            'A Tor hidden service: reached through Tor only '
+            '(mode: ${mode.label}).',
+            style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// Opens the camera on the QR code a node prints beside its Electrum or
+/// Esplora app. Nobody retypes a 56-character onion address.
+class _ScanButton extends StatelessWidget {
+  const _ScanButton({required this.onPressed});
+
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      button: true,
+      // "Scan" alone says nothing once the field is out of sight.
+      label: 'Scan a server address QR code',
+      onTap: onPressed,
+      excludeSemantics: true,
+      child: SecondaryButton(
+        label: 'Scan',
+        icon: LucideIcons.scanLine,
+        onPressed: onPressed,
+      ),
+    );
+  }
+}
+
+/// Which public server answers: Automatic first, then every server the
+/// core lists for this network. A quiet line stands in for the control
+/// when the catalogue is empty (regtest) or out of reach.
+class _PublicServerField extends ConsumerWidget {
+  const _PublicServerField({
+    required this.network,
+    required this.selected,
+    required this.onChanged,
+  });
+
+  final Network network;
+
+  /// Identifier of the chosen server; null is the automatic rotation.
+  final String? selected;
+  final ValueChanged<String?> onChanged;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    return ref
+        .watch(publicServersProvider(network))
+        .when(
+          loading: () => Text(
+            'Loading the server list…',
+            style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+          ),
+          error: (error, stack) => Text(
+            'The server list is unavailable. Gerfaut keeps rotating over '
+            'every public instance.',
+            style: tokens.bodySmall.copyWith(color: tokens.pending),
+          ),
+          data: (servers) => _list(context, tokens, servers),
+        );
+  }
+
+  Widget _list(
+    BuildContext context,
+    GerfautTokens tokens,
+    List<PublicServer> servers,
+  ) {
+    if (servers.isEmpty) {
+      return Text(
+        'No public server exists on ${network.label}. Run your own node '
+        'and point Gerfaut at it.',
+        style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+      );
+    }
+    // A server retired by a later version falls back to Automatic, which
+    // is what the core does with an identifier it no longer knows.
+    PublicServer? chosen;
+    for (final server in servers) {
+      if (server.id == selected) chosen = server;
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        GerfautSelect<String?>.items(
+          label: 'Public server',
+          value: chosen?.id,
+          items: [
+            const GerfautSelectItem<String?>(
+              value: null,
+              title: 'Automatic',
+              subtitle: 'Rotates over every public Esplora.',
+            ),
+            for (final server in servers)
+              // A host is an identifier: mono, never cut at the end.
+              GerfautSelectItem<String?>(
+                value: server.id,
+                title: server.label,
+                // A server that signs its own certificate says so here,
+                // before it is picked rather than after.
+                subtitle: server.selfSigned
+                    ? '${server.protocol.label} · signs its own certificate'
+                    : server.protocol.label,
+                mono: true,
+              ),
+          ],
+          onChanged: onChanged,
+        ),
+        if (chosen?.selfSigned ?? false) ...[
+          const SizedBox(height: GerfautSpacing.sm),
+          Text(
+            'This server signs its own certificate. Gerfaut shows you its '
+            'fingerprint before it connects.',
+            style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _BackendOption extends StatelessWidget {
+  const _BackendOption({
+    required this.value,
+    required this.groupValue,
+    required this.label,
+    required this.hint,
+    required this.onChanged,
+  });
+
+  final String value;
+  final String groupValue;
+  final String label;
+  final String hint;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    final selected = value == groupValue;
+    // One of three, read as such: the drawn circle says nothing aloud.
+    return MergeSemantics(
+      child: Semantics(
+        button: true,
+        inMutuallyExclusiveGroup: true,
+        selected: selected,
+        // Its own Material: the card around it is a decorated box, and
+        // a ripple drawn on the page under it would never show.
+        child: Material(
+          type: MaterialType.transparency,
+          child: InkWell(
+            borderRadius: BorderRadius.circular(GerfautRadius.md),
+            onTap: () => onChanged(value),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: GerfautSpacing.sm),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // The dot rides the first line of a label that wraps, by
+                  // measurement — the 2px nudge it replaces was right at one
+                  // font size and wrong at every other.
+                  FirstLine(
+                    style: tokens.bodySmall,
+                    child: Container(
+                      width: 20,
+                      height: 20,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        // A control's edge, not a card's: Ardoise, which
+                        // holds 3:1 on both surfaces where Brume does not.
+                        border: Border.all(
+                          color: selected ? tokens.primary : tokens.textMuted,
+                          width: 2,
+                        ),
+                      ),
+                      child: selected
+                          ? Center(
+                              child: Container(
+                                width: 10,
+                                height: 10,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: tokens.primary,
+                                ),
+                              ),
+                            )
+                          : null,
+                    ),
+                  ),
+                  const SizedBox(width: GerfautSpacing.sm),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          label,
+                          style: tokens.bodySmall.copyWith(
+                            fontWeight: FontWeight.w500,
+                            fontVariations: const [FontVariation('wght', 500)],
+                          ),
+                        ),
+                        Text(
+                          hint,
+                          style: tokens.bodySmall.copyWith(
+                            color: tokens.textMuted,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

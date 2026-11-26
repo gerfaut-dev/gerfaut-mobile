@@ -1,0 +1,4124 @@
+// Typed shapes of the bridge JSON. They mirror gerfaut-core's serde
+// DTOs one to one (snake_case keys); if a field changes there, it
+// changes here.
+
+import 'format.dart' show AmountUnit;
+
+/// Networks Gerfaut can operate on.
+enum Network {
+  mainnet('mainnet', 'Mainnet'),
+  signet('signet', 'Signet'),
+  testnet4('testnet4', 'Testnet 4'),
+  regtest('regtest', 'Regtest');
+
+  const Network(this.id, this.label);
+
+  /// Stable machine identifier, as serialized by the core.
+  final String id;
+
+  /// Display name.
+  final String label;
+
+  static Network fromId(String id) =>
+      Network.values.firstWhere((n) => n.id == id);
+}
+
+/// Script type of a wallet.
+enum ScriptKind {
+  legacy('legacy', 'Legacy (P2PKH)'),
+  nestedSegwit('nested_segwit', 'Nested SegWit (P2SH-P2WPKH)'),
+  segwit('segwit', 'Native SegWit (P2WPKH)'),
+  taproot('taproot', 'Taproot (P2TR)'),
+  witnessScript('witness_script', 'Script (P2WSH)'),
+  legacyScript('legacy_script', 'Script (P2SH)'),
+  bare('bare', 'Bare script');
+
+  const ScriptKind(this.id, this.label);
+
+  final String id;
+  final String label;
+
+  static ScriptKind fromId(String id) =>
+      ScriptKind.values.firstWhere((k) => k.id == id);
+
+  /// How the addresses of this script type start on [network], for the
+  /// single-key types: what a person compares with their own wallet.
+  /// Null for a script, whose addresses say nothing of its type.
+  String? addressStart(Network network) {
+    final test = network != Network.mainnet;
+    final regtest = network == Network.regtest;
+    return switch (this) {
+      legacy => test ? 'm or n' : '1',
+      nestedSegwit => test ? '2' : '3',
+      segwit => regtest ? 'bcrt1q' : (test ? 'tb1q' : 'bc1q'),
+      taproot => regtest ? 'bcrt1p' : (test ? 'tb1p' : 'bc1p'),
+      witnessScript || legacyScript || bare => null,
+    };
+  }
+}
+
+/// What the input classifier recognized.
+enum RecognizedKind {
+  descriptor('descriptor', 'Output descriptor'),
+  descriptorPair('descriptor_pair', 'Descriptor pair (receive + change)'),
+  multipathDescriptor('multipath_descriptor', 'Multipath descriptor (BIP-389)'),
+  extendedKey('extended_key', 'Extended public key'),
+  address('address', 'Single address'),
+  walletExport('wallet_export', 'Wallet export file'),
+  bsms('bsms', 'BSMS record');
+
+  const RecognizedKind(this.id, this.label);
+
+  final String id;
+  final String label;
+
+  static RecognizedKind fromId(String id) =>
+      RecognizedKind.values.firstWhere((k) => k.id == id);
+}
+
+/// Non-fatal findings surfaced on the confirmation screen.
+enum InputWarning {
+  assumedSegwit(
+    'assumed_segwit',
+    'This key carries no script type. Check the one selected below.',
+  ),
+  slip132Converted(
+    'slip132_converted',
+    'The SLIP-132 prefix was converted to a standard extended key.',
+  ),
+  changeNotTracked(
+    'change_not_tracked',
+    'No change path was provided: change outputs will not be tracked.',
+  ),
+  multipleAccountsInFile(
+    'multiple_accounts_in_file',
+    'The file holds several account types; the preferred one was selected.',
+  ),
+  nonStandardDerivation(
+    'non_standard_derivation',
+    'The paths chosen are not the usual 0/* and 1/*: compare the first '
+        'address with your wallet.',
+  ),
+  assumedBranches(
+    'assumed_branches',
+    'This QR code carries no receive or change path, so Gerfaut assumes '
+        'the usual 0/* and 1/*. Compare the first address with your signer.',
+  );
+
+  const InputWarning(this.id, this.label);
+
+  final String id;
+  final String label;
+
+  static InputWarning fromId(String id) =>
+      InputWarning.values.firstWhere((w) => w.id == id);
+}
+
+/// Normalized wallet material produced by the classifier.
+sealed class ParsedPayload {
+  const ParsedPayload();
+
+  factory ParsedPayload.fromJson(Map<String, dynamic> json) {
+    return switch (json['type'] as String) {
+      'descriptors' => DescriptorsPayload(
+        external: json['external'] as String,
+        internal: json['internal'] as String?,
+        script: ScriptKind.fromId(json['script'] as String),
+      ),
+      'address' => AddressPayload(address: json['address'] as String),
+      final other => throw FormatException('unknown payload type: $other'),
+    };
+  }
+}
+
+class DescriptorsPayload extends ParsedPayload {
+  const DescriptorsPayload({
+    required this.external,
+    required this.internal,
+    required this.script,
+  });
+
+  final String external;
+  final String? internal;
+  final ScriptKind script;
+}
+
+class AddressPayload extends ParsedPayload {
+  const AddressPayload({required this.address});
+
+  final String address;
+}
+
+/// Full classification result of pasted or imported wallet material.
+class ParsedInput {
+  const ParsedInput({
+    required this.kind,
+    required this.networks,
+    required this.payload,
+    required this.warnings,
+    required this.rawJson,
+    this.scriptOptions = const [],
+    this.previewAddress,
+    this.derivation,
+    this.derivationEditable = false,
+  });
+
+  factory ParsedInput.fromJson(Map<String, dynamic> json, String rawJson) {
+    return ParsedInput(
+      kind: RecognizedKind.fromId(json['kind'] as String),
+      networks: (json['networks'] as List)
+          .map((n) => Network.fromId(n as String))
+          .toList(),
+      payload: ParsedPayload.fromJson(json['payload'] as Map<String, dynamic>),
+      warnings: (json['warnings'] as List)
+          .map((w) => InputWarning.fromId(w as String))
+          .toList(),
+      rawJson: rawJson,
+      scriptOptions: ((json['script_options'] as List?) ?? const [])
+          .map((s) => ScriptKind.fromId(s as String))
+          .toList(),
+      previewAddress: json['preview_address'] as String?,
+      derivation: json['derivation'] == null
+          ? null
+          : DerivationChoice.fromJson(
+              json['derivation'] as Map<String, dynamic>,
+            ),
+      derivationEditable: json['derivation_editable'] as bool? ?? false,
+    );
+  }
+
+  final RecognizedKind kind;
+
+  /// Candidate networks, in display order. More than one entry means the
+  /// input alone cannot tell and the user decides.
+  final List<Network> networks;
+  final ParsedPayload payload;
+  final List<InputWarning> warnings;
+
+  /// The exact JSON the core produced, passed back verbatim to
+  /// `add_wallet` so the roundtrip can never drift.
+  final String rawJson;
+
+  /// Script types the user may switch to. Empty when the input fixes
+  /// its own script type; non-empty only for a lone extended key.
+  final List<ScriptKind> scriptOptions;
+
+  /// First receive address on the first candidate network, so the user
+  /// can compare it with their wallet. Null when nothing derives.
+  final String? previewAddress;
+
+  /// The derivation in effect: set only for a lone extended key.
+  final DerivationChoice? derivation;
+
+  /// True when the input leaves the paths open (a lone extended key).
+  final bool derivationEditable;
+}
+
+/// Where a lone extended key derives its addresses: the receive and
+/// change branches under the key, and the key origin.
+class DerivationChoice {
+  const DerivationChoice({
+    required this.receive,
+    required this.change,
+    required this.origin,
+  });
+
+  /// The paths the core applies when nothing else is asked.
+  static const DerivationChoice standard = DerivationChoice(
+    receive: '0/*',
+    change: '1/*',
+    origin: null,
+  );
+
+  factory DerivationChoice.fromJson(Map<String, dynamic> json) {
+    return DerivationChoice(
+      receive: json['receive'] as String,
+      change: json['change'] as String?,
+      origin: json['origin'] as String?,
+    );
+  }
+
+  /// Receive branch, relative to the key: `0/*`, `*`, `2/0/*`.
+  final String receive;
+
+  /// Change branch in the same form; null leaves change untracked.
+  final String? change;
+
+  /// Key origin, `[fingerprint/path]`; null keeps the input's own.
+  final String? origin;
+
+  Map<String, dynamic> toJson() => {
+    'receive': receive,
+    'change': change,
+    'origin': origin,
+  };
+
+  @override
+  bool operator ==(Object other) =>
+      other is DerivationChoice &&
+      other.receive == receive &&
+      other.change == change &&
+      other.origin == origin;
+
+  @override
+  int get hashCode => Object.hash(receive, change, origin);
+}
+
+/// The choices of the import screen, all optional. Inputs that fix
+/// their own script type and paths ignore those two.
+class ImportOptions {
+  const ImportOptions({this.script, this.derivation, this.network});
+
+  final ScriptKind? script;
+  final DerivationChoice? derivation;
+
+  /// The network the wallet is about to be added on: the first address
+  /// comes back derived for it when the input allows it.
+  final Network? network;
+
+  Map<String, dynamic> toJson() => {
+    'script': script?.id,
+    'derivation': derivation?.toJson(),
+    'network': network?.id,
+  };
+}
+
+/// Balance split as BDK reports it, in sats.
+class BalanceSnapshot {
+  const BalanceSnapshot({
+    required this.confirmed,
+    required this.trustedPending,
+    required this.untrustedPending,
+    required this.immature,
+    required this.total,
+    this.pendingNetSats,
+  });
+
+  factory BalanceSnapshot.fromJson(Map<String, dynamic> json) {
+    return BalanceSnapshot(
+      confirmed: json['confirmed'] as int,
+      trustedPending: json['trusted_pending'] as int,
+      untrustedPending: json['untrusted_pending'] as int,
+      immature: json['immature'] as int,
+      total: json['total'] as int,
+      pendingNetSats: json['pending_net_sats'] as int?,
+    );
+  }
+
+  final int confirmed;
+  final int trustedPending;
+  final int untrustedPending;
+  final int immature;
+  final int total;
+
+  /// Signed sum of the transactions not yet in a block: what of [total]
+  /// is still arriving, or has left it without the chain having taken
+  /// it yet. Null once everything is settled.
+  final int? pendingNetSats;
+}
+
+/// When and against what a wallet last synced.
+class SyncStamp {
+  const SyncStamp({
+    required this.at,
+    required this.tipHeight,
+    required this.backend,
+  });
+
+  factory SyncStamp.fromJson(Map<String, dynamic> json) {
+    return SyncStamp(
+      at: json['at'] as int,
+      tipHeight: json['tip_height'] as int,
+      backend: json['backend'] as String,
+    );
+  }
+
+  final int at;
+  final int tipHeight;
+  final String backend;
+
+  /// Whether this sync is [span] old or more at [now]. A stamp ahead of
+  /// [now] counts by how far ahead it is: a device clock set back since
+  /// must not keep a sync young for as long as it was set back.
+  bool olderThan(Duration span, {required DateTime now}) =>
+      (now.millisecondsSinceEpoch ~/ 1000 - at).abs() >= span.inSeconds;
+}
+
+/// The glyph a wallet shows next to its name, chosen by the user. The
+/// set and the identifiers are the core's, so both apps draw the same
+/// icon for the same value: seven symbols first, then the signing
+/// devices, listed in the order the picker shows them.
+enum WalletIcon {
+  wallet('wallet', 'Wallet'),
+  key('key', 'Key'),
+  shield('shield', 'Shield'),
+  mapPin('map_pin', 'Pin'),
+  snowflake('snowflake', 'Snowflake'),
+  landmark('landmark', 'Landmark'),
+  piggyBank('piggy_bank', 'Piggy bank'),
+  swivelKey('swivel_key', 'Swivel key'),
+  slimStick('slim_stick', 'Slim stick'),
+  usbStick('usb_stick', 'USB stick'),
+  twoButtonDevice('two_button_device', 'Two-button device'),
+  squareTouchscreen('square_touchscreen', 'Square touchscreen'),
+  wheelDevice('wheel_device', 'Scroll wheel device'),
+  pocketScreen('pocket_screen', 'Pocket screen'),
+  wideScreenBar('wide_screen_bar', 'Wide screen bar'),
+  curvedSlate('curved_slate', 'Curved slate'),
+  framedSlate('framed_slate', 'Framed slate'),
+  keypadBar('keypad_bar', 'Keypad bar'),
+  calculator('calculator', 'Calculator'),
+  keyboardDevice('keyboard_device', 'Keyboard device'),
+  touchPhone('touch_phone', 'Touch phone'),
+  airGappedPhone('air_gapped_phone', 'Air-gapped phone'),
+  screenCard('screen_card', 'Screen card'),
+  nfcCard('nfc_card', 'NFC card'),
+  chipCard('chip_card', 'Chip card'),
+  cardSet('card_set', 'Card set'),
+  deviceWithCards('device_with_cards', 'Device and cards'),
+  nfcPaddle('nfc_paddle', 'NFC paddle'),
+  fingerprintPebble('fingerprint_pebble', 'Fingerprint pebble'),
+  cameraStick('camera_stick', 'Camera stick'),
+  joystickBoard('joystick_board', 'Joystick board'),
+  scannerBoard('scanner_board', 'Scanner board');
+
+  const WalletIcon(this.id, this.label);
+
+  /// Stable machine identifier, as serialized by the core.
+  final String id;
+
+  /// What a screen reader calls it.
+  final String label;
+
+  /// The icon behind an identifier; the generic wallet for one this
+  /// build does not know, or a vault written before icons existed.
+  static WalletIcon fromId(String? id) {
+    for (final icon in WalletIcon.values) {
+      if (icon.id == id) return icon;
+    }
+    return WalletIcon.wallet;
+  }
+}
+
+/// Wallet metadata as stored in the vault.
+class WalletMeta {
+  const WalletMeta({
+    required this.id,
+    required this.name,
+    this.icon = WalletIcon.wallet,
+    required this.network,
+    required this.kind,
+    required this.recognizedAs,
+    required this.createdAt,
+    required this.gapLimit,
+    required this.lastSync,
+    required this.cachedBalance,
+    required this.cachedTxCount,
+    this.scanGap = 20,
+    this.livePinned = false,
+    this.lastFailure,
+  });
+
+  factory WalletMeta.fromJson(Map<String, dynamic> json) {
+    final cached = json['cached'] as Map<String, dynamic>;
+    return WalletMeta(
+      id: json['id'] as String,
+      name: json['name'] as String,
+      icon: WalletIcon.fromId(json['icon'] as String?),
+      network: Network.fromId(json['network'] as String),
+      kind: WalletKind.fromJson(json['kind'] as Map<String, dynamic>),
+      recognizedAs: RecognizedKind.fromId(json['recognized_as'] as String),
+      createdAt: json['created_at'] as int,
+      gapLimit: json['gap_limit'] as int,
+      // Same fallback as the core: wallets stored before scan tracking
+      // were scanned with the default gap.
+      scanGap: json['scan_gap'] as int? ?? 20,
+      lastSync: json['last_sync'] == null
+          ? null
+          : SyncStamp.fromJson(json['last_sync'] as Map<String, dynamic>),
+      cachedBalance: BalanceSnapshot.fromJson(
+        cached['balance'] as Map<String, dynamic>,
+      ),
+      cachedTxCount: cached['tx_count'] as int,
+      // Left out by the core when false, and by every core before pins.
+      livePinned: json['live_pinned'] as bool? ?? false,
+      // Left out while the last sync did not fail, and by every core
+      // that kept no failure.
+      lastFailure: json['last_failure'] == null
+          ? null
+          : SyncFailureStamp.fromJson(
+              json['last_failure'] as Map<String, dynamic>,
+            ),
+    );
+  }
+
+  final String id;
+  final String name;
+
+  /// The glyph beside the name; the generic wallet unless the user
+  /// picked another.
+  final WalletIcon icon;
+  final Network network;
+  final WalletKind kind;
+  final RecognizedKind recognizedAs;
+  final int createdAt;
+  final int gapLimit;
+
+  /// Gap limit the last full scan actually used; a setting raised above
+  /// it makes the next sync a full scan again.
+  final int scanGap;
+  final SyncStamp? lastSync;
+  final BalanceSnapshot cachedBalance;
+  final int cachedTxCount;
+
+  /// Live follows this wallet before the others when it cannot follow
+  /// every address. Off unless the user pinned it.
+  final bool livePinned;
+
+  /// The failure of the last sync, kept by the vault until one
+  /// succeeds; null while the last one did not fail.
+  final SyncFailureStamp? lastFailure;
+
+  bool get isSingleAddress => kind is SingleAddressKind;
+
+  /// The same wallet with the name, the icon or the pin changed: what a
+  /// rename, an icon pick or a pin leaves behind.
+  WalletMeta copyWith({String? name, WalletIcon? icon, bool? livePinned}) {
+    return WalletMeta(
+      id: id,
+      name: name ?? this.name,
+      icon: icon ?? this.icon,
+      livePinned: livePinned ?? this.livePinned,
+      network: network,
+      kind: kind,
+      recognizedAs: recognizedAs,
+      createdAt: createdAt,
+      gapLimit: gapLimit,
+      scanGap: scanGap,
+      lastSync: lastSync,
+      cachedBalance: cachedBalance,
+      cachedTxCount: cachedTxCount,
+      lastFailure: lastFailure,
+    );
+  }
+}
+
+/// The oldest sync among the wallets that have one: the date of the
+/// least fresh figure when one line speaks for them all. A wallet that
+/// never synced has no date to give.
+SyncStamp? leastFreshSync(Iterable<WalletMeta> wallets) {
+  SyncStamp? oldest;
+  for (final wallet in wallets) {
+    final stamp = wallet.lastSync;
+    if (stamp != null && (oldest == null || stamp.at < oldest.at)) {
+      oldest = stamp;
+    }
+  }
+  return oldest;
+}
+
+/// What a wallet actually watches, as stored in the vault.
+sealed class WalletKind {
+  const WalletKind();
+
+  factory WalletKind.fromJson(Map<String, dynamic> json) {
+    return switch (json['type'] as String) {
+      'single_address' => SingleAddressKind(address: json['address'] as String),
+      _ => DescriptorsKind(
+        external: json['external'] as String,
+        internal: json['internal'] as String?,
+        script: ScriptKind.fromId(json['script'] as String),
+      ),
+    };
+  }
+}
+
+class DescriptorsKind extends WalletKind {
+  const DescriptorsKind({
+    required this.external,
+    required this.internal,
+    required this.script,
+  });
+
+  final String external;
+  final String? internal;
+  final ScriptKind script;
+}
+
+class SingleAddressKind extends WalletKind {
+  const SingleAddressKind({required this.address});
+
+  final String address;
+}
+
+/// Confirmation state of a transaction or UTXO.
+class TxStatus {
+  const TxStatus.confirmed({required int this.height, this.timestamp})
+    : confirmed = true;
+
+  const TxStatus.pending() : confirmed = false, height = null, timestamp = null;
+
+  factory TxStatus.fromJson(Map<String, dynamic> json) {
+    return switch (json['state'] as String) {
+      'confirmed' => TxStatus.confirmed(
+        height: json['height'] as int,
+        timestamp: json['timestamp'] as int?,
+      ),
+      _ => const TxStatus.pending(),
+    };
+  }
+
+  final bool confirmed;
+  final int? height;
+  final int? timestamp;
+}
+
+/// One transaction in a wallet's list.
+class TxSummary {
+  const TxSummary({
+    required this.txid,
+    required this.netSats,
+    required this.feeSats,
+    required this.status,
+    required this.confirmations,
+  });
+
+  factory TxSummary.fromJson(Map<String, dynamic> json) {
+    return TxSummary(
+      txid: json['txid'] as String,
+      netSats: json['net_sats'] as int,
+      feeSats: json['fee_sats'] as int?,
+      status: TxStatus.fromJson(json['status'] as Map<String, dynamic>),
+      confirmations: json['confirmations'] as int,
+    );
+  }
+
+  final String txid;
+  final int netSats;
+  final int? feeSats;
+  final TxStatus status;
+  final int confirmations;
+}
+
+/// A decoded OP_RETURN payload.
+class OpReturnData {
+  const OpReturnData({required this.hex, required this.text, this.label});
+
+  factory OpReturnData.fromJson(Map<String, dynamic> json) {
+    return OpReturnData(
+      hex: json['hex'] as String,
+      text: json['text'] as String?,
+      label: json['label'] as String?,
+    );
+  }
+
+  /// Payload bytes in hex.
+  final String hex;
+
+  /// The payload as text, when it is printable UTF-8.
+  final String? text;
+
+  /// Name of a recognized protocol payload, when the prefix says so.
+  final String? label;
+}
+
+/// One input or output of a transaction.
+class TxIo {
+  const TxIo({
+    required this.address,
+    required this.valueSats,
+    required this.isMine,
+    this.change = false,
+    this.opReturn,
+    this.prevTxid,
+    this.prevVout,
+  });
+
+  factory TxIo.fromJson(Map<String, dynamic> json) {
+    return TxIo(
+      address: json['address'] as String?,
+      valueSats: json['value_sats'] as int?,
+      isMine: json['is_mine'] as bool,
+      change: json['change'] as bool? ?? false,
+      opReturn: json['op_return'] == null
+          ? null
+          : OpReturnData.fromJson(json['op_return'] as Map<String, dynamic>),
+      prevTxid: json['prev_txid'] as String?,
+      prevVout: json['prev_vout'] as int?,
+    );
+  }
+
+  final String? address;
+  final int? valueSats;
+  final bool isMine;
+
+  /// Output on the wallet's change keychain (descriptor wallets only).
+  final bool change;
+
+  /// Decoded OP_RETURN payload, for data-carrying outputs.
+  final OpReturnData? opReturn;
+
+  /// For an input, the transaction of the output it spends. Two inputs
+  /// can share an address; only the outpoint names one of them.
+  final String? prevTxid;
+
+  /// For an input, the index of the output it spends.
+  final int? prevVout;
+}
+
+/// A server address read out of a scan or a paste. Fills the backend
+/// form; nothing is saved until the person presses Save.
+class ScannedBackend {
+  const ScannedBackend({
+    required this.kind,
+    required this.url,
+    required this.host,
+    required this.port,
+    required this.tls,
+    required this.onion,
+  });
+
+  factory ScannedBackend.fromJson(Map<String, dynamic> json) {
+    return ScannedBackend(
+      kind: json['kind'] as String,
+      url: json['url'] as String,
+      host: json['host'] as String,
+      port: json['port'] as int?,
+      tls: json['tls'] as bool,
+      onion: json['onion'] as bool,
+    );
+  }
+
+  /// `electrum` or `esplora`.
+  final String kind;
+
+  /// The address in the form the backend configuration stores.
+  final String url;
+  final String host;
+  final int? port;
+  final bool tls;
+  final bool onion;
+}
+
+/// Deep transaction facts; absent only for watched-address entries
+/// synced by older versions.
+class TxExtras {
+  const TxExtras({
+    required this.sizeBytes,
+    required this.vsize,
+    required this.weightWu,
+    required this.version,
+    required this.locktime,
+    required this.rbfSignaled,
+    required this.segwit,
+    required this.taproot,
+    required this.isCoinbase,
+    required this.coinbasePool,
+    required this.sigops,
+    required this.rawHex,
+    this.coinbaseHeight,
+    this.coinbaseTag,
+  });
+
+  factory TxExtras.fromJson(Map<String, dynamic> json) {
+    return TxExtras(
+      sizeBytes: json['size_bytes'] as int? ?? 0,
+      vsize: json['vsize'] as int? ?? 0,
+      weightWu: json['weight_wu'] as int? ?? 0,
+      version: json['version'] as int? ?? 0,
+      locktime: json['locktime'] as int? ?? 0,
+      rbfSignaled: json['rbf_signaled'] as bool? ?? false,
+      segwit: json['segwit'] as bool? ?? false,
+      taproot: json['taproot'] as bool? ?? false,
+      isCoinbase: json['is_coinbase'] as bool? ?? false,
+      coinbasePool: json['coinbase_pool'] as String?,
+      coinbaseHeight: json['coinbase_height'] as int?,
+      coinbaseTag: json['coinbase_tag'] as String?,
+      sigops: json['sigops'] as int? ?? 0,
+      rawHex: json['raw_hex'] as String? ?? '',
+    );
+  }
+
+  final int sizeBytes;
+  final int vsize;
+  final int weightWu;
+  final int version;
+  final int locktime;
+  final bool rbfSignaled;
+  final bool segwit;
+  final bool taproot;
+  final bool isCoinbase;
+  final String? coinbasePool;
+
+  /// Block height committed in the coinbase input (BIP-34).
+  final int? coinbaseHeight;
+
+  /// Printable text left in the coinbase signature script.
+  final String? coinbaseTag;
+
+  final int sigops;
+  final String rawHex;
+}
+
+/// Full transaction detail.
+class TxDetail {
+  const TxDetail({
+    required this.summary,
+    required this.inputs,
+    required this.outputs,
+    required this.vsize,
+    required this.feeRateSatVb,
+    this.extras,
+  });
+
+  factory TxDetail.fromJson(Map<String, dynamic> json) {
+    return TxDetail(
+      summary: TxSummary.fromJson(json['summary'] as Map<String, dynamic>),
+      inputs: (json['inputs'] as List)
+          .map((io) => TxIo.fromJson(io as Map<String, dynamic>))
+          .toList(),
+      outputs: (json['outputs'] as List)
+          .map((io) => TxIo.fromJson(io as Map<String, dynamic>))
+          .toList(),
+      vsize: json['vsize'] as int,
+      feeRateSatVb: (json['fee_rate_sat_vb'] as num?)?.toDouble(),
+      extras: json['extras'] == null
+          ? null
+          : TxExtras.fromJson(json['extras'] as Map<String, dynamic>),
+    );
+  }
+
+  final TxSummary summary;
+  final List<TxIo> inputs;
+  final List<TxIo> outputs;
+  final int vsize;
+  final double? feeRateSatVb;
+  final TxExtras? extras;
+}
+
+/// One unspent output.
+class UtxoInfo {
+  const UtxoInfo({
+    required this.txid,
+    required this.vout,
+    required this.address,
+    required this.valueSats,
+    required this.status,
+    required this.confirmations,
+    required this.keychain,
+    required this.derivationIndex,
+  });
+
+  factory UtxoInfo.fromJson(Map<String, dynamic> json) {
+    return UtxoInfo(
+      txid: json['txid'] as String,
+      vout: json['vout'] as int,
+      address: json['address'] as String?,
+      valueSats: json['value_sats'] as int,
+      status: TxStatus.fromJson(json['status'] as Map<String, dynamic>),
+      confirmations: json['confirmations'] as int,
+      keychain: json['keychain'] as String?,
+      derivationIndex: json['derivation_index'] as int?,
+    );
+  }
+
+  final String txid;
+  final int vout;
+  final String? address;
+  final int valueSats;
+  final TxStatus status;
+
+  /// How deep the coin's transaction is: 0 while it waits, 1 in the
+  /// tip block.
+  final int confirmations;
+  final String? keychain;
+  final int? derivationIndex;
+
+  String get outpoint => '$txid:$vout';
+}
+
+/// A receive address with its derivation index.
+class AddressEntry {
+  const AddressEntry({
+    required this.index,
+    required this.address,
+    required this.used,
+    this.derivation,
+  });
+
+  factory AddressEntry.fromJson(Map<String, dynamic> json) {
+    return AddressEntry(
+      index: json['index'] as int,
+      address: json['address'] as String,
+      used: json['used'] as bool,
+      derivation: json['derivation'] as String?,
+    );
+  }
+
+  final int index;
+  final String address;
+  final bool used;
+
+  /// Absolute or relative derivation path (`m/84'/1'/0'/0/5` or `0/5`);
+  /// null for a single watched address.
+  final String? derivation;
+}
+
+/// One row of the address audit list.
+class AddressRow {
+  const AddressRow({
+    required this.index,
+    required this.address,
+    required this.used,
+    required this.balanceSats,
+  });
+
+  factory AddressRow.fromJson(Map<String, dynamic> json) {
+    return AddressRow(
+      index: json['index'] as int,
+      address: json['address'] as String,
+      used: json['used'] as bool,
+      balanceSats: json['balance_sats'] as int,
+    );
+  }
+
+  final int index;
+  final String address;
+
+  /// Whether the chain has seen this address used.
+  final bool used;
+
+  /// Sum of the unspent outputs currently on this address.
+  final int balanceSats;
+}
+
+/// Revealed addresses of a wallet, by keychain, capped by the core.
+class AddressList {
+  const AddressList({
+    required this.external,
+    required this.internal,
+    this.truncated = false,
+  });
+
+  factory AddressList.fromJson(Map<String, dynamic> json) {
+    return AddressList(
+      external: (json['external'] as List)
+          .map((row) => AddressRow.fromJson(row as Map<String, dynamic>))
+          .toList(),
+      internal: (json['internal'] as List)
+          .map((row) => AddressRow.fromJson(row as Map<String, dynamic>))
+          .toList(),
+      truncated: json['truncated'] as bool? ?? false,
+    );
+  }
+
+  final List<AddressRow> external;
+
+  /// Change addresses; empty when none were revealed (or for wallets
+  /// without a change descriptor).
+  final List<AddressRow> internal;
+
+  /// True when a keychain had more rows than the core's cap.
+  final bool truncated;
+}
+
+/// Keep only one direction of transactions in an export.
+enum ExportDirection {
+  incoming('incoming', 'Received'),
+  outgoing('outgoing', 'Sent');
+
+  const ExportDirection(this.id, this.label);
+
+  final String id;
+  final String label;
+}
+
+/// Filters for a transaction export. Empty options export everything.
+class ExportOptions {
+  const ExportOptions({
+    this.from,
+    this.to,
+    this.direction,
+    this.includePending = true,
+  });
+
+  /// Unix seconds, inclusive lower bound on the confirmation time.
+  final int? from;
+
+  /// Unix seconds, inclusive upper bound on the confirmation time.
+  final int? to;
+  final ExportDirection? direction;
+
+  /// Pending transactions have no date: they only pass when no date
+  /// bound is set.
+  final bool includePending;
+
+  Map<String, dynamic> toJson() => {
+    'from': from,
+    'to': to,
+    'direction': direction?.id,
+    'include_pending': includePending,
+  };
+}
+
+/// A built export, ready to write.
+class ExportResult {
+  const ExportResult({required this.csv, required this.rows});
+
+  factory ExportResult.fromJson(Map<String, dynamic> json) {
+    return ExportResult(csv: json['csv'] as String, rows: json['rows'] as int);
+  }
+
+  final String csv;
+  final int rows;
+}
+
+/// Everything a wallet view needs.
+class WalletSnapshot {
+  const WalletSnapshot({
+    required this.meta,
+    required this.balance,
+    required this.txs,
+    required this.tipHeight,
+    this.truncated = false,
+  });
+
+  factory WalletSnapshot.fromJson(Map<String, dynamic> json) {
+    return WalletSnapshot(
+      meta: WalletMeta.fromJson(json['meta'] as Map<String, dynamic>),
+      balance: BalanceSnapshot.fromJson(
+        json['balance'] as Map<String, dynamic>,
+      ),
+      txs: (json['txs'] as List)
+          .map((tx) => TxSummary.fromJson(tx as Map<String, dynamic>))
+          .toList(),
+      tipHeight: json['tip_height'] as int,
+      truncated: json['truncated'] as bool? ?? false,
+    );
+  }
+
+  final WalletMeta meta;
+  final BalanceSnapshot balance;
+  final List<TxSummary> txs;
+  final int tipHeight;
+
+  /// True when the transaction list is partial (busy watched address);
+  /// the balance stays exact.
+  final bool truncated;
+}
+
+/// Outcome of syncing one wallet.
+/// A transaction a sync brought in for the first time.
+class NewTx {
+  const NewTx({
+    required this.txid,
+    required this.netSats,
+    required this.confirmed,
+  });
+
+  factory NewTx.fromJson(Map<String, dynamic> json) {
+    return NewTx(
+      txid: json['txid'] as String,
+      netSats: json['net_sats'] as int,
+      confirmed: json['confirmed'] as bool,
+    );
+  }
+
+  final String txid;
+
+  /// Net effect on the wallet, in sats, signed like a summary.
+  final int netSats;
+  final bool confirmed;
+}
+
+/// How far a transaction had come when it was announced.
+enum TxStage {
+  mempool('mempool'),
+  confirmed('confirmed'),
+
+  /// An incoming payment announced as pending left the mempool, and
+  /// nothing the wallet holds pays it instead: it is not coming.
+  dropped('dropped');
+
+  const TxStage(this.id);
+
+  final String id;
+
+  static TxStage fromId(String? id) {
+    for (final stage in TxStage.values) {
+      if (stage.id == id) return stage;
+    }
+    return TxStage.mempool;
+  }
+}
+
+/// One transaction to announce, handed out once per stage by the core.
+class LiveTx {
+  const LiveTx({
+    required this.walletId,
+    required this.txid,
+    required this.netSats,
+    required this.stage,
+    this.replaces,
+  });
+
+  factory LiveTx.fromJson(Map<String, dynamic> json) {
+    return LiveTx(
+      walletId: json['wallet_id'] as String,
+      txid: json['txid'] as String,
+      netSats: json['net_sats'] as int,
+      stage: TxStage.fromId(json['stage'] as String?),
+      replaces: json['replaces'] as String?,
+    );
+  }
+
+  final String walletId;
+  final String txid;
+  final int netSats;
+  final TxStage stage;
+
+  /// The txid the payment was first announced under, when [txid] is a
+  /// fee bump of it the core recognised; null otherwise.
+  final String? replaces;
+
+  /// The txid the notifications about this payment go under: the first
+  /// one announced. A fee bump confirms under a txid of its own, and its
+  /// confirmation takes the place of the pending notice this way.
+  String get payment => replaces ?? txid;
+
+  /// As the core reads it back, to compose what is said about it.
+  Map<String, dynamic> toJson() => {
+    'wallet_id': walletId,
+    'txid': txid,
+    'net_sats': netSats,
+    'stage': stage.id,
+    if (replaces != null) 'replaces': replaces,
+  };
+}
+
+/// What the app lets a notification say, read at the moment of posting.
+/// The core composes the words from it (`notice::Context`).
+class NoticeContext {
+  const NoticeContext({
+    required this.names,
+    required this.unit,
+    required this.masked,
+    required this.details,
+  });
+
+  /// The name of each wallet, by id.
+  final Map<String, String> names;
+  final AmountUnit unit;
+
+  /// Balances are hidden: no amount.
+  final bool masked;
+
+  /// "Show wallet and amount": off, no wallet name and no amount, app
+  /// lock or not.
+  final bool details;
+
+  Map<String, dynamic> toJson() => {
+    'names': names,
+    'unit': unit.id,
+    'masked': masked,
+    'details': details,
+  };
+}
+
+/// Which budget of the core a notification drew on.
+enum NoticeKind {
+  transaction('transaction'),
+
+  /// A pending payment that is no longer coming.
+  dropped('dropped');
+
+  const NoticeKind(this.id);
+
+  final String id;
+
+  static NoticeKind fromId(String? id) {
+    for (final kind in NoticeKind.values) {
+      if (kind.id == id) return kind;
+    }
+    return NoticeKind.transaction;
+  }
+}
+
+/// One notification as the core composed it, ready to post.
+class TxNotice {
+  const TxNotice({
+    required this.title,
+    required this.body,
+    required this.kind,
+    this.payment,
+    this.walletId,
+  });
+
+  factory TxNotice.fromJson(Map<String, dynamic> json) {
+    final id = json['id'] as Map<String, dynamic>?;
+    return TxNotice(
+      title: json['title'] as String,
+      body: json['body'] as String,
+      kind: NoticeKind.fromId(json['kind'] as String?),
+      payment: id == null
+          ? null
+          : (walletId: id['wallet_id'] as String, txid: id['txid'] as String),
+      walletId: json['wallet_id'] as String?,
+    );
+  }
+
+  final String title;
+  final String body;
+  final NoticeKind kind;
+
+  /// The payment it is about, in the wallet it is posted for: every
+  /// notice of one payment takes the place of the one before. Null for
+  /// a line that counts the rest or sums up.
+  final ({String walletId, String txid})? payment;
+
+  /// The wallet it is about, a line that counts the rest of a sync
+  /// included; null for the line that says more is waiting.
+  final String? walletId;
+}
+
+/// Where the live watch stands.
+enum WatchState {
+  off('off'),
+  connecting('connecting'),
+  connected('connected'),
+  reconnecting('reconnecting'),
+  polling('polling');
+
+  const WatchState(this.id);
+
+  final String id;
+
+  static WatchState fromId(String? id) {
+    for (final state in WatchState.values) {
+      if (state.id == id) return state;
+    }
+    return WatchState.off;
+  }
+}
+
+/// How changes reach the watch.
+enum WatchTransport {
+  electrum('electrum', 'Electrum'),
+  mempoolWebsocket('mempool_websocket', 'mempool'),
+  esploraPolling('esplora_polling', 'Esplora');
+
+  const WatchTransport(this.id, this.label);
+
+  final String id;
+  final String label;
+
+  static WatchTransport? fromId(String? id) {
+    for (final transport in WatchTransport.values) {
+      if (transport.id == id) return transport;
+    }
+    return null;
+  }
+}
+
+/// What a screen, or the permanent notification, shows about the live
+/// watch.
+class LiveWatchStatus {
+  const LiveWatchStatus({
+    this.state = WatchState.off,
+    this.transport,
+    this.server,
+    this.detail,
+    this.watchedScripts = 0,
+    this.pushedScripts = 0,
+    this.leftOutScripts = 0,
+    this.leftOutWallets = 0,
+    this.wallets = const [],
+    this.serverSoftware,
+    this.leftOut,
+  });
+
+  /// A core from before the coverage was reported leaves its three
+  /// fields out: every wallet then reads as followed whole, which is
+  /// what such a core said by saying nothing.
+  factory LiveWatchStatus.fromJson(Map<String, dynamic> json) {
+    return LiveWatchStatus(
+      state: WatchState.fromId(json['state'] as String?),
+      transport: WatchTransport.fromId(json['transport'] as String?),
+      server: json['server'] as String?,
+      detail: json['detail'] as String?,
+      watchedScripts: json['watched_scripts'] as int? ?? 0,
+      pushedScripts: json['pushed_scripts'] as int? ?? 0,
+      leftOutScripts: json['left_out_scripts'] as int? ?? 0,
+      leftOutWallets: json['left_out_wallets'] as int? ?? 0,
+      wallets: [
+        for (final wallet in json['wallets'] as List? ?? const [])
+          WalletCoverage.fromJson(wallet as Map<String, dynamic>),
+      ],
+      serverSoftware: json['server_software'] as String?,
+      leftOut: LiveLeftOut.fromJson(json['left_out'] as Map<String, dynamic>?),
+    );
+  }
+
+  final WatchState state;
+  final WatchTransport? transport;
+
+  /// The host in use or being tried, never a full address.
+  final String? server;
+
+  /// Why the last connection failed, while reconnecting.
+  final String? detail;
+  final int watchedScripts;
+  final int pushedScripts;
+
+  /// Scripts worth watching that the watch leaves to the regular syncs,
+  /// all wallets together: a payment to one of them shows at the next
+  /// sync, not at once.
+  final int leftOutScripts;
+
+  /// How many wallets those scripts belong to.
+  final int leftOutWallets;
+
+  /// How much of each wallet the watch hears, in the order of the list.
+  /// Empty while the watch is off.
+  final List<WalletCoverage> wallets;
+
+  /// What an Electrum server says it runs, `Fulcrum 1.12.0` and the
+  /// like; null over the other transports and from an older core.
+  final String? serverSoftware;
+
+  /// Why the watch leaves addresses to the syncs and the way out, as the
+  /// core decides it: present exactly while it runs and leaves some out.
+  final LiveLeftOut? leftOut;
+
+  /// The watch runs and cannot follow every address: the one case where
+  /// coverage is worth a word on screen.
+  bool get leavesSomeOut => leftOut != null;
+
+  /// The coverage of one wallet, or null when the watch does not list
+  /// it.
+  WalletCoverage? coverageOf(String walletId) {
+    for (final wallet in wallets) {
+      if (wallet.walletId == walletId) return wallet;
+    }
+    return null;
+  }
+}
+
+/// How much of one wallet the live watch hears.
+enum Coverage {
+  /// Every address worth watching is followed: a payment shows at once.
+  live('live'),
+
+  /// The head of the wallet is followed, its unused addresses first: a
+  /// payment to the rest shows at the next sync.
+  partial('partial'),
+
+  /// None is: every payment shows at the next sync.
+  syncOnly('sync_only');
+
+  const Coverage(this.id);
+
+  final String id;
+
+  /// A value a newer core may add reads as the least promised: nothing
+  /// is said live that might not be.
+  static Coverage fromId(String? id) {
+    for (final coverage in Coverage.values) {
+      if (coverage.id == id) return coverage;
+    }
+    return Coverage.syncOnly;
+  }
+}
+
+/// One wallet as the live watch hears it.
+class WalletCoverage {
+  const WalletCoverage({
+    required this.walletId,
+    required this.coverage,
+    this.watchedScripts = 0,
+    this.leftOutScripts = 0,
+    this.refusedScripts = 0,
+  });
+
+  factory WalletCoverage.fromJson(Map<String, dynamic> json) {
+    return WalletCoverage(
+      walletId: json['wallet_id'] as String,
+      coverage: Coverage.fromId(json['coverage'] as String?),
+      watchedScripts: json['watched_scripts'] as int? ?? 0,
+      leftOutScripts: json['left_out_scripts'] as int? ?? 0,
+      refusedScripts: json['refused_scripts'] as int? ?? 0,
+    );
+  }
+
+  final String walletId;
+  final Coverage coverage;
+
+  /// Scripts of the wallet the watch hears, one it shares with another
+  /// wallet included.
+  final int watchedScripts;
+
+  /// Scripts of the wallet it leaves to the regular syncs.
+  final int leftOutScripts;
+
+  /// Of those, the ones the server refused; the rest are past the limits
+  /// of the watch.
+  final int refusedScripts;
+}
+
+/// What the live watch takes of one wallet and in all.
+class WatchLimits {
+  const WatchLimits({required this.perWallet, required this.total});
+
+  factory WatchLimits.fromJson(Map<String, dynamic>? json) {
+    return WatchLimits(
+      perWallet: json?['per_wallet'] as int? ?? 0,
+      total: json?['total'] as int? ?? 0,
+    );
+  }
+
+  final int perWallet;
+  final int total;
+}
+
+/// The two sets of limits "This is my node" chooses between, as the core
+/// keeps them.
+class WatchLimitsChoice {
+  const WatchLimitsChoice({required this.any, required this.ownNode});
+
+  factory WatchLimitsChoice.fromJson(Map<String, dynamic> json) {
+    return WatchLimitsChoice(
+      any: WatchLimits.fromJson(json['any'] as Map<String, dynamic>?),
+      ownNode: WatchLimits.fromJson(json['own_node'] as Map<String, dynamic>?),
+    );
+  }
+
+  final WatchLimits any;
+  final WatchLimits ownNode;
+}
+
+/// What leaves addresses to the syncs: the server, as soon as it refused
+/// any, or the limits of the watch.
+enum LeftOutReason {
+  liveLimit('live_limit'),
+  serverRefused('server_refused');
+
+  const LeftOutReason(this.id);
+
+  final String id;
+
+  /// A reason a newer core may add reads as the limits of the watch:
+  /// never a refusal the server did not make.
+  static LeftOutReason fromId(String? id) {
+    for (final reason in LeftOutReason.values) {
+      if (reason.id == id) return reason;
+    }
+    return LeftOutReason.liveLimit;
+  }
+}
+
+/// The core's verdict on what the live watch leaves to the syncs.
+class LiveLeftOut {
+  const LiveLeftOut({
+    required this.reason,
+    required this.limits,
+    this.ownNode = false,
+    this.remedy,
+  });
+
+  /// Null for a status that carries no verdict: one from an older core,
+  /// or one that leaves nothing out.
+  static LiveLeftOut? fromJson(Map<String, dynamic>? json) {
+    if (json == null) return null;
+    return LiveLeftOut(
+      reason: LeftOutReason.fromId(json['reason'] as String?),
+      limits: WatchLimits.fromJson(json['limits'] as Map<String, dynamic>?),
+      ownNode: json['own_node'] as bool? ?? false,
+      remedy: LiveRemedy.fromJson(json['remedy'] as Map<String, dynamic>?),
+    );
+  }
+
+  final LeftOutReason reason;
+
+  /// What the watch takes under the backend in use.
+  final WatchLimits limits;
+
+  /// The backend is the user's own node.
+  final bool ownNode;
+
+  /// Null when nothing the user can do takes more.
+  final LiveRemedy? remedy;
+}
+
+/// What lets the live watch hear the addresses it leaves out.
+sealed class LiveRemedy {
+  const LiveRemedy();
+
+  /// Null for none, and for a way out a newer core may add.
+  static LiveRemedy? fromJson(Map<String, dynamic>? json) {
+    switch (json?['type']) {
+      case 'own_node':
+        return OwnNodeRemedy(
+          WatchLimits.fromJson(json!['limits'] as Map<String, dynamic>?),
+        );
+      case 'raise_server_limit':
+        return RaiseServerLimit(
+          server: ServerSoftware.fromId(json!['server'] as String?),
+          settings: [
+            for (final setting in json['settings'] as List? ?? const [])
+              if (setting is String) setting,
+          ],
+        );
+      default:
+        return null;
+    }
+  }
+}
+
+/// A node of one's own, marked "This is my node": the watch then takes
+/// [limits].
+final class OwnNodeRemedy extends LiveRemedy {
+  const OwnNodeRemedy(this.limits);
+
+  final WatchLimits limits;
+}
+
+/// The setting of the user's node to raise, as its software calls it;
+/// none named when the core does not know that software.
+final class RaiseServerLimit extends LiveRemedy {
+  const RaiseServerLimit({this.server, this.settings = const []});
+
+  final ServerSoftware? server;
+  final List<String> settings;
+}
+
+/// An Electrum server whose subscription limit the core can name.
+enum ServerSoftware {
+  fulcrum('fulcrum'),
+  electrumx('electrumx'),
+  electrsEsplora('electrs_esplora'),
+  mempoolElectrs('mempool_electrs');
+
+  const ServerSoftware(this.id);
+
+  final String id;
+
+  static ServerSoftware? fromId(String? id) {
+    for (final software in ServerSoftware.values) {
+      if (software.id == id) return software;
+    }
+    return null;
+  }
+}
+
+/// What a running live watch says.
+sealed class LiveEvent {
+  const LiveEvent();
+
+  /// Null for an event this build does not know: a newer core may say
+  /// more, and what is not understood is not acted on.
+  static LiveEvent? fromJson(Map<String, dynamic> json) {
+    switch (json['type']) {
+      case 'transaction':
+        return LiveTransaction(LiveTx.fromJson(json));
+      case 'wallet_synced':
+        return LiveWalletSynced(
+          SyncReport.fromJson(json['report'] as Map<String, dynamic>),
+        );
+      case 'sync_failed':
+        return LiveSyncFailed(
+          walletId: json['wallet_id'] as String,
+          message: json['message'] as String? ?? '',
+          kind: json['kind'] as String? ?? 'sync',
+        );
+      case 'new_block':
+        return LiveNewBlock(json['height'] as int);
+      case 'status':
+        return LiveStatusChanged(LiveWatchStatus.fromJson(json));
+      case 'stopped':
+        return const LiveStopped();
+    }
+    return null;
+  }
+}
+
+/// Announce this. Handed out once per transaction and stage.
+class LiveTransaction extends LiveEvent {
+  const LiveTransaction(this.tx);
+  final LiveTx tx;
+}
+
+/// A wallet was synced because it moved: refresh what shows it.
+class LiveWalletSynced extends LiveEvent {
+  const LiveWalletSynced(this.report);
+  final SyncReport report;
+}
+
+/// The sync a change asked for failed: the core's words, and the code of
+/// the failure, which the app picks its sentence on.
+class LiveSyncFailed extends LiveEvent {
+  const LiveSyncFailed({
+    required this.walletId,
+    required this.message,
+    this.kind = 'sync',
+  });
+  final String walletId;
+  final String message;
+  final String kind;
+}
+
+class LiveNewBlock extends LiveEvent {
+  const LiveNewBlock(this.height);
+  final int height;
+}
+
+class LiveStatusChanged extends LiveEvent {
+  const LiveStatusChanged(this.status);
+  final LiveWatchStatus status;
+}
+
+/// The watch ended: stopped by the app, or by the vault locking.
+class LiveStopped extends LiveEvent {
+  const LiveStopped();
+}
+
+class SyncReport {
+  const SyncReport({
+    required this.walletId,
+    required this.newTxCount,
+    required this.balance,
+    required this.tipHeight,
+    required this.tookMs,
+    required this.backend,
+    this.newTxs = const [],
+    this.confirmedTxs = const [],
+  });
+
+  factory SyncReport.fromJson(Map<String, dynamic> json) {
+    return SyncReport(
+      walletId: json['wallet_id'] as String,
+      newTxCount: json['new_tx_count'] as int,
+      newTxs: ((json['new_txs'] as List?) ?? const [])
+          .map((e) => NewTx.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      confirmedTxs: ((json['confirmed_txs'] as List?) ?? const [])
+          .map((e) => NewTx.fromJson(e as Map<String, dynamic>))
+          .toList(),
+      balance: BalanceSnapshot.fromJson(
+        json['balance'] as Map<String, dynamic>,
+      ),
+      tipHeight: json['tip_height'] as int,
+      tookMs: json['took_ms'] as int,
+      backend: json['backend'] as String,
+    );
+  }
+
+  final String walletId;
+  final int newTxCount;
+
+  /// The same transactions, one line each: what a notification says.
+  final List<NewTx> newTxs;
+
+  /// Transactions the wallet already held unconfirmed and that this
+  /// sync found in a block. One first seen already confirmed is in
+  /// [newTxs] only.
+  final List<NewTx> confirmedTxs;
+
+  final BalanceSnapshot balance;
+  final int tipHeight;
+  final int tookMs;
+  final String backend;
+}
+
+/// Outcome of syncing every wallet of a workspace.
+class SyncAllReport {
+  const SyncAllReport({required this.reports, required this.failures});
+
+  factory SyncAllReport.fromJson(Map<String, dynamic> json) {
+    return SyncAllReport(
+      reports: (json['reports'] as List)
+          .map((r) => SyncReport.fromJson(r as Map<String, dynamic>))
+          .toList(),
+      failures: (json['failures'] as List)
+          .map((f) => SyncFailure.fromJson(f as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+
+  final List<SyncReport> reports;
+  final List<SyncFailure> failures;
+}
+
+/// One wallet that failed to sync; the others are unaffected. The core's
+/// words, and the code of the failure, which the app picks its sentence on.
+class SyncFailure {
+  const SyncFailure({
+    required this.walletId,
+    required this.message,
+    this.kind = 'sync',
+  });
+
+  factory SyncFailure.fromJson(Map<String, dynamic> json) {
+    return SyncFailure(
+      walletId: json['wallet_id'] as String,
+      message: json['message'] as String,
+      kind: json['kind'] as String? ?? 'sync',
+    );
+  }
+
+  final String walletId;
+  final String message;
+  final String kind;
+}
+
+/// When and why the last sync of a wallet failed, as the vault keeps it
+/// beside the wallet until a sync succeeds: a restart does not forget
+/// it.
+class SyncFailureStamp {
+  const SyncFailureStamp({
+    required this.at,
+    required this.message,
+    this.kind = 'sync',
+  });
+
+  factory SyncFailureStamp.fromJson(Map<String, dynamic> json) {
+    return SyncFailureStamp(
+      at: json['at'] as int,
+      message: json['message'] as String,
+      kind: json['kind'] as String? ?? 'sync',
+    );
+  }
+
+  /// Unix seconds.
+  final int at;
+
+  /// The core's words.
+  final String message;
+
+  /// The code of the failure, the one the app picks its sentence on.
+  final String kind;
+}
+
+/// Where the sync of a wallet stands, as the core says it: whoever
+/// started the sync, the app, a rescan, a sync of every wallet or the
+/// live watch.
+sealed class CoreSyncState {
+  const CoreSyncState();
+
+  /// Null for a state this build does not know: a newer core may say
+  /// more, and what is not understood is not acted on.
+  static CoreSyncState? fromJson(Map<String, dynamic> json) {
+    switch (json['state']) {
+      case 'idle':
+        return const CoreSyncIdle();
+      case 'syncing':
+        return const CoreSyncRunning();
+      case 'failed':
+        return CoreSyncFailed(
+          message: json['message'] as String,
+          kind: json['kind'] as String? ?? 'sync',
+          at: json['at'] as int,
+        );
+    }
+    return null;
+  }
+}
+
+/// No sync of the wallet runs, and the last one did not fail.
+final class CoreSyncIdle extends CoreSyncState {
+  const CoreSyncIdle();
+}
+
+/// A sync of the wallet runs.
+final class CoreSyncRunning extends CoreSyncState {
+  const CoreSyncRunning();
+}
+
+/// No sync of the wallet runs, and the last one failed: what the wallet
+/// shows is from its last good sync, if it ever had one.
+final class CoreSyncFailed extends CoreSyncState {
+  const CoreSyncFailed({
+    required this.message,
+    this.kind = 'sync',
+    required this.at,
+  });
+
+  /// The core's words.
+  final String message;
+
+  /// The code of the failure, the one the app picks its sentence on.
+  final String kind;
+
+  /// When it failed, Unix seconds.
+  final int at;
+}
+
+/// Where the sync of one wallet stands, beside its id: what the core
+/// lists for every wallet and sends at each change.
+class WalletSync {
+  const WalletSync({required this.walletId, required this.state});
+
+  /// Null for a state this build does not know.
+  static WalletSync? fromJson(Map<String, dynamic> json) {
+    final state = CoreSyncState.fromJson(json);
+    if (state == null) return null;
+    return WalletSync(walletId: json['wallet_id'] as String, state: state);
+  }
+
+  final String walletId;
+  final CoreSyncState state;
+}
+
+/// Protocol a public server speaks.
+enum ServerProtocol {
+  esplora('esplora', 'Esplora'),
+  electrum('electrum', 'Electrum');
+
+  const ServerProtocol(this.id, this.label);
+
+  final String id;
+
+  /// Marker shown next to the host in the settings.
+  final String label;
+
+  static ServerProtocol fromId(String id) =>
+      ServerProtocol.values.firstWhere((p) => p.id == id);
+}
+
+/// One public server offered in the settings.
+class PublicServer {
+  const PublicServer({
+    required this.id,
+    required this.label,
+    required this.protocol,
+    required this.url,
+    this.selfSigned = false,
+  });
+
+  factory PublicServer.fromJson(Map<String, dynamic> json) {
+    return PublicServer(
+      id: json['id'] as String,
+      label: json['label'] as String,
+      protocol: ServerProtocol.fromId(json['protocol'] as String),
+      url: json['url'] as String,
+      selfSigned: json['self_signed'] as bool? ?? false,
+    );
+  }
+
+  /// Stable key stored in the settings; it outlives a URL change.
+  final String id;
+
+  /// What the settings show: the host, nothing else.
+  final String label;
+  final ServerProtocol protocol;
+
+  /// Endpoint Gerfaut talks to.
+  final String url;
+
+  /// Whether this server signs its own certificate, so the picker can
+  /// say it before it is chosen rather than after.
+  final bool selfSigned;
+}
+
+/// Chain data source for one network.
+sealed class BackendConfig {
+  const BackendConfig();
+
+  factory BackendConfig.fromJson(Map<String, dynamic> json) {
+    return switch (json['type'] as String) {
+      'public_esplora' => PublicEsplora(server: json['server'] as String?),
+      'custom_esplora' => CustomEsplora(
+        url: json['url'] as String,
+        ownNode: json['own_node'] as bool? ?? false,
+      ),
+      'custom_electrum' => CustomElectrum(
+        url: json['url'] as String,
+        ownNode: json['own_node'] as bool? ?? false,
+      ),
+      final other => throw FormatException('unknown backend type: $other'),
+    };
+  }
+
+  Map<String, dynamic> toJson();
+}
+
+/// One of the public servers the core lists. Without a chosen operator
+/// the public Esplora instances are rotated through; with one, that
+/// server answers alone.
+class PublicEsplora extends BackendConfig {
+  const PublicEsplora({this.server});
+
+  /// Identifier of the chosen server, null for the automatic rotation.
+  final String? server;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'type': 'public_esplora',
+    // Omitted when unset, so an automatic configuration serializes
+    // exactly as every stored vault already carries it.
+    if (server != null) 'server': server,
+  };
+}
+
+class CustomEsplora extends BackendConfig {
+  const CustomEsplora({required this.url, this.ownNode = false});
+
+  final String url;
+
+  /// The user says they run this server: Live follows many more of
+  /// their addresses on it. See [CustomElectrum.ownNode].
+  final bool ownNode;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'type': 'custom_esplora',
+    'url': url,
+    if (ownNode) 'own_node': true,
+  };
+}
+
+class CustomElectrum extends BackendConfig {
+  const CustomElectrum({required this.url, this.ownNode = false});
+
+  final String url;
+
+  /// The user says they run this server, so Live may follow up to
+  /// 20 000 of their addresses on it instead of 2 000. The app cannot
+  /// check it: a public server typed in by hand looks the same.
+  ///
+  /// Sent back with every save of the address: the core takes a config
+  /// without it for one where it is off. Omitted when off, so a backend
+  /// saved before the switch existed serializes exactly as the vault
+  /// already carries it.
+  final bool ownNode;
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'type': 'custom_electrum',
+    'url': url,
+    if (ownNode) 'own_node': true,
+  };
+}
+
+/// Global settings stored in the vault.
+class Settings {
+  const Settings({
+    required this.activeNetwork,
+    required this.backends,
+    required this.appPrefs,
+    required this.preferences,
+    this.gapLimit = 20,
+    this.electrumCerts = const {},
+    this.appLock,
+    this.tor = TorSettings.automatic,
+    this.retiredServers = const {},
+  });
+
+  factory Settings.fromJson(Map<String, dynamic> json) {
+    final backends = <Network, BackendConfig>{};
+    (json['backends'] as Map<String, dynamic>? ?? {}).forEach((key, value) {
+      backends[Network.fromId(key)] = BackendConfig.fromJson(
+        value as Map<String, dynamic>,
+      );
+    });
+    return Settings(
+      activeNetwork: Network.fromId(json['active_network'] as String),
+      backends: backends,
+      appPrefs: (json['app_prefs'] as Map<String, dynamic>? ?? {}).map(
+        (key, value) => MapEntry(key, value as String),
+      ),
+      preferences: Preferences.fromJson(
+        json['preferences'] as Map<String, dynamic>,
+      ),
+      gapLimit: json['gap_limit'] as int? ?? 20,
+      electrumCerts: (json['electrum_certs'] as Map<String, dynamic>? ?? {})
+          .map((key, value) => MapEntry(key, value as String)),
+      appLock: json['app_lock'] == null
+          ? null
+          : AppLock.fromJson(json['app_lock'] as Map<String, dynamic>),
+      tor: json['tor'] == null
+          ? TorSettings.automatic
+          : TorSettings.fromJson(json['tor'] as Map<String, dynamic>),
+      retiredServers: {
+        for (final entry
+            in (json['retired_servers'] as Map<String, dynamic>? ?? {}).entries)
+          Network.fromId(entry.key): entry.value as String,
+      },
+    );
+  }
+
+  final Network activeNetwork;
+  final Map<Network, BackendConfig> backends;
+
+  /// The preferences of this app alone: the theme, the widgets...
+  final Map<String, String> appPrefs;
+
+  /// What both apps keep with the same meaning.
+  final Preferences preferences;
+
+  /// Global gap limit applied to every descriptor wallet on sync.
+  final int gapLimit;
+
+  /// Electrum certificates the user accepted, by `host:port`. The core
+  /// stores them the way every tool prints a fingerprint: uppercase hex
+  /// pairs joined by colons.
+  final Map<String, String> electrumCerts;
+
+  /// The lock in place, without its hash; null when there is none.
+  final AppLock? appLock;
+
+  /// How `.onion` backends reach Tor.
+  final TorSettings tor;
+
+  /// The public server chosen on a network that the core no longer
+  /// offers, by the name it was shown under. The core answers with the
+  /// rotation over the public servers until another is chosen; absent
+  /// for a network whose choice stands.
+  final Map<Network, String> retiredServers;
+
+  /// Backend for a network, falling back to the public default.
+  BackendConfig backendFor(Network network) =>
+      backends[network] ?? const PublicEsplora();
+}
+
+/// What kind of secret unlocks the app.
+enum LockKind {
+  pin('pin', 'PIN'),
+  password('password', 'Password');
+
+  const LockKind(this.id, this.label);
+
+  final String id;
+  final String label;
+
+  static LockKind fromId(String id) =>
+      LockKind.values.firstWhere((k) => k.id == id);
+}
+
+/// The app lock as the apps see it: kind, never the hash.
+///
+/// When it comes back is not a setting: the secret is asked when the
+/// app opens and again once Gerfaut has been to the background.
+class AppLock {
+  const AppLock({required this.kind, required this.biometric});
+
+  factory AppLock.fromJson(Map<String, dynamic> json) {
+    return AppLock(
+      kind: LockKind.fromId(json['kind'] as String),
+      biometric: json['biometric'] as bool? ?? false,
+    );
+  }
+
+  final LockKind kind;
+
+  /// Whether the phone's biometric prompt may stand in for the secret.
+  final bool biometric;
+}
+
+/// Outcome of an unlock attempt.
+class LockVerdict {
+  const LockVerdict({
+    required this.unlocked,
+    required this.failures,
+    required this.retryAfterSecs,
+  });
+
+  factory LockVerdict.fromJson(Map<String, dynamic> json) {
+    return LockVerdict(
+      unlocked: json['unlocked'] as bool,
+      failures: json['failures'] as int,
+      retryAfterSecs: json['retry_after_secs'] as int,
+    );
+  }
+
+  final bool unlocked;
+
+  /// Consecutive failures so far; zero once unlocked.
+  final int failures;
+
+  /// Seconds before the next attempt is looked at; zero when it can be.
+  final int retryAfterSecs;
+}
+
+/// One server's certificate, and the key an acceptance is recorded
+/// against. The core flattens the status into the same object; this
+/// keeps the two apart so a screen can switch on the status alone.
+class CertificateReport {
+  const CertificateReport({required this.host, required this.status});
+
+  factory CertificateReport.fromJson(Map<String, dynamic> json) {
+    return CertificateReport(
+      host: json['host'] as String,
+      status: CertificateStatus.fromJson(json),
+    );
+  }
+
+  /// `host:port`, scheme and path stripped.
+  final String host;
+  final CertificateStatus status;
+}
+
+/// What a handshake concluded about a server's certificate, mirroring
+/// `CertificateStatus` in gerfaut-core.
+sealed class CertificateStatus {
+  const CertificateStatus();
+
+  factory CertificateStatus.fromJson(Map<String, dynamic> json) {
+    return switch (json['status'] as String) {
+      'not_tls' => const NotTlsCertificate(),
+      'tor' => const TorCertificate(),
+      'trusted' => const TrustedCertificate(),
+      'pinned' => PinnedCertificate(fingerprint: json['fingerprint'] as String),
+      'unknown' => UnknownCertificate(
+        fingerprint: json['fingerprint'] as String,
+        reason: json['reason'] as String,
+        subject: json['subject'] as String?,
+        expires: json['expires'] as int?,
+      ),
+      'changed' => ChangedCertificate(
+        stored: json['stored'] as String,
+        presented: json['presented'] as String,
+      ),
+      'unreachable' => UnreachableCertificate(detail: json['detail'] as String),
+      final other => throw FormatException('unknown status: $other'),
+    };
+  }
+}
+
+/// Plain TCP: there is no certificate, and nothing is encrypted.
+class NotTlsCertificate extends CertificateStatus {
+  const NotTlsCertificate();
+}
+
+/// An onion address is the server's identity; a certificate on top
+/// authenticates nothing more.
+class TorCertificate extends CertificateStatus {
+  const TorCertificate();
+}
+
+/// A public certificate authority vouches for it.
+class TrustedCertificate extends CertificateStatus {
+  const TrustedCertificate();
+}
+
+/// Exactly the certificate accepted for this host.
+class PinnedCertificate extends CertificateStatus {
+  const PinnedCertificate({required this.fingerprint});
+
+  final String fingerprint;
+}
+
+/// No authority vouches for it and this host has no accepted
+/// certificate yet: the user decides, once.
+class UnknownCertificate extends CertificateStatus {
+  const UnknownCertificate({
+    required this.fingerprint,
+    required this.reason,
+    this.subject,
+    this.expires,
+  });
+
+  final String fingerprint;
+
+  /// Why no authority vouches for it, in words a user can act on.
+  final String reason;
+
+  /// What the certificate calls itself, when it says so.
+  final String? subject;
+
+  /// When it stops being valid, in seconds since the epoch.
+  final int? expires;
+}
+
+/// This host was accepted with a different certificate. Something
+/// changed on the server, or something sits in between.
+class ChangedCertificate extends CertificateStatus {
+  const ChangedCertificate({required this.stored, required this.presented});
+
+  final String stored;
+  final String presented;
+}
+
+/// The server could not be reached, so nothing can be said about its
+/// certificate yet.
+class UnreachableCertificate extends CertificateStatus {
+  const UnreachableCertificate({required this.detail});
+
+  final String detail;
+}
+
+/// What stands between a saved backend and a working one, mirroring
+/// `BackendProblem` in gerfaut-core: named for what the person has to
+/// change.
+enum BackendProblem {
+  hostNotFound('host_not_found'),
+  refused('refused'),
+  noAnswer('no_answer'),
+  tor('tor'),
+  notTls('not_tls'),
+  needsTls('needs_tls'),
+  certificate('certificate'),
+  notElectrum('not_electrum'),
+  notEsplora('not_esplora'),
+  anotherNetwork('another_network'),
+  badChain('bad_chain'),
+  serverRefused('server_refused'),
+  failed('failed');
+
+  const BackendProblem(this.id);
+
+  final String id;
+
+  static BackendProblem? fromId(String? id) {
+    for (final problem in BackendProblem.values) {
+      if (problem.id == id) return problem;
+    }
+    return null;
+  }
+}
+
+/// What testing the stored backend of a network found, mirroring
+/// `BackendCheck` in gerfaut-core.
+sealed class BackendCheck {
+  const BackendCheck({required this.host, required this.tor});
+
+  factory BackendCheck.fromJson(Map<String, dynamic> json) {
+    final host = json['host'] as String;
+    final tor = json['tor'] as bool;
+    return switch (json['outcome'] as String) {
+      'reached' => BackendReached(
+        host: host,
+        tor: tor,
+        height: json['height'] as int,
+        software: json['software'] as String?,
+        millis: json['millis'] as int,
+      ),
+      'failed' => BackendFailed(
+        host: host,
+        tor: tor,
+        // A problem a later core names and this build does not know is
+        // said with the core's words, as any other failure.
+        problem:
+            BackendProblem.fromId(json['problem'] as String?) ??
+            BackendProblem.failed,
+        detail: json['detail'] as String,
+        serverNetwork: switch (json['server_network'] as String?) {
+          final id? => Network.values.where((n) => n.id == id).firstOrNull,
+          null => null,
+        },
+      ),
+      final other => throw FormatException('unknown outcome: $other'),
+    };
+  }
+
+  /// The server that answered, or the last one tried: `host:port`, or a
+  /// host alone. Empty when the test never got as far as one.
+  final String host;
+
+  /// Reached, or tried, through Tor.
+  final bool tor;
+}
+
+/// The server answered as a backend of this network.
+class BackendReached extends BackendCheck {
+  const BackendReached({
+    required super.host,
+    required super.tor,
+    required this.height,
+    required this.software,
+    required this.millis,
+  });
+
+  /// The height of its chain's tip.
+  final int height;
+
+  /// What an Electrum server says it runs; null for Esplora.
+  final String? software;
+
+  /// How long the test took, connection included.
+  final int millis;
+}
+
+/// It did not: what stands in the way, and the core's words on it.
+class BackendFailed extends BackendCheck {
+  const BackendFailed({
+    required super.host,
+    required super.tor,
+    required this.problem,
+    required this.detail,
+    this.serverNetwork,
+  });
+
+  final BackendProblem problem;
+
+  /// The core's words on it.
+  final String detail;
+
+  /// The network the server follows, with
+  /// [BackendProblem.anotherNetwork] when the core knows it.
+  final Network? serverNetwork;
+}
+
+/// Where a fiat quote comes from. All endpoints are public and keyless.
+/// Which currencies each quotes, and its name, are the core's: see
+/// [PriceTable].
+enum PriceSource {
+  mempoolSpace('mempool_space'),
+  coingecko('coingecko');
+
+  const PriceSource(this.id);
+
+  final String id;
+
+  static PriceSource? fromId(String? id) {
+    for (final source in PriceSource.values) {
+      if (source.id == id) return source;
+    }
+    return null;
+  }
+}
+
+/// How many price sources quote a currency.
+enum CurrencyReach {
+  /// Every source quotes it.
+  every('every'),
+
+  /// CoinGecko alone quotes it.
+  coingeckoOnly('coingecko_only');
+
+  const CurrencyReach(this.id);
+
+  final String id;
+
+  static CurrencyReach fromId(String id) =>
+      CurrencyReach.values.firstWhere((reach) => reach.id == id);
+}
+
+/// A display currency, by the identifier the core names it with (`eur`,
+/// `try`...). The list on offer, its order, the names and which source
+/// quotes what are the core's: see [PriceTable].
+class FiatCurrency {
+  const FiatCurrency(this.id);
+
+  final String id;
+
+  /// ISO 4217 code: the identifier, in capitals.
+  String get code => id.toUpperCase();
+
+  @override
+  bool operator ==(Object other) => other is FiatCurrency && other.id == id;
+
+  @override
+  int get hashCode => id.hashCode;
+
+  @override
+  String toString() => id;
+}
+
+/// One currency of the [PriceTable].
+class CurrencyEntry {
+  const CurrencyEntry({
+    required this.currency,
+    required this.name,
+    required this.reach,
+    required this.sources,
+  });
+
+  factory CurrencyEntry.fromJson(Map<String, dynamic> json) {
+    return CurrencyEntry(
+      currency: FiatCurrency(json['currency'] as String),
+      name: json['name'] as String,
+      reach: CurrencyReach.fromId(json['reach'] as String),
+      sources: [
+        for (final id in json['sources'] as List)
+          ?PriceSource.fromId(id as String),
+      ],
+    );
+  }
+
+  final FiatCurrency currency;
+
+  /// Its English name, read beside the code.
+  final String name;
+
+  /// How many sources quote it, which is how the settings group it.
+  final CurrencyReach reach;
+
+  /// The sources that quote it, in display order.
+  final List<PriceSource> sources;
+}
+
+/// One price source of the [PriceTable].
+class SourceEntry {
+  const SourceEntry({required this.source, required this.label, this.credit});
+
+  final PriceSource source;
+
+  /// Its name, as it writes it.
+  final String label;
+
+  /// What its terms ask to be shown with its data, or null: once on
+  /// each screen that shows a price or an amount it priced.
+  final Credit? credit;
+}
+
+/// The credit a price source asks for beside its data: its words, and
+/// the page they link to.
+class Credit {
+  const Credit({required this.text, required this.url});
+
+  factory Credit.fromJson(Map<String, dynamic> json) =>
+      Credit(text: json['text'] as String, url: json['url'] as String);
+
+  /// Word for word, as its terms write it.
+  final String text;
+
+  /// The page the words link to, opened in the browser.
+  final String url;
+}
+
+/// What the settings offer for the fiat value, and how often its price
+/// is asked: the core's table, which both apps offer in its order.
+class PriceTable {
+  const PriceTable({
+    required this.currencies,
+    required this.sources,
+    required this.refresh,
+  });
+
+  factory PriceTable.fromJson(Map<String, dynamic> json) {
+    return PriceTable(
+      currencies: [
+        for (final entry in json['currencies'] as List)
+          CurrencyEntry.fromJson(entry as Map<String, dynamic>),
+      ],
+      sources: [
+        for (final entry in json['sources'] as List)
+          if (PriceSource.fromId(
+                (entry as Map<String, dynamic>)['source'] as String,
+              )
+              case final source?)
+            SourceEntry(
+              source: source,
+              label: entry['label'] as String,
+              credit: switch (entry['credit']) {
+                final Map<String, dynamic> credit => Credit.fromJson(credit),
+                _ => null,
+              },
+            ),
+      ],
+      refresh: Duration(seconds: json['refresh_secs'] as int),
+    );
+  }
+
+  /// Every currency on offer, in display order.
+  final List<CurrencyEntry> currencies;
+
+  /// Every source, in display order.
+  final List<SourceEntry> sources;
+
+  /// From one price to the next while it is shown, and from a failure
+  /// to the next try.
+  final Duration refresh;
+
+  /// The entry of a currency, if the table lists it.
+  CurrencyEntry? entryOf(FiatCurrency currency) {
+    for (final entry in currencies) {
+      if (entry.currency == currency) return entry;
+    }
+    return null;
+  }
+
+  /// The credit [source] asks for beside its data, if it asks for one.
+  Credit? creditOf(PriceSource source) {
+    for (final entry in sources) {
+      if (entry.source == source) return entry.credit;
+    }
+    return null;
+  }
+}
+
+/// The preferences both apps keep, as the vault holds them, mirroring
+/// `Preferences` in gerfaut-core. A vault that never stored one answers
+/// its default: the core decides those, and every field comes filled.
+class Preferences {
+  const Preferences({
+    required this.unit,
+    required this.masked,
+    required this.fiat,
+    required this.fiatCurrency,
+    required this.priceSource,
+    required this.notifyNewTx,
+    required this.explorerAck,
+  });
+
+  factory Preferences.fromJson(Map<String, dynamic> json) {
+    return Preferences(
+      unit: AmountUnit.fromId(json['unit'] as String)!,
+      masked: json['masked'] as bool,
+      fiat: json['fiat'] as bool,
+      fiatCurrency: FiatCurrency(json['fiat_currency'] as String),
+      priceSource: PriceSource.fromId(json['price_source'] as String)!,
+      notifyNewTx: json['notify_new_tx'] as bool,
+      explorerAck: json['explorer_ack'] as bool,
+    );
+  }
+
+  /// The unit of every amount.
+  final AmountUnit unit;
+
+  /// Amounts hidden on screen, and in what a notification says.
+  final bool masked;
+
+  /// The fiat value beside every amount.
+  final bool fiat;
+  final FiatCurrency fiatCurrency;
+
+  /// Always one that quotes [fiatCurrency]: the core sees to it.
+  final PriceSource priceSource;
+
+  /// A notice when a sync finds a transaction.
+  final bool notifyNewTx;
+
+  /// The warning before an external explorer was read and accepted.
+  final bool explorerAck;
+
+  Preferences copyWith({
+    AmountUnit? unit,
+    bool? masked,
+    bool? fiat,
+    FiatCurrency? fiatCurrency,
+    PriceSource? priceSource,
+    bool? notifyNewTx,
+    bool? explorerAck,
+  }) {
+    return Preferences(
+      unit: unit ?? this.unit,
+      masked: masked ?? this.masked,
+      fiat: fiat ?? this.fiat,
+      fiatCurrency: fiatCurrency ?? this.fiatCurrency,
+      priceSource: priceSource ?? this.priceSource,
+      notifyNewTx: notifyNewTx ?? this.notifyNewTx,
+      explorerAck: explorerAck ?? this.explorerAck,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is Preferences &&
+      other.unit == unit &&
+      other.masked == masked &&
+      other.fiat == fiat &&
+      other.fiatCurrency == fiatCurrency &&
+      other.priceSource == priceSource &&
+      other.notifyNewTx == notifyNewTx &&
+      other.explorerAck == explorerAck;
+
+  @override
+  int get hashCode => Object.hash(
+    unit,
+    masked,
+    fiat,
+    fiatCurrency,
+    priceSource,
+    notifyNewTx,
+    explorerAck,
+  );
+}
+
+/// A change to some of the [Preferences], mirroring `PreferencesChange`:
+/// what is left out keeps its value.
+class PreferencesChange {
+  const PreferencesChange({
+    this.unit,
+    this.masked,
+    this.fiat,
+    this.fiatCurrency,
+    this.priceSource,
+    this.notifyNewTx,
+    this.explorerAck,
+  });
+
+  final AmountUnit? unit;
+  final bool? masked;
+  final bool? fiat;
+  final FiatCurrency? fiatCurrency;
+  final PriceSource? priceSource;
+  final bool? notifyNewTx;
+  final bool? explorerAck;
+
+  /// These preferences with the change made here: the fields it names,
+  /// and nothing else.
+  Preferences applyTo(Preferences preferences) => preferences.copyWith(
+    unit: unit,
+    masked: masked,
+    fiat: fiat,
+    fiatCurrency: fiatCurrency,
+    priceSource: priceSource,
+    notifyNewTx: notifyNewTx,
+    explorerAck: explorerAck,
+  );
+
+  /// The fields this change names, at what [preferences] holds.
+  PreferencesChange heldIn(Preferences preferences) => PreferencesChange(
+    unit: unit == null ? null : preferences.unit,
+    masked: masked == null ? null : preferences.masked,
+    fiat: fiat == null ? null : preferences.fiat,
+    fiatCurrency: fiatCurrency == null ? null : preferences.fiatCurrency,
+    priceSource: priceSource == null ? null : preferences.priceSource,
+    notifyNewTx: notifyNewTx == null ? null : preferences.notifyNewTx,
+    explorerAck: explorerAck == null ? null : preferences.explorerAck,
+  );
+
+  Map<String, dynamic> toJson() => {
+    'unit': ?unit?.id,
+    'masked': ?masked,
+    'fiat': ?fiat,
+    'fiat_currency': ?fiatCurrency?.id,
+    'price_source': ?priceSource?.id,
+    'notify_new_tx': ?notifyNewTx,
+    'explorer_ack': ?explorerAck,
+  };
+}
+
+/// One BTC priced in a fiat currency, at a point in time.
+class PriceQuote {
+  const PriceQuote({
+    required this.rate,
+    required this.currency,
+    required this.source,
+    required this.at,
+  });
+
+  factory PriceQuote.fromJson(Map<String, dynamic> json) {
+    return PriceQuote(
+      rate: (json['rate'] as num).toDouble(),
+      currency: FiatCurrency(json['currency'] as String),
+      source: PriceSource.fromId(json['source'] as String)!,
+      at: json['at'] as int,
+    );
+  }
+
+  /// Price of 1 BTC in the currency.
+  final double rate;
+  final FiatCurrency currency;
+  final PriceSource source;
+
+  /// Unix timestamp, seconds, when the quote was fetched.
+  final int at;
+}
+
+/// What to say about releases: all of it decided by the core, which
+/// keeps the state of the check in the vault.
+class UpdateStatus {
+  const UpdateStatus({
+    this.automatic = true,
+    this.announce,
+    this.available,
+    this.torUnavailable = false,
+  });
+
+  factory UpdateStatus.fromJson(Map<String, dynamic> json) {
+    return UpdateStatus(
+      automatic: json['automatic'] as bool,
+      announce: json['announce'] as String?,
+      available: json['available'] as String?,
+      torUnavailable: json['tor_unavailable'] as bool,
+    );
+  }
+
+  /// The daily check is on.
+  final bool automatic;
+
+  /// The release the home card announces; null when it has nothing to
+  /// say.
+  final String? announce;
+
+  /// The newer release known, closed or not: what About offers.
+  final String? available;
+
+  /// The last check that was to go out did not: Tor is needed and could
+  /// not be had.
+  final bool torUnavailable;
+}
+
+/// Envelope recognized around a scanned QR frame.
+enum QrFormat {
+  /// The frame is the material itself.
+  plain('plain'),
+
+  /// Uniform Resource (`ur:`), single or multi-part.
+  ur('ur'),
+
+  /// BBQr (`B$`), single or multi-part.
+  bbqr('bbqr');
+
+  const QrFormat(this.id);
+
+  final String id;
+
+  static QrFormat fromId(String id) =>
+      QrFormat.values.firstWhere((f) => f.id == id);
+}
+
+/// Where a scan stands after the frames seen so far.
+class QrProgress {
+  const QrProgress({
+    required this.format,
+    required this.received,
+    required this.total,
+    required this.complete,
+    this.text,
+    this.warnings = const [],
+  });
+
+  factory QrProgress.fromJson(Map<String, dynamic> json) {
+    return QrProgress(
+      format: QrFormat.fromId(json['format'] as String),
+      received: json['received'] as int,
+      total: json['total'] as int,
+      complete: json['complete'] as bool,
+      text: json['text'] as String?,
+      warnings: ((json['warnings'] as List?) ?? const [])
+          .map((w) => InputWarning.fromId(w as String))
+          .toList(),
+    );
+  }
+
+  final QrFormat format;
+
+  /// Distinct parts received (for a UR: fragments resolved).
+  final int received;
+
+  /// Parts announced by the envelope; 1 for a plain frame.
+  final int total;
+  final bool complete;
+
+  /// The assembled text, once [complete].
+  final String? text;
+
+  /// What the core assumed reading the code, which [text] no longer
+  /// shows: said with the warnings of that text.
+  final List<InputWarning> warnings;
+
+  /// True while an animated code is still being collected.
+  bool get inProgress => total > 1 && !complete;
+}
+
+/// The container a transaction to broadcast came in.
+enum TxSource {
+  rawTransaction('raw_transaction', 'Raw transaction'),
+  psbt('psbt', 'PSBT');
+
+  const TxSource(this.id, this.label);
+
+  final String id;
+  final String label;
+
+  static TxSource fromId(String id) =>
+      TxSource.values.firstWhere((s) => s.id == id);
+}
+
+/// A watched wallet one side of a transaction belongs to.
+class WalletRef {
+  const WalletRef({required this.id, required this.name});
+
+  factory WalletRef.fromJson(Map<String, dynamic> json) {
+    return WalletRef(id: json['id'] as String, name: json['name'] as String);
+  }
+
+  final String id;
+  final String name;
+}
+
+/// One input of a transaction to broadcast.
+class TxInputPreview {
+  const TxInputPreview({
+    required this.txid,
+    required this.vout,
+    required this.signed,
+    this.valueSats,
+    this.address,
+    this.wallet,
+  });
+
+  factory TxInputPreview.fromJson(Map<String, dynamic> json) {
+    return TxInputPreview(
+      txid: json['txid'] as String,
+      vout: json['vout'] as int,
+      valueSats: json['value_sats'] as int?,
+      address: json['address'] as String?,
+      signed: json['signed'] as bool,
+      wallet: json['wallet'] == null
+          ? null
+          : WalletRef.fromJson(json['wallet'] as Map<String, dynamic>),
+    );
+  }
+
+  final String txid;
+  final int vout;
+
+  /// Value of the coin spent, when the container, a watched wallet or
+  /// the backend knew it.
+  final int? valueSats;
+  final String? address;
+
+  /// Whether the input carries what the network needs to accept it.
+  final bool signed;
+
+  /// The watched wallet that owns the coin, when any.
+  final WalletRef? wallet;
+
+  String get outpoint => '$txid:$vout';
+}
+
+/// One output of a transaction to broadcast.
+class TxOutputPreview {
+  const TxOutputPreview({
+    required this.index,
+    required this.valueSats,
+    this.address,
+    this.opReturn,
+    this.wallet,
+    this.change = false,
+  });
+
+  factory TxOutputPreview.fromJson(Map<String, dynamic> json) {
+    return TxOutputPreview(
+      index: json['index'] as int,
+      valueSats: json['value_sats'] as int,
+      address: json['address'] as String?,
+      opReturn: json['op_return'] == null
+          ? null
+          : OpReturnData.fromJson(json['op_return'] as Map<String, dynamic>),
+      wallet: json['wallet'] == null
+          ? null
+          : WalletRef.fromJson(json['wallet'] as Map<String, dynamic>),
+      change: json['change'] as bool? ?? false,
+    );
+  }
+
+  final int index;
+  final int valueSats;
+  final String? address;
+  final OpReturnData? opReturn;
+
+  /// The watched wallet that receives this output, when any.
+  final WalletRef? wallet;
+
+  /// Output on a watched wallet's change keychain.
+  final bool change;
+}
+
+/// What a caution on the broadcast preview is about.
+enum TxWarningKind {
+  unsigned('unsigned'),
+  highFeeRate('high_fee_rate'),
+  highFeeShare('high_fee_share'),
+  locked('locked'),
+  inputUnknown('input_unknown'),
+  inputSpent('input_spent'),
+
+  /// This very transaction is already waiting in the mempool: sending it
+  /// again does no harm.
+  inMempool('in_mempool'),
+  inputMismatch('input_mismatch'),
+  feeUnknown('fee_unknown'),
+  dustOutput('dust_output'),
+  spendsWatched('spends_watched'),
+
+  /// A signature made with SIGHASH_NONE or SIGHASH_SINGLE: it leaves
+  /// some or all of the outputs open, so whoever relays the transaction
+  /// can send that money elsewhere.
+  uncommittedOutputs('uncommitted_outputs'),
+
+  /// A kind this build does not know; shown with a generic icon.
+  other('other');
+
+  const TxWarningKind(this.id);
+
+  final String id;
+
+  static TxWarningKind fromId(String id) {
+    for (final kind in TxWarningKind.values) {
+      if (kind.id == id) return kind;
+    }
+    return TxWarningKind.other;
+  }
+}
+
+/// How loudly a caution is read.
+///
+/// The core answers the one question — can the person lose funds or
+/// lose privacy? — and sends the answer along with the caution. A
+/// screen reads it and never derives it: two hand-written tables, one
+/// per platform, is precisely how the tones drifted apart.
+enum TxSeverity {
+  /// Funds or privacy are at stake: the red panel.
+  alert('alert'),
+
+  /// Worth reading; nothing is at risk: the amber one.
+  info('info');
+
+  const TxSeverity(this.id);
+
+  final String id;
+
+  /// Anything this build cannot name reads as [info] — the tone a
+  /// [TxWarningKind.other] gets too. A kind added by a newer core still
+  /// arrives with its own severity, so this only applies to a wire that
+  /// carries none, and quiet is the safe way to be wrong about a tone.
+  static TxSeverity fromId(String? id) {
+    for (final severity in TxSeverity.values) {
+      if (severity.id == id) return severity;
+    }
+    return TxSeverity.info;
+  }
+}
+
+/// A caution to read before broadcasting. The preview only makes the
+/// transaction legible: a caution blocks the send only when the core is
+/// sure the network refuses it ([blocking]).
+class TxWarning {
+  const TxWarning({
+    required this.kind,
+    required this.message,
+    required this.severity,
+    this.blocking = false,
+  });
+
+  factory TxWarning.fromJson(Map<String, dynamic> json) {
+    return TxWarning(
+      kind: TxWarningKind.fromId(json['kind'] as String),
+      message: json['message'] as String,
+      severity: TxSeverity.fromId(json['severity'] as String?),
+      blocking: json['blocking'] as bool? ?? false,
+    );
+  }
+
+  final TxWarningKind kind;
+  final String message;
+
+  /// The tone to read it in, as the core decided it.
+  final TxSeverity severity;
+
+  /// The network is sure to refuse the transaction while this holds: a
+  /// signature missing, a coin spent in a block, outputs past all the
+  /// bitcoin there will ever be, or outputs over inputs whose every
+  /// amount is proven. The core sets it, and a preview with one is not
+  /// ready.
+  final bool blocking;
+}
+
+/// Where a transaction stands before it is sent, decided by the core: the
+/// words of the readiness pill. [refused] comes before [unsigned] when
+/// both hold, since a signature does not bring back a spent coin.
+enum TxReadiness {
+  ready('ready'),
+  refused('refused'),
+  unsigned('unsigned'),
+
+  /// Signed, and already waiting in the mempool: it can be sent again,
+  /// which does no harm.
+  inMempool('in_mempool');
+
+  const TxReadiness(this.id);
+
+  final String id;
+
+  static TxReadiness fromId(String id) =>
+      TxReadiness.values.firstWhere((r) => r.id == id);
+
+  /// Whether the Broadcast button is on.
+  bool get sendable => this == ready || this == inMempool;
+}
+
+/// What the fee rate is measured on.
+enum FeeRateBasis {
+  /// The transaction as it will be sent: every input signed.
+  exact('exact'),
+
+  /// The transaction once signed, each missing signature counted at the
+  /// most it can weigh.
+  estimated('estimated'),
+
+  /// Some signatures missing and their weight unknown: the rate on the
+  /// transaction as it is, the most it can be once signed.
+  upperBound('upper_bound');
+
+  const FeeRateBasis(this.id);
+
+  final String id;
+
+  static FeeRateBasis fromId(String id) =>
+      FeeRateBasis.values.firstWhere((b) => b.id == id);
+}
+
+/// Everything shown before broadcasting a transaction.
+class TxPreview {
+  const TxPreview({
+    required this.txid,
+    required this.source,
+    required this.network,
+    required this.inputs,
+    required this.outputs,
+    required this.vsize,
+    required this.weight,
+    required this.size,
+    required this.version,
+    required this.locktime,
+    required this.rbf,
+    required this.readiness,
+    this.feeSats,
+    this.feeRateSatVb,
+    this.feeRateBasis = FeeRateBasis.exact,
+    this.feeUnknownReason,
+    this.amountsDeclared = false,
+    this.amountsListed = false,
+    this.warnings = const [],
+    this.hex,
+  });
+
+  factory TxPreview.fromJson(Map<String, dynamic> json) {
+    return TxPreview(
+      txid: json['txid'] as String,
+      source: TxSource.fromId(json['source'] as String),
+      network: Network.fromId(json['network'] as String),
+      inputs: (json['inputs'] as List)
+          .map((i) => TxInputPreview.fromJson(i as Map<String, dynamic>))
+          .toList(),
+      outputs: (json['outputs'] as List)
+          .map((o) => TxOutputPreview.fromJson(o as Map<String, dynamic>))
+          .toList(),
+      feeSats: json['fee_sats'] as int?,
+      feeRateSatVb: (json['fee_rate_sat_vb'] as num?)?.toDouble(),
+      feeRateBasis: FeeRateBasis.fromId(json['fee_rate_basis'] as String),
+      vsize: json['vsize'] as int,
+      weight: json['weight'] as int,
+      size: json['size'] as int,
+      version: json['version'] as int,
+      locktime: json['locktime'] as int,
+      rbf: json['rbf'] as bool,
+      readiness: TxReadiness.fromId(json['readiness'] as String),
+      feeUnknownReason: json['fee_unknown_reason'] as String?,
+      amountsDeclared: json['amounts_declared'] as bool,
+      amountsListed: json['amounts_listed'] as bool,
+      warnings: ((json['warnings'] as List?) ?? const [])
+          .map((w) => TxWarning.fromJson(w as Map<String, dynamic>))
+          .toList(),
+      hex: json['hex'] as String?,
+    );
+  }
+
+  final String txid;
+  final TxSource source;
+  final Network network;
+  final List<TxInputPreview> inputs;
+  final List<TxOutputPreview> outputs;
+
+  /// Fee in sats, when every input's value is known, no amount is past
+  /// all the bitcoin there will ever be, and the outputs pay no more than
+  /// the inputs bring.
+  final int? feeSats;
+
+  /// The fee over the size the transaction has once signed: see
+  /// [feeRateBasis].
+  final double? feeRateSatVb;
+
+  /// Whether [feeRateSatVb] is the rate paid, an estimate of it before
+  /// the signatures are in, or the most it can be.
+  final FeeRateBasis feeRateBasis;
+
+  /// Why there is no fee, in the words of the core's caution: what the
+  /// confirmation repeats. Null when there is a fee.
+  final String? feeUnknownReason;
+
+  /// A value shown for an input is only what the file declares: no
+  /// watched wallet, no backend and no previous transaction proves it.
+  /// The inputs total and the fee rest on that word then, and wear the
+  /// mark that says so.
+  final bool amountsDeclared;
+
+  /// One of those values is a watched address's listing, the server's
+  /// figure, rather than the file's word: the mark says it neutrally.
+  final bool amountsListed;
+  final int vsize;
+  final int weight;
+  final int size;
+  final int version;
+
+  /// Absolute lock time as the consensus integer: a block height below
+  /// 500 000 000, a unix timestamp above.
+  final int locktime;
+  final bool rbf;
+
+  /// Where it stands: the one thing the readiness pill and the Broadcast
+  /// button both read.
+  final TxReadiness readiness;
+  final List<TxWarning> warnings;
+
+  /// The transaction as the network takes it, present only when ready.
+  final String? hex;
+}
+
+/// Outcome of a broadcast.
+class BroadcastReport {
+  const BroadcastReport({
+    required this.txid,
+    required this.backend,
+    required this.at,
+  });
+
+  factory BroadcastReport.fromJson(Map<String, dynamic> json) {
+    return BroadcastReport(
+      txid: json['txid'] as String,
+      backend: json['backend'] as String,
+      at: json['at'] as int,
+    );
+  }
+
+  final String txid;
+
+  /// Host that accepted the transaction.
+  final String backend;
+
+  /// Unix timestamp, seconds.
+  final int at;
+}
+
+/// Where a sent transaction stands, as the core reads the backend's
+/// answer: one value, so no screen works it out again from [found] and
+/// [confirmed].
+enum BroadcastStanding {
+  /// The backend does not know it: never relayed, dropped or replaced.
+  notSeen('not_seen'),
+  inMempool('in_mempool'),
+  confirmed('confirmed');
+
+  const BroadcastStanding(this.id);
+
+  final String id;
+
+  static BroadcastStanding fromId(String id) =>
+      BroadcastStanding.values.firstWhere((s) => s.id == id);
+}
+
+/// Where a broadcast transaction stands, as the backend sees it.
+class BroadcastStatus {
+  const BroadcastStatus({
+    required this.txid,
+    required this.standing,
+    required this.found,
+    required this.confirmed,
+    required this.confirmations,
+    required this.backend,
+    required this.at,
+    this.blockHeight,
+  });
+
+  factory BroadcastStatus.fromJson(Map<String, dynamic> json) {
+    return BroadcastStatus(
+      txid: json['txid'] as String,
+      standing: BroadcastStanding.fromId(json['standing'] as String),
+      found: json['found'] as bool,
+      confirmed: json['confirmed'] as bool,
+      blockHeight: json['block_height'] as int?,
+      confirmations: json['confirmations'] as int,
+      backend: json['backend'] as String,
+      at: json['at'] as int,
+    );
+  }
+
+  final String txid;
+
+  /// What the pill says. The core keeps it in step with the fields
+  /// below, which are read for the details only.
+  final BroadcastStanding standing;
+
+  /// Whether the backend knows the transaction at all: it can drop out
+  /// of the mempool, evicted or replaced.
+  final bool found;
+  final bool confirmed;
+  final int? blockHeight;
+  final int confirmations;
+  final String backend;
+  final int at;
+}
+
+/// A transaction this app sent, kept by the vault so it can be checked
+/// again after a restart.
+class RecentBroadcast {
+  const RecentBroadcast({
+    required this.txid,
+    required this.network,
+    required this.hex,
+    required this.backend,
+    required this.at,
+  });
+
+  factory RecentBroadcast.fromJson(Map<String, dynamic> json) {
+    return RecentBroadcast(
+      txid: json['txid'] as String,
+      network: Network.fromId(json['network'] as String),
+      hex: json['hex'] as String,
+      backend: json['backend'] as String,
+      at: json['at'] as int,
+    );
+  }
+
+  final String txid;
+  final Network network;
+
+  /// The transaction as sent: what the status check decodes.
+  final String hex;
+
+  /// Host that accepted it; empty for one this app kept before the vault
+  /// did, which did not note it.
+  final String backend;
+
+  /// Unix timestamp, seconds, of the broadcast.
+  final int at;
+}
+
+// --- backup ------------------------------------------------------------
+
+/// What to seal: which wallets (null for every wallet on every
+/// network), and whether the node settings travel with them.
+class BackupOptions {
+  const BackupOptions({this.walletIds, this.includeSettings = false});
+
+  final List<String>? walletIds;
+  final bool includeSettings;
+
+  Map<String, dynamic> toJson() => {
+    'wallet_ids': walletIds,
+    'include_settings': includeSettings,
+  };
+}
+
+/// A sealed backup in both transport forms.
+class BackupBundle {
+  const BackupBundle({
+    required this.data,
+    required this.frames,
+    required this.walletCount,
+    required this.sizeBytes,
+  });
+
+  factory BackupBundle.fromJson(Map<String, dynamic> json) {
+    return BackupBundle(
+      data: json['data'] as String,
+      frames: (json['frames'] as List).cast<String>(),
+      walletCount: json['wallet_count'] as int,
+      sizeBytes: json['size_bytes'] as int,
+    );
+  }
+
+  /// Base64 of the encrypted file bytes.
+  final String data;
+
+  /// UR frames to loop as an animated QR.
+  final List<String> frames;
+  final int walletCount;
+  final int sizeBytes;
+}
+
+/// One wallet of a backup, before it is restored.
+class BackupWalletPreview {
+  const BackupWalletPreview({
+    required this.index,
+    required this.name,
+    required this.network,
+    required this.kind,
+    required this.alreadyWatched,
+    this.refused,
+  });
+
+  factory BackupWalletPreview.fromJson(Map<String, dynamic> json) {
+    return BackupWalletPreview(
+      index: json['index'] as int,
+      name: json['name'] as String,
+      network: Network.fromId(json['network'] as String),
+      kind: WalletKind.fromJson(json['kind'] as Map<String, dynamic>),
+      alreadyWatched: json['already_watched'] as bool,
+      refused: json['refused'] as String?,
+    );
+  }
+
+  final int index;
+  final String name;
+  final Network network;
+  final WalletKind kind;
+
+  /// The same material is already watched here: restoring it again
+  /// would be a duplicate.
+  final bool alreadyWatched;
+
+  /// Why a restore cannot take this wallet, in the core's words: its
+  /// name or material does not read as a wallet to watch. Null for one
+  /// it takes.
+  final String? refused;
+
+  /// Out of reach of the restore: already watched, or refused.
+  bool get outOfReach => alreadyWatched || refused != null;
+}
+
+/// What a backup holds, listed before anything is added.
+class BackupPreview {
+  const BackupPreview({
+    required this.createdAt,
+    required this.wallets,
+    required this.hasSettings,
+    this.backends = const [],
+    this.electrumHosts = const [],
+  });
+
+  factory BackupPreview.fromJson(Map<String, dynamic> json) {
+    return BackupPreview(
+      createdAt: json['created_at'] as int,
+      wallets: (json['wallets'] as List)
+          .map((w) => BackupWalletPreview.fromJson(w as Map<String, dynamic>))
+          .toList(),
+      hasSettings: json['has_settings'] as bool,
+      backends: ((json['backends'] as List?) ?? const [])
+          .map((b) => BackupBackend.fromJson(b as Map<String, dynamic>))
+          .toList(),
+      electrumHosts: ((json['electrum_hosts'] as List?) ?? const [])
+          .map((h) => h as String)
+          .toList(),
+    );
+  }
+
+  final int createdAt;
+  final List<BackupWalletPreview> wallets;
+  final bool hasSettings;
+
+  /// The node the settings would put in place, one entry per network.
+  /// Empty when the backup carries no settings.
+  final List<BackupBackend> backends;
+
+  /// Every `host:port` whose Electrum certificate the settings would
+  /// pin. Empty when the backup carries no settings.
+  final List<String> electrumHosts;
+}
+
+/// One node a backup would put in place, as its preview names it.
+class BackupBackend {
+  const BackupBackend({required this.network, required this.backend});
+
+  factory BackupBackend.fromJson(Map<String, dynamic> json) {
+    return BackupBackend(
+      network: Network.fromId(json['network'] as String),
+      backend: json['backend'] as String,
+    );
+  }
+
+  final Network network;
+
+  /// The host alone, never a full URL: a URL may carry credentials.
+  final String backend;
+}
+
+/// Which wallets to restore (null for all) and whether to apply the
+/// node settings the backup carries.
+class ImportChoices {
+  const ImportChoices({this.indexes, this.applySettings = false});
+
+  final List<int>? indexes;
+  final bool applySettings;
+
+  Map<String, dynamic> toJson() => {
+    'indexes': indexes,
+    'apply_settings': applySettings,
+  };
+}
+
+class ImportReport {
+  const ImportReport({
+    required this.added,
+    required this.skipped,
+    required this.settingsApplied,
+    this.refused = const [],
+  });
+
+  factory ImportReport.fromJson(Map<String, dynamic> json) {
+    return ImportReport(
+      added: (json['added'] as List)
+          .map((w) => WalletMeta.fromJson(w as Map<String, dynamic>))
+          .toList(),
+      skipped: json['skipped'] as int,
+      settingsApplied: json['settings_applied'] as bool,
+      refused: (json['refused'] as List)
+          .map((w) => RefusedWallet.fromJson(w as Map<String, dynamic>))
+          .toList(),
+    );
+  }
+
+  final List<WalletMeta> added;
+
+  /// Wallets left out: already watched, or not chosen.
+  final int skipped;
+  final bool settingsApplied;
+
+  /// Wallets a restore of every wallet left out because the core cannot
+  /// watch them.
+  final List<RefusedWallet> refused;
+}
+
+/// A wallet of a backup a restore left out, mirroring `RefusedWallet`
+/// in gerfaut-core.
+class RefusedWallet {
+  const RefusedWallet({
+    required this.index,
+    required this.name,
+    required this.reason,
+  });
+
+  factory RefusedWallet.fromJson(Map<String, dynamic> json) {
+    return RefusedWallet(
+      index: json['index'] as int,
+      name: json['name'] as String,
+      reason: json['reason'] as String,
+    );
+  }
+
+  /// Its place in the backup.
+  final int index;
+
+  /// Its name, or its place when it has none, as the core calls it.
+  final String name;
+
+  /// Why, in the core's words.
+  final String reason;
+}
+
+// --- tor ---------------------------------------------------------------
+
+/// How `.onion` backends reach Tor.
+enum TorMode {
+  auto('auto', 'Automatic'),
+  system('system', 'System Tor'),
+  embedded('embedded', 'Built-in');
+
+  const TorMode(this.id, this.label);
+
+  final String id;
+  final String label;
+
+  static TorMode fromId(String id) =>
+      TorMode.values.firstWhere((m) => m.id == id, orElse: () => TorMode.auto);
+}
+
+class TorSettings {
+  const TorSettings({required this.mode, this.socksProxy});
+
+  /// The default: a system daemon if one answers, else the built-in.
+  static const TorSettings automatic = TorSettings(mode: TorMode.auto);
+
+  factory TorSettings.fromJson(Map<String, dynamic> json) {
+    return TorSettings(
+      mode: TorMode.fromId(json['mode'] as String? ?? 'auto'),
+      socksProxy: json['socks_proxy'] as String?,
+    );
+  }
+
+  final TorMode mode;
+
+  /// `host:port` of the system SOCKS proxy; null means 127.0.0.1:9050.
+  final String? socksProxy;
+
+  Map<String, dynamic> toJson() => {'mode': mode.id, 'socks_proxy': socksProxy};
+}
+
+/// Which Tor a route goes through.
+enum TorVia {
+  system('system', 'system Tor'),
+  embedded('embedded', 'built-in Tor');
+
+  const TorVia(this.id, this.label);
+
+  final String id;
+  final String label;
+
+  static TorVia? fromId(String? id) {
+    for (final via in TorVia.values) {
+      if (via.id == id) return via;
+    }
+    return null;
+  }
+}
+
+/// Who holds the socket a Tor proxy on loopback answers from, as the
+/// core finds it. Only a proxy of this account or of the system is taken
+/// without being chosen by name.
+enum LoopbackOwner {
+  thisAccount('this_account'),
+  system('system'),
+  otherAccount('other_account'),
+
+  /// Nobody the core can name, and what a value a newer core may add
+  /// reads as: the least promised.
+  unknown('unknown');
+
+  const LoopbackOwner(this.id);
+
+  final String id;
+
+  /// Null for none: no proxy answered, or the platform has no answer.
+  static LoopbackOwner? fromId(String? id) {
+    if (id == null) return null;
+    for (final owner in LoopbackOwner.values) {
+      if (owner.id == id) return owner;
+    }
+    return LoopbackOwner.unknown;
+  }
+}
+
+class TorRoute {
+  const TorRoute({required this.socks, required this.via});
+
+  factory TorRoute.fromJson(Map<String, dynamic> json) {
+    return TorRoute(
+      socks: json['socks'] as String,
+      via: TorVia.fromId(json['via'] as String?) ?? TorVia.system,
+    );
+  }
+
+  final String socks;
+  final TorVia via;
+}
+
+/// Where Tor stands right now.
+class TorStatus {
+  const TorStatus({
+    required this.mode,
+    required this.socksProxy,
+    required this.via,
+    required this.socks,
+    required this.running,
+    required this.bootstrapped,
+    required this.bootstrapPercent,
+    required this.error,
+    required this.embeddedAvailable,
+    this.systemSocksTrusted = false,
+    this.systemSocksOwner,
+  });
+
+  factory TorStatus.fromJson(Map<String, dynamic> json) {
+    return TorStatus(
+      mode: TorMode.fromId(json['mode'] as String? ?? 'auto'),
+      socksProxy: json['socks_proxy'] as String? ?? '127.0.0.1:9050',
+      via: TorVia.fromId(json['via'] as String?),
+      socks: json['socks'] as String?,
+      running: json['running'] as bool? ?? false,
+      bootstrapped: json['bootstrapped'] as bool? ?? false,
+      bootstrapPercent: json['bootstrap_percent'] as int? ?? 0,
+      error: json['error'] as String?,
+      embeddedAvailable: json['embedded_available'] as bool? ?? false,
+      systemSocksTrusted: json['system_socks_trusted'] as bool? ?? false,
+      systemSocksOwner: LoopbackOwner.fromId(
+        json['system_socks_owner'] as String?,
+      ),
+    );
+  }
+
+  final TorMode mode;
+
+  /// The effective system proxy address.
+  final String socksProxy;
+  final TorVia? via;
+
+  /// The SOCKS address in use, once a route was resolved.
+  final String? socks;
+  final bool running;
+  final bool bootstrapped;
+  final int bootstrapPercent;
+  final String? error;
+
+  /// Whether this build carries the built-in client.
+  final bool embeddedAvailable;
+
+  /// Whether Automatic may take a Tor found on this device's local port,
+  /// as the core decides it: not on a phone, where any app can answer
+  /// there and pose as Tor.
+  final bool systemSocksTrusted;
+
+  /// Who holds the proxy at [socksProxy] the last time one answered on
+  /// loopback; null when none did, and always on Android, where the
+  /// core never probes it. Read for parity with the desktop app, which
+  /// says it on its Tor card: no screen of this app does.
+  final LoopbackOwner? systemSocksOwner;
+}
+
+// --- policy --------------------------------------------------------------
+
+/// The shape of a wallet's policy, at a glance.
+enum PolicyKind {
+  /// One key, nothing else.
+  singleKey('single_key'),
+
+  /// One threshold of plain keys.
+  multisig('multisig'),
+
+  /// Anything with a timelock, a hash, or nested conditions.
+  miniscript('miniscript'),
+
+  /// A watched address: no descriptor to read.
+  address('address');
+
+  const PolicyKind(this.id);
+
+  final String id;
+
+  static PolicyKind fromId(String id) =>
+      PolicyKind.values.firstWhere((k) => k.id == id);
+}
+
+/// What the time-based figures of a snapshot were measured against.
+enum TimeBasis {
+  /// The device clock. The chain's median time trails it by up to a
+  /// couple of hours.
+  wallClock('wall_clock');
+
+  const TimeBasis(this.id);
+
+  final String id;
+
+  static TimeBasis fromId(String id) =>
+      TimeBasis.values.firstWhere((b) => b.id == id);
+}
+
+/// What a spending branch is for, guessed by the core from its locks.
+enum BranchRole {
+  /// No timelock: the everyday path.
+  primary('primary'),
+
+  /// The shortest timelocked path.
+  recovery('recovery'),
+
+  /// The second shortest timelocked path.
+  emergency('emergency'),
+
+  /// Further timelocked paths, and paths with no key or needing a
+  /// hash preimage.
+  other('other');
+
+  const BranchRole(this.id);
+
+  final String id;
+
+  static BranchRole fromId(String id) =>
+      BranchRole.values.firstWhere((r) => r.id == id);
+}
+
+/// One key of the policy. The same extended key on two derivation
+/// paths is one key.
+class PolicyKey {
+  const PolicyKey({
+    required this.id,
+    required this.label,
+    required this.fingerprint,
+    required this.originPath,
+    required this.keyShort,
+  });
+
+  factory PolicyKey.fromJson(Map<String, dynamic> json) {
+    return PolicyKey(
+      id: json['id'] as String,
+      label: json['label'] as String,
+      fingerprint: json['fingerprint'] as String?,
+      originPath: json['origin_path'] as String?,
+      keyShort: json['key_short'] as String,
+    );
+  }
+
+  /// Stable within the snapshot: `k0`, `k1`, ...
+  final String id;
+
+  /// `Key A`, `Key B`, ... then `Key 27` past the alphabet.
+  final String label;
+
+  /// Eight lowercase hex digits, when the key carries an origin.
+  final String? fingerprint;
+
+  /// Origin path, `m/48'/1'/0'/2'`, when the key carries one.
+  final String? originPath;
+
+  /// The key as written, shortened around an ellipsis.
+  final String keyShort;
+}
+
+/// An absolute lock: `after(n)`, a block height or a unix time.
+sealed class AbsoluteLock {
+  const AbsoluteLock();
+
+  factory AbsoluteLock.fromJson(Map<String, dynamic> json) {
+    return switch (json['kind'] as String) {
+      'height' => HeightLock(height: json['height'] as int),
+      'time' => TimeLock(unix: json['unix'] as int),
+      final other => throw FormatException('unknown absolute lock: $other'),
+    };
+  }
+}
+
+class HeightLock extends AbsoluteLock {
+  const HeightLock({required this.height});
+
+  final int height;
+}
+
+class TimeLock extends AbsoluteLock {
+  const TimeLock({required this.unix});
+
+  final int unix;
+}
+
+/// A relative lock: `older(n)`, counted from each coin's confirmation.
+/// A time-based one comes with its seconds already multiplied out.
+sealed class RelativeLock {
+  const RelativeLock();
+
+  factory RelativeLock.fromJson(Map<String, dynamic> json) {
+    return switch (json['kind'] as String) {
+      'blocks' => BlocksLock(blocks: json['blocks'] as int),
+      'seconds' => SecondsLock(seconds: json['seconds'] as int),
+      final other => throw FormatException('unknown relative lock: $other'),
+    };
+  }
+
+  /// Whether the lock counts time rather than blocks.
+  bool get isTimeBased => this is SecondsLock;
+}
+
+class BlocksLock extends RelativeLock {
+  const BlocksLock({required this.blocks});
+
+  final int blocks;
+}
+
+class SecondsLock extends RelativeLock {
+  const SecondsLock({required this.seconds});
+
+  final int seconds;
+}
+
+/// A spending condition, as the policy states it. A threshold with
+/// `k == n` is an "and", one with `k == 1` an "or".
+sealed class PolicyCondition {
+  const PolicyCondition();
+
+  factory PolicyCondition.fromJson(Map<String, dynamic> json) {
+    return switch (json['kind'] as String) {
+      'key' => KeyCondition(keyId: json['key_id'] as String),
+      'thresh' => ThreshCondition(
+        k: json['k'] as int,
+        n: json['n'] as int,
+        items: (json['items'] as List)
+            .map((c) => PolicyCondition.fromJson(c as Map<String, dynamic>))
+            .toList(),
+      ),
+      'after' => AfterCondition(
+        lock: AbsoluteLock.fromJson(json['lock'] as Map<String, dynamic>),
+      ),
+      'older' => OlderCondition(
+        lock: RelativeLock.fromJson(json['lock'] as Map<String, dynamic>),
+      ),
+      'preimage' => PreimageCondition(hash: json['hash'] as String),
+      final other => throw FormatException('unknown condition: $other'),
+    };
+  }
+}
+
+class KeyCondition extends PolicyCondition {
+  const KeyCondition({required this.keyId});
+
+  final String keyId;
+}
+
+class ThreshCondition extends PolicyCondition {
+  const ThreshCondition({
+    required this.k,
+    required this.n,
+    required this.items,
+  });
+
+  final int k;
+  final int n;
+  final List<PolicyCondition> items;
+}
+
+class AfterCondition extends PolicyCondition {
+  const AfterCondition({required this.lock});
+
+  final AbsoluteLock lock;
+}
+
+class OlderCondition extends PolicyCondition {
+  const OlderCondition({required this.lock});
+
+  final RelativeLock lock;
+}
+
+/// A hash whose preimage must be revealed: `sha256`, `hash256`,
+/// `ripemd160` or `hash160`.
+class PreimageCondition extends PolicyCondition {
+  const PreimageCondition({required this.hash});
+
+  final String hash;
+}
+
+/// Which lock a [PolicyTimelock] entry is about.
+sealed class TimelockRef {
+  const TimelockRef();
+
+  factory TimelockRef.fromJson(Map<String, dynamic> json) {
+    final lock = json['lock'] as Map<String, dynamic>;
+    return switch (json['kind'] as String) {
+      'absolute' => AbsoluteTimelock(lock: AbsoluteLock.fromJson(lock)),
+      'relative' => RelativeTimelock(lock: RelativeLock.fromJson(lock)),
+      final other => throw FormatException('unknown timelock: $other'),
+    };
+  }
+
+  /// Whether the lock is judged by a clock rather than by a height.
+  bool get isTimeBased => switch (this) {
+    AbsoluteTimelock(:final lock) => lock is TimeLock,
+    RelativeTimelock(:final lock) => lock.isTimeBased,
+  };
+}
+
+class AbsoluteTimelock extends TimelockRef {
+  const AbsoluteTimelock({required this.lock});
+
+  final AbsoluteLock lock;
+}
+
+class RelativeTimelock extends TimelockRef {
+  const RelativeTimelock({required this.lock});
+
+  final RelativeLock lock;
+}
+
+/// What still separates a lock from opening. Block figures come with
+/// their ten-minute estimate; a time figure has no block count.
+class Remaining {
+  const Remaining({
+    required this.remainingBlocks,
+    required this.remainingSeconds,
+    required this.unlocksAtUnix,
+  });
+
+  factory Remaining.fromJson(Map<String, dynamic> json) {
+    return Remaining(
+      remainingBlocks: json['remaining_blocks'] as int?,
+      remainingSeconds: json['remaining_seconds'] as int?,
+      unlocksAtUnix: json['unlocks_at_unix'] as int?,
+    );
+  }
+
+  final int? remainingBlocks;
+  final int? remainingSeconds;
+  final int? unlocksAtUnix;
+}
+
+/// Where one lock stands against the chain and the coins.
+sealed class LockState {
+  const LockState();
+
+  factory LockState.fromJson(Map<String, dynamic> json) {
+    return switch (json['kind'] as String) {
+      'unlocked' => const UnlockedLock(),
+      // The countdown sits under `until`, as it does on a branch; every
+      // figure in it may be null when the chain's position is unknown.
+      'locked' => LockedLock(
+        remaining: Remaining.fromJson(json['until'] as Map<String, dynamic>),
+      ),
+      'per_coin' => PerCoinLock(
+        unlocked: json['unlocked'] as int,
+        waiting: json['waiting'] as int,
+        locked: json['locked'] as int,
+        next: json['next'] == null
+            ? null
+            : Remaining.fromJson(json['next'] as Map<String, dynamic>),
+      ),
+      'no_coins' => NoCoinsLock(
+        blocks: json['blocks'] as int?,
+        seconds: json['seconds'] as int?,
+      ),
+      final other => throw FormatException('unknown lock state: $other'),
+    };
+  }
+}
+
+/// An absolute lock the chain has passed.
+class UnlockedLock extends LockState {
+  const UnlockedLock();
+}
+
+/// An absolute lock still ahead.
+class LockedLock extends LockState {
+  const LockedLock({required this.remaining});
+
+  final Remaining remaining;
+}
+
+/// A relative lock, counted coin by coin. `waiting` coins are not
+/// confirmed yet, so their count has not started; `next` is the locked
+/// coin that opens first.
+class PerCoinLock extends LockState {
+  const PerCoinLock({
+    required this.unlocked,
+    required this.waiting,
+    required this.locked,
+    required this.next,
+  });
+
+  final int unlocked;
+  final int waiting;
+  final int locked;
+  final Remaining? next;
+}
+
+/// A relative lock with no coin to count from: the raw duration.
+class NoCoinsLock extends LockState {
+  const NoCoinsLock({required this.blocks, required this.seconds});
+
+  final int? blocks;
+  final int? seconds;
+}
+
+/// One timelock of a branch.
+class PolicyTimelock {
+  const PolicyTimelock({
+    required this.lock,
+    required this.required,
+    required this.state,
+  });
+
+  factory PolicyTimelock.fromJson(Map<String, dynamic> json) {
+    return PolicyTimelock(
+      lock: TimelockRef.fromJson(json['lock'] as Map<String, dynamic>),
+      required: json['required'] as bool,
+      state: LockState.fromJson(json['state'] as Map<String, dynamic>),
+    );
+  }
+
+  final TimelockRef lock;
+
+  /// False when the lock sits under a threshold that can be met
+  /// without it: it then never holds the branch back.
+  final bool required;
+  final LockState state;
+}
+
+/// Whether a branch can be spent from right now.
+sealed class BranchState {
+  const BranchState();
+
+  factory BranchState.fromJson(Map<String, dynamic> json) {
+    return switch (json['kind'] as String) {
+      'spendable_now' => const SpendableNow(),
+      'locked' => LockedBranch(
+        until: Remaining.fromJson(json['until'] as Map<String, dynamic>),
+      ),
+      'per_coin' => PerCoinBranch(
+        unlocked: json['unlocked'] as int,
+        waiting: json['waiting'] as int,
+        locked: json['locked'] as int,
+        next: json['next'] == null
+            ? null
+            : Remaining.fromJson(json['next'] as Map<String, dynamic>),
+      ),
+      'no_coins' => const NoCoinsBranch(),
+      'needs_preimage' => const NeedsPreimage(),
+      final other => throw FormatException('unknown branch state: $other'),
+    };
+  }
+}
+
+class SpendableNow extends BranchState {
+  const SpendableNow();
+}
+
+/// Only absolute locks, and the chain has not passed them all.
+class LockedBranch extends BranchState {
+  const LockedBranch({required this.until});
+
+  final Remaining until;
+}
+
+/// At least one relative lock: a coin is unlocked once every lock of
+/// the branch is met for it.
+class PerCoinBranch extends BranchState {
+  const PerCoinBranch({
+    required this.unlocked,
+    required this.waiting,
+    required this.locked,
+    required this.next,
+  });
+
+  final int unlocked;
+  final int waiting;
+  final int locked;
+  final Remaining? next;
+
+  int get total => unlocked + waiting + locked;
+}
+
+/// A relative lock with no coin to count from.
+class NoCoinsBranch extends BranchState {
+  const NoCoinsBranch();
+}
+
+/// The branch needs a hash preimage; keys and locks say nothing about
+/// whether one is at hand.
+class NeedsPreimage extends BranchState {
+  const NeedsPreimage();
+}
+
+/// The tone the core shows a branch's state in: confirmed when it is
+/// open, pending when it opens in under thirty days, neutral otherwise.
+enum BranchTone {
+  confirmed('confirmed'),
+  pending('pending'),
+  neutral('neutral');
+
+  const BranchTone(this.id);
+
+  final String id;
+
+  static BranchTone fromId(String id) =>
+      BranchTone.values.firstWhere((t) => t.id == id);
+}
+
+/// One way to spend: a top-level alternative of the policy.
+class PolicyBranch {
+  const PolicyBranch({
+    required this.id,
+    required this.role,
+    required this.label,
+    required this.summary,
+    required this.condition,
+    required this.timelocks,
+    required this.state,
+    required this.spendableNow,
+    required this.tone,
+  });
+
+  factory PolicyBranch.fromJson(Map<String, dynamic> json) {
+    return PolicyBranch(
+      id: json['id'] as String,
+      role: BranchRole.fromId(json['role'] as String),
+      label: json['label'] as String,
+      summary: json['summary'] as String,
+      condition: PolicyCondition.fromJson(
+        json['condition'] as Map<String, dynamic>,
+      ),
+      timelocks: (json['timelocks'] as List)
+          .map((t) => PolicyTimelock.fromJson(t as Map<String, dynamic>))
+          .toList(),
+      state: BranchState.fromJson(json['state'] as Map<String, dynamic>),
+      spendableNow: json['spendable_now'] as bool,
+      tone: BranchTone.fromId(json['tone'] as String),
+    );
+  }
+
+  /// Stable within the snapshot: `b0`, `b1`, ...
+  final String id;
+  final BranchRole role;
+
+  /// `Primary`, `Recovery`, `Emergency`, `Primary B`, `Recovery 3`...
+  final String label;
+
+  /// The core's one-sentence reading of the branch.
+  final String summary;
+  final PolicyCondition condition;
+
+  /// Every lock of the branch, optional ones included, in the order
+  /// the policy names them.
+  final List<PolicyTimelock> timelocks;
+  final BranchState state;
+  final bool spendableNow;
+
+  /// The colour [state] is shown in, the core's call.
+  final BranchTone tone;
+}
+
+/// A wallet's policy read against the chain.
+class PolicySnapshot {
+  const PolicySnapshot({
+    required this.kind,
+    required this.script,
+    required this.descriptor,
+    required this.policy,
+    required this.keys,
+    required this.branches,
+    required this.tipHeight,
+    required this.computedAt,
+    required this.timeBasis,
+    required this.coins,
+    required this.hasTimelocks,
+  });
+
+  factory PolicySnapshot.fromJson(Map<String, dynamic> json) {
+    return PolicySnapshot(
+      kind: PolicyKind.fromId(json['kind'] as String),
+      script: ScriptKind.fromId(json['script'] as String),
+      descriptor: json['descriptor'] as String,
+      policy: json['policy'] as String,
+      keys: (json['keys'] as List)
+          .map((k) => PolicyKey.fromJson(k as Map<String, dynamic>))
+          .toList(),
+      branches: (json['branches'] as List)
+          .map((b) => PolicyBranch.fromJson(b as Map<String, dynamic>))
+          .toList(),
+      tipHeight: json['tip_height'] as int?,
+      computedAt: json['computed_at'] as int,
+      timeBasis: TimeBasis.fromId(json['time_basis'] as String),
+      coins: json['coins'] as int,
+      hasTimelocks: json['has_timelocks'] as bool,
+    );
+  }
+
+  final PolicyKind kind;
+  final ScriptKind script;
+
+  /// The external descriptor as given, or the address of a watched
+  /// address.
+  final String descriptor;
+
+  /// The normalized semantic policy with key labels in place of keys:
+  /// `or(pk(Key A),and(pk(Key B),older(52560)))`.
+  final String policy;
+  final List<PolicyKey> keys;
+
+  /// In reading order: the primary paths, then recovery, emergency and
+  /// the rest, each from the nearest lock to the farthest.
+  final List<PolicyBranch> branches;
+
+  /// The chain tip the absolute locks were read against; null for a
+  /// wallet that has never synced, whose absolute locks then stand with
+  /// nothing to count down from.
+  final int? tipHeight;
+
+  /// When the snapshot was computed, unix seconds.
+  final int computedAt;
+  final TimeBasis timeBasis;
+
+  /// Number of coins the relative locks were counted over.
+  final int coins;
+  final bool hasTimelocks;
+
+  /// The key a condition names, by its id.
+  PolicyKey? keyById(String id) {
+    for (final key in keys) {
+      if (key.id == id) return key;
+    }
+    return null;
+  }
+
+  /// Whether any lock of any branch is judged by a clock: those read
+  /// against this device's time, which the chain can trail.
+  bool get hasTimeBasedLocks => branches.any(
+    (branch) => branch.timelocks.any((lock) => lock.lock.isTimeBased),
+  );
+}

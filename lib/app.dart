@@ -1,0 +1,840 @@
+import 'dart:async';
+
+import 'package:flutter/cupertino.dart' show CupertinoPageTransitionsBuilder;
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import 'screens/backup_restore.dart';
+import 'screens/calculator.dart';
+import 'screens/home.dart';
+import 'screens/lock_screen.dart';
+import 'screens/welcome.dart';
+import 'src/disguise.dart';
+import 'src/home_widgets.dart';
+import 'src/live.dart';
+import 'src/lock.dart';
+import 'src/models.dart';
+import 'src/notifications.dart';
+import 'src/onboarding.dart';
+import 'src/platform_features.dart';
+import 'src/screen_off.dart';
+import 'src/state.dart';
+import 'src/updates.dart';
+import 'src/vault_key.dart';
+import 'theme/page_transition.dart';
+import 'theme/tokens.dart';
+import 'widgets/buttons.dart';
+import 'widgets/notice.dart';
+import 'widgets/price_credit.dart';
+import 'src/prefs.dart';
+import 'src/share.dart';
+import 'widgets/readable_width.dart';
+
+/// Root widget: both Toundra themes, light by default, and the startup
+/// bootstrap (Rust bridge + encrypted vault) before the home screen.
+class GerfautApp extends ConsumerStatefulWidget {
+  const GerfautApp({super.key, this.bootstrap, this.startOver});
+
+  /// Opens the Rust bridge and the vault at startup. Widget tests pass
+  /// null (with a fake bridge override) so pumping the app never
+  /// touches native code.
+  final Future<void> Function()? bootstrap;
+
+  /// Sets an unopenable vault aside so that [bootstrap] can start an
+  /// empty one. The real app moves the file; widget tests pass a fake.
+  final Future<void> Function()? startOver;
+
+  @override
+  ConsumerState<GerfautApp> createState() => _GerfautAppState();
+}
+
+class _GerfautAppState extends ConsumerState<GerfautApp> {
+  late Future<void>? _ready = widget.bootstrap?.call();
+
+  /// Reaches the navigator from outside the tree, for the one route the
+  /// bootstrap itself pushes: the restore page after a vault was set
+  /// aside.
+  final _navigator = GlobalKey<NavigatorState>();
+
+  /// Tells the credit slot which routes are in view: only their
+  /// figures are credited.
+  late final _credits = CreditObserver(ref.read(creditBoardProvider));
+
+  /// A quiet retry is already running behind the calculator.
+  bool _retryingBehind = false;
+
+  /// Runs the bootstrap again behind the calculator of a disguised app
+  /// that could not start. Nothing on screen moves while it runs, nor
+  /// when it fails: a calculator that blinked on = would give the app
+  /// away. Only a vault that opens changes the screen, to the
+  /// calculator that unlocks it.
+  Future<void> _retryBehind() async {
+    final bootstrap = widget.bootstrap;
+    if (bootstrap == null || _retryingBehind) return;
+    _retryingBehind = true;
+    try {
+      await bootstrap();
+      if (!mounted) return;
+      setState(() {
+        _ready = Future<void>.value();
+      });
+    } catch (_) {
+      // Still closed: the calculator stays as it was.
+    } finally {
+      _retryingBehind = false;
+    }
+  }
+
+  /// Runs the bootstrap again, on a fresh future so the gate rebuilds
+  /// from its loading state.
+  void _retry() {
+    final bootstrap = widget.bootstrap;
+    if (bootstrap == null) return;
+    setState(() {
+      _ready = bootstrap();
+    });
+  }
+
+  /// Sets the vault aside, opens an empty one, and lands on the restore
+  /// page: the one place a backup brings the wallets back from. Without
+  /// a backup the page is left with the back gesture, and the empty
+  /// vault is what remains.
+  void _startOver() {
+    final bootstrap = widget.bootstrap;
+    if (bootstrap == null) return;
+    setState(() {
+      _ready = (widget.startOver ?? setVaultAside)()
+          .then((_) => bootstrap())
+          .then((_) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _navigator.currentState?.push(
+                MaterialPageRoute<void>(
+                  builder: (_) => const BackupRestoreScreen(),
+                ),
+              );
+            });
+          });
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final themeMode = switch (ref.watch(themeProvider)) {
+      ThemePref.light => ThemeMode.light,
+      ThemePref.dark => ThemeMode.dark,
+      ThemePref.system => ThemeMode.system,
+    };
+
+    return MaterialApp(
+      title: 'Gerfaut',
+      navigatorKey: _navigator,
+      navigatorObservers: [_credits],
+      // One slot for the credit a price source asks for, under every
+      // screen: see widgets/price_credit.dart.
+      builder: (context, child) => CreditFrame(child: child!),
+      theme: themeFrom(GerfautTokens.light, Brightness.light),
+      darkTheme: themeFrom(GerfautTokens.dark, Brightness.dark),
+      themeMode: themeMode,
+      home: _ready == null
+          ? const _Hydrated(child: _Gate())
+          : _BootstrapGate(
+              ready: _ready!,
+              onRetry: _retry,
+              onRetryBehind: _retryBehind,
+              onStartOver: _startOver,
+            ),
+    );
+  }
+}
+
+/// Hydrates the UI preferences from the vault as soon as the settings
+/// load. It sits below the bootstrap gate on purpose: watching the
+/// settings is what asks the core for them, and nothing may ask before
+/// the bridge is up and the vault open.
+class _Hydrated extends ConsumerWidget {
+  const _Hydrated({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.listen(settingsProvider, (_, next) {
+      final settings = next.value;
+      if (settings != null && !ref.read(prefsHydratedProvider)) {
+        ref.read(prefsHydratedProvider.notifier).put(true);
+        final prefs = settings.appPrefs;
+        ref.read(themeProvider.notifier).hydrate(prefs[Pref.theme]);
+        ref.read(preferencesProvider.notifier).hydrate(settings.preferences);
+        // Asked once, now: the price and the settings read it, and a
+        // settings card drawn before it came would draw empty.
+        ref.read(priceTableProvider);
+        ref
+            .read(notifyDetailsProvider.notifier)
+            .hydrate(prefs[Pref.notifyDetails]);
+        ref
+            .read(backgroundCheckProvider.notifier)
+            .hydrate(prefs[Pref.background]);
+        ref
+            .read(onboardingSeenProvider.notifier)
+            .hydrate(prefs[Pref.onboardingSeen]);
+        // Before the lock below: its pad and its delay read these.
+        ref.read(lockDelayProvider.notifier).hydrate(prefs[Pref.lockDelay]);
+        ref.read(lockShuffleProvider.notifier).hydrate(prefs[Pref.lockShuffle]);
+        ref
+            .read(widgetBalancesProvider.notifier)
+            .hydrate(prefs[Pref.widgetBalances]);
+        // The switch in About reads the core, not the preferences.
+        unawaited(ref.read(updateProvider.notifier).load());
+        // The widgets follow from here: everything they show is
+        // hydrated now, so the first thing they get is the right thing.
+        ref.read(widgetFeedProvider);
+        // Live watch: listen to the core, and see that the service runs
+        // if the setting asks for it. The app is on screen, which is
+        // when Android lets it start. Not before the notices are known
+        // to get through: Live is there to say things.
+        unawaited(_checkNoticesThenLive(ref));
+        // Where each wallet's sync stands, from the core, whoever runs
+        // it: a failure from before a restart shows from the start.
+        ref.read(syncProvider.notifier).listen();
+        // A history or a backup shared last time, or by a session the
+        // system ended, may still sit in the cache.
+        unawaited(ref.read(csvSharerProvider).forgetCopies());
+      }
+      // The vault says whether a lock exists, every time it is read:
+      // the first reading with one in it is what puts the screen up.
+      if (settings != null) {
+        final first = !ref.read(lockProvider).loaded;
+        ref.read(lockProvider.notifier).syncFromSettings(settings.appLock);
+        _dropOrphanDisguise(ref, settings);
+        // A vault without a lock opens on the wallets: that is a
+        // session starting, as an unlock is with one.
+        if (first) _startUpdateSession(ref);
+      }
+    });
+    // The widget feed and Live follow the app's state for as long as it
+    // runs. A provider only read goes quiet in Riverpod 3: what it listens
+    // to is no longer rebuilt for it, and a widget placed meanwhile, a new
+    // quote or a first wallet would go unheard. Listened to here, they
+    // stay awake; not before the preferences are in, like the feed itself.
+    if (ref.watch(prefsHydratedProvider)) {
+      ref.listen(widgetFeedProvider, (_, _) {});
+      ref.listen(liveProvider, (_, _) {});
+    }
+    // The platform may answer about the disguise after the vault has
+    // answered about the lock: the same check, from the other side.
+    ref.listen(disguiseProvider, (previous, next) {
+      final settings = ref.read(settingsProvider).value;
+      if (settings != null) _dropOrphanDisguise(ref, settings);
+      // The session waits for this answer when the vault gave its own
+      // first: nothing about a release is said before the app knows
+      // which face it wears.
+      if (next.loaded && !(previous?.loaded ?? false)) {
+        _startUpdateSession(ref);
+      }
+    });
+    return child;
+  }
+
+  /// Takes the disguise off a vault that carries no lock.
+  ///
+  /// A disguise has no meaning without the PIN that opens it, and the
+  /// settings card turns the two off together. But the lock can go on
+  /// its own — a vault restored from a backup, app storage the system
+  /// cleared — and the calculator would then stand in the launcher in
+  /// front of an app that opens on a tap. The launcher face follows
+  /// the lock: none, none.
+  void _dropOrphanDisguise(WidgetRef ref, Settings settings) {
+    final disguise = ref.read(disguiseProvider);
+    if (settings.appLock != null || !disguise.loaded || !disguise.disguised) {
+      return;
+    }
+    // A platform that refuses leaves the calculator up; the settings
+    // card can be asked again, and says why if it fails there too.
+    unawaited(
+      ref.read(disguiseProvider.notifier).set(false).catchError((_) {}),
+    );
+  }
+}
+
+/// Tells the update notice that the wallets just came on screen. Only
+/// once the preferences are in and the vault is unlocked: a release is
+/// never announced, nor asked about, from behind the lock.
+void _startUpdateSession(WidgetRef ref) {
+  final lock = ref.read(lockProvider);
+  if (!ref.read(prefsHydratedProvider) || !lock.loaded || lock.locked) return;
+  unawaited(ref.read(updateProvider.notifier).sessionStarted());
+}
+
+/// Reads whether the notices still get through, then brings Live in
+/// line with the setting that check may have changed.
+Future<void> _checkNoticesThenLive(WidgetRef ref) async {
+  await ref.read(notifyNewTxProvider.notifier).checkSystem();
+  try {
+    await ref.read(liveProvider.notifier).resume();
+  } catch (_) {
+    // The next return to the screen brings the service in line again.
+  }
+}
+
+/// What the app shows once the vault is open: the lock while it is
+/// locked, the welcome tour on a vault with nothing in it, otherwise
+/// the wallets.
+///
+/// The lock replaces the app rather than covering it: nothing of a
+/// wallet is in the tree behind it, so no screenshot, no accessibility
+/// walk and no back gesture reaches one.
+///
+/// Disguised, the lock is the calculator: the same rule, another face.
+/// The disguise is read from the platform, not the vault, and the gate
+/// waits for that answer as it waits for the lock's, so no frame of the
+/// wrong face is ever drawn.
+class _Gate extends ConsumerStatefulWidget {
+  const _Gate();
+
+  @override
+  ConsumerState<_Gate> createState() => _GateState();
+}
+
+class _GateState extends ConsumerState<_Gate> with WidgetsBindingObserver {
+  /// The app went out of sight since it was last in front: a return from
+  /// the phone's own prompt, which only takes the focus, is not one.
+  bool _wasAway = false;
+
+  /// Tells the lock when the screen goes off, where the system says so.
+  ScreenOffWatch? _screen;
+
+  void _screenOff() => ref.read(lockProvider.notifier).screenOff();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    if (ref.read(platformFeaturesProvider).screenOffLocks) {
+      final screen = ref.read(screenOffWatchProvider);
+      screen.start(_screenOff);
+      _screen = screen;
+    }
+  }
+
+  @override
+  void dispose() {
+    _screen?.stop(_screenOff);
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final lock = ref.read(lockProvider.notifier);
+    switch (state) {
+      // `inactive` alone is not leaving: a permission dialog, an
+      // incoming call and the notification shade all raise it, and so
+      // does every step on the way out and back. Out of sight is
+      // `hidden`, `paused`, and `detached` when the view goes with it.
+      case AppLifecycleState.paused:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.detached:
+        lock.noteHidden();
+        _wasAway = true;
+        ref.read(appInFrontProvider.notifier).put(false);
+      case AppLifecycleState.resumed:
+        lock.noteResumed();
+        ref.read(appInFrontProvider.notifier).put(true);
+        // A fingerprint or a face may have been set up or removed in
+        // Android's settings meanwhile: what the phone offers is asked
+        // again, after a real trip away only.
+        if (_wasAway) {
+          _wasAway = false;
+          ref.invalidate(biometricSupportProvider);
+        }
+        // The launcher may have gained or lost a widget meanwhile. Only
+        // once the preferences are in: a feed started before them would
+        // publish the defaults first.
+        if (ref.read(prefsHydratedProvider)) {
+          ref.read(widgetFeedProvider).resume();
+          unawaited(_checkNoticesThenLive(ref));
+          ref.read(syncProvider.notifier).listen();
+          _startUpdateSession(ref);
+        }
+      case AppLifecycleState.inactive:
+        lock.noteReturning();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Locking while a screen is pushed would leave that screen in front
+    // of the lock: this gate is the navigator's first route, so every
+    // route above it has to go before the lock can mean anything.
+    ref.listen(lockProvider, (previous, next) {
+      if (next.locked && !(previous?.locked ?? false)) {
+        final navigator = Navigator.of(context);
+        if (navigator.canPop()) {
+          navigator.popUntil((route) => route.isFirst);
+        }
+      }
+      if (!next.locked && (previous?.locked ?? false)) {
+        _startUpdateSession(ref);
+      }
+    });
+    // Watching the settings is what asks the core for them, and their
+    // arrival is what tells the lock whether to show.
+    final settings = ref.watch(settingsProvider);
+    final lock = ref.watch(lockProvider);
+    final disguise = ref.watch(disguiseProvider);
+    if (settings.hasError) {
+      // The error names the app and its vault: disguised, it is never
+      // shown, and the calculator stands in front of it. A PIN-shaped
+      // number reads the settings again, and settings that load bring
+      // the lock, behind the same calculator.
+      if (!disguise.loaded) return const _StartupScreen();
+      if (disguise.disguised) {
+        return CalculatorScreen(
+          onPin: (_) async => ref.invalidate(settingsProvider),
+        );
+      }
+      return _StartupErrorScreen(
+        error: settings.error!,
+        onRetry: () => ref.invalidate(settingsProvider),
+      );
+    }
+    if (!lock.loaded || !disguise.loaded) return const _StartupScreen();
+    if (lock.locked) {
+      // The calculator never asks for a biometric: a system prompt
+      // over a calculator would give the app away.
+      return disguise.disguised ? const CalculatorScreen() : const LockScreen();
+    }
+
+    // The tour only ever stands in front of an empty vault: someone
+    // with wallets already knows what this is.
+    final wallets = ref.watch(walletsProvider).value;
+    final hydrated = ref.watch(prefsHydratedProvider);
+    final seen = ref.watch(onboardingSeenProvider);
+    if (hydrated && !seen && wallets != null && wallets.isEmpty) {
+      return const WelcomeScreen();
+    }
+    return const HomeScreen();
+  }
+}
+
+/// Shows a quiet loading scaffold until the bootstrap future settles.
+///
+/// A start that failed says why, unless the app is disguised: the error
+/// names the app and its vault, and the face a disguised app shows to
+/// whoever opens it is a calculator, whatever happened behind it. The
+/// error reads once the disguise is off, or the vault opens behind the
+/// calculator and the PIN unlocks it as on any other day.
+class _BootstrapGate extends ConsumerWidget {
+  const _BootstrapGate({
+    required this.ready,
+    required this.onRetry,
+    required this.onRetryBehind,
+    required this.onStartOver,
+  });
+
+  final Future<void> ready;
+  final VoidCallback onRetry;
+  final Future<void> Function() onRetryBehind;
+  final VoidCallback onStartOver;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final disguise = ref.watch(disguiseProvider);
+    return FutureBuilder<void>(
+      future: ready,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const _StartupScreen();
+        }
+        if (snapshot.hasError) {
+          if (!disguise.loaded) return const _StartupScreen();
+          if (disguise.disguised) {
+            return CalculatorScreen(onPin: (_) => onRetryBehind());
+          }
+          return _StartupErrorScreen(
+            error: snapshot.error!,
+            onRetry: onRetry,
+            onStartOver: onStartOver,
+          );
+        }
+        return const _Hydrated(child: _Gate());
+      },
+    );
+  }
+}
+
+/// Builds a [ThemeData] whose colors all come from the Toundra tokens.
+ThemeData themeFrom(GerfautTokens tokens, Brightness brightness) {
+  final scheme = ColorScheme(
+    brightness: brightness,
+    primary: tokens.primary,
+    onPrimary: tokens.onPrimary,
+    secondary: tokens.primary,
+    onSecondary: tokens.onPrimary,
+    error: tokens.alert,
+    onError: tokens.onAlert,
+    surface: tokens.surface,
+    onSurface: tokens.text,
+    outline: tokens.border,
+  );
+  return ThemeData(
+    useMaterial3: true,
+    brightness: brightness,
+    colorScheme: scheme,
+    scaffoldBackgroundColor: tokens.background,
+    canvasColor: tokens.background,
+    dividerColor: tokens.border,
+    // Under the finger, a flat tint that comes and goes: no ripple
+    // spreading from the touch, no sparkle. What is pressed changes
+    // surface, as a hovered row does on the desktop.
+    splashFactory: NoSplash.splashFactory,
+    splashColor: Colors.transparent,
+    highlightColor: tokens.pressed,
+    hoverColor: tokens.hovered,
+    // A page arrives in a quarter of a second. iOS keeps its own
+    // transition, which its back swipe is part of.
+    pageTransitionsTheme: const PageTransitionsTheme(
+      builders: {
+        TargetPlatform.android: GerfautPageTransitionsBuilder(),
+        TargetPlatform.fuchsia: GerfautPageTransitionsBuilder(),
+        TargetPlatform.linux: GerfautPageTransitionsBuilder(),
+        TargetPlatform.windows: GerfautPageTransitionsBuilder(),
+        TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+        TargetPlatform.macOS: CupertinoPageTransitionsBuilder(),
+      },
+    ),
+    fontFamily: GerfautFonts.ui,
+    // The style every text of a page starts from. Material tracks it
+    // (+0.25), and that tracking reaches any style that sets none: the
+    // text is then painted wider than it measures.
+    textTheme: const TextTheme(bodyMedium: TextStyle(letterSpacing: 0)),
+    appBarTheme: AppBarTheme(
+      backgroundColor: tokens.background,
+      surfaceTintColor: Colors.transparent,
+      foregroundColor: tokens.text,
+      elevation: 0,
+      scrolledUnderElevation: 0,
+      centerTitle: false,
+      titleTextStyle: tokens.h2,
+    ),
+    iconButtonTheme: IconButtonThemeData(
+      // The touch target of every control in Gerfaut, set here rather
+      // than left to the platform's padding: the glyph stays its size,
+      // the ink and the hit area are the target's.
+      // From a keyboard, the 2px ring of every control without an edge
+      // of its own, in place of a tint that barely shows on a card.
+      style:
+          IconButton.styleFrom(
+            minimumSize: const Size.square(GerfautTouch.target),
+            padding: EdgeInsets.zero,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(GerfautRadius.md),
+            ),
+          ).copyWith(
+            // The same tint as a row, in the same rounded square, in
+            // place of the platform's translucent disc.
+            overlayColor: WidgetStateProperty.resolveWith(
+              (states) => states.contains(WidgetState.pressed)
+                  ? tokens.pressed
+                  : states.contains(WidgetState.hovered)
+                  ? tokens.hovered
+                  : Colors.transparent,
+            ),
+            side: WidgetStateProperty.resolveWith(
+              (states) =>
+                  states.contains(WidgetState.focused) &&
+                      FocusManager.instance.highlightMode ==
+                          FocusHighlightMode.traditional
+                  ? BorderSide(color: tokens.primary, width: 2)
+                  : null,
+            ),
+          ),
+    ),
+    // The theme's text and page colours swapped: Material's own is a
+    // grey outside the palette, half see-through, pure white in dark.
+    tooltipTheme: TooltipThemeData(
+      decoration: BoxDecoration(
+        color: tokens.text,
+        borderRadius: BorderRadius.circular(GerfautRadius.md),
+      ),
+      textStyle: tokens.bodySmall.copyWith(color: tokens.background),
+    ),
+    // Every sheet from the bottom of the screen, whoever opens it: the
+    // card surface and the rounded top edge of the design system, in place of
+    // the Material defaults (a tinted surface, 28px corners) that a
+    // sheet left to itself would take.
+    bottomSheetTheme: BottomSheetThemeData(
+      backgroundColor: tokens.surface,
+      modalBarrierColor: tokens.scrim,
+      surfaceTintColor: Colors.transparent,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(GerfautRadius.canvas),
+        ),
+      ),
+    ),
+    // A switch of the design system, not the platform's: a track that
+    // is the border tone when off and the action colour when on, no
+    // outline, and a knob that keeps one size whichever side it rests
+    // on. The empty icon is what holds the size: without one, Material
+    // shrinks the knob of a switch that is off.
+    switchTheme: SwitchThemeData(
+      thumbColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.selected)
+            ? tokens.onPrimary
+            : brightness == Brightness.light
+            ? tokens.surface
+            : tokens.textMuted,
+      ),
+      trackColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.selected)
+            ? tokens.primary
+            : tokens.border,
+      ),
+      trackOutlineColor: const WidgetStatePropertyAll(Colors.transparent),
+      trackOutlineWidth: const WidgetStatePropertyAll(0),
+      thumbIcon: const WidgetStatePropertyAll(Icon(null)),
+      overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+    ),
+    // Every modal: the card surface and its radius, the title in the
+    // display face.
+    dialogTheme: DialogThemeData(
+      backgroundColor: tokens.surface,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(GerfautRadius.lg),
+      ),
+      titleTextStyle: tokens.h2,
+      contentTextStyle: tokens.bodySmall,
+    ),
+    // The toast is an island of the dark theme in either theme, as on
+    // the desktop app: night ground, foam text. On a light page it
+    // stands out by itself. In the dark theme its ground is the page's
+    // own, so there, and only there, the theme's hairline gives it an
+    // edge.
+    snackBarTheme: SnackBarThemeData(
+      backgroundColor: GerfautTokens.dark.background,
+      contentTextStyle: GerfautTokens.dark.bodySmall,
+      behavior: SnackBarBehavior.floating,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(GerfautRadius.md),
+        side: brightness == Brightness.dark
+            ? BorderSide(color: tokens.border)
+            : BorderSide.none,
+      ),
+    ),
+    tabBarTheme: TabBarThemeData(
+      labelColor: tokens.text,
+      unselectedLabelColor: tokens.textMuted,
+      indicatorColor: tokens.primary,
+      dividerColor: tokens.border,
+      overlayColor: WidgetStateProperty.resolveWith(
+        (states) => states.contains(WidgetState.pressed)
+            ? tokens.pressed
+            : Colors.transparent,
+      ),
+      labelStyle: tokens.bodySmall.copyWith(fontWeight: FontWeight.w500),
+      unselectedLabelStyle: tokens.bodySmall,
+    ),
+    extensions: [tokens],
+  );
+}
+
+/// The quiet screen of a starting app. It names the vault only once the
+/// platform has said the app is not disguised: a calculator that opened
+/// on "Opening the vault…" would have told everything in one frame.
+class _StartupScreen extends ConsumerWidget {
+  const _StartupScreen();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    final disguise = ref.watch(disguiseProvider);
+    if (!disguise.loaded || disguise.disguised) return const Scaffold();
+    return Scaffold(
+      body: Center(
+        child: Text(
+          'Opening the vault…',
+          style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+        ),
+      ),
+    );
+  }
+}
+
+/// What the app shows when the vault did not open: the error, in the
+/// core's words, and a way to try again.
+///
+/// A vault whose key is gone gets more than the words. It is the one
+/// startup failure with a cause a person can do something about, and
+/// the something is spelled out: the key does not travel with the
+/// vault, so a phone restored from a backup comes back with a file
+/// nobody can open. The way out is a fresh vault and a Gerfaut backup,
+/// behind a confirmation that says the file is set aside, not deleted.
+class _StartupErrorScreen extends ConsumerStatefulWidget {
+  const _StartupErrorScreen({
+    required this.error,
+    required this.onRetry,
+    this.onStartOver,
+  });
+
+  final Object error;
+  final VoidCallback onRetry;
+
+  /// Sets the vault aside and starts over; null where that makes no
+  /// sense, the settings that failed to load after the vault opened.
+  final VoidCallback? onStartOver;
+
+  @override
+  ConsumerState<_StartupErrorScreen> createState() =>
+      _StartupErrorScreenState();
+}
+
+class _StartupErrorScreenState extends ConsumerState<_StartupErrorScreen> {
+  bool _confirmingStartOver = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    final error = widget.error;
+    final keyGone = error is VaultKeyMissingException;
+    // Held by another opener: a healthy vault, so nothing here offers to
+    // set it aside, and trying again is the whole answer.
+    final inUse = error is VaultInUseException;
+    final muted = tokens.bodySmall.copyWith(color: tokens.textMuted);
+    return Scaffold(
+      body: SafeArea(
+        child: ReadableWidth(
+          child: Center(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(GerfautSpacing.md),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    inUse
+                        ? 'Gerfaut is already open'
+                        : 'Gerfaut could not start',
+                    style: tokens.h2,
+                  ),
+                  const SizedBox(height: GerfautSpacing.sm),
+                  if (keyGone) ...[
+                    Text(
+                      'The vault is here, but the key that opens it is gone.',
+                      style: tokens.body,
+                    ),
+                    const SizedBox(height: GerfautSpacing.sm),
+                    Text(
+                      // Each system keeps the key its own way. A backup of
+                      // an iPhone restored on the same one brings the key
+                      // back: only another iPhone is without it.
+                      ref.watch(platformFeaturesProvider) !=
+                              PlatformFeatures.ios
+                          ? 'Android keeps that key in its secure storage, '
+                                'apart from the vault, and it does not travel: '
+                                'a phone restored from a backup, moved to a new '
+                                'device or reset comes back with the vault file '
+                                'and without the key. Nothing can open the vault '
+                                'without it.'
+                          : 'iOS keeps that key in the keychain of this '
+                                'iPhone, apart from the vault, and it does not '
+                                'travel: a backup restored on another iPhone, '
+                                'or an iPhone reset, comes back with the vault '
+                                'file and without the key. Nothing can open the '
+                                'vault without it.',
+                      style: muted,
+                    ),
+                    const SizedBox(height: GerfautSpacing.sm),
+                    Text(
+                      'If the phone was only restarting, try again first. '
+                      'Otherwise, a backup made with Gerfaut brings the '
+                      'wallets back into an empty vault.',
+                      style: muted,
+                    ),
+                    const SizedBox(height: GerfautSpacing.sm),
+                    SelectableText(
+                      error.detail,
+                      style: tokens.data.copyWith(
+                        fontSize: 12,
+                        color: tokens.textMuted,
+                      ),
+                    ),
+                  ] else if (inUse) ...[
+                    Text(
+                      'The vault is open elsewhere, and it opens in one place '
+                      'at a time.',
+                      style: tokens.body,
+                    ),
+                    const SizedBox(height: GerfautSpacing.sm),
+                    Text(
+                      'Nothing is wrong with it. Give it a moment, then try '
+                      'again.',
+                      style: muted,
+                    ),
+                  ] else
+                    SelectableText(
+                      '$error',
+                      style: tokens.data.copyWith(color: tokens.textMuted),
+                    ),
+                  const SizedBox(height: GerfautSpacing.md),
+                  Wrap(
+                    spacing: GerfautSpacing.sm,
+                    runSpacing: GerfautSpacing.sm,
+                    children: [
+                      // Trying again comes first whatever the cause: the
+                      // whole answer to a vault held elsewhere, and the
+                      // first thing to do after a restart.
+                      PrimaryButton(
+                        label: 'Try again',
+                        icon: LucideIcons.refreshCw,
+                        onPressed: widget.onRetry,
+                      ),
+                      // It only opens the confirmation below: neutral, the
+                      // red waits for the yes.
+                      if (keyGone && widget.onStartOver != null)
+                        SecondaryButton(
+                          label: 'Start over…',
+                          icon: LucideIcons.archiveRestore,
+                          onPressed: _confirmingStartOver
+                              ? null
+                              : () =>
+                                    setState(() => _confirmingStartOver = true),
+                        ),
+                    ],
+                  ),
+                  if (_confirmingStartOver) ...[
+                    const SizedBox(height: GerfautSpacing.md),
+                    // Amber: the file is kept. What is lost was lost
+                    // before this screen, and the sentence says so.
+                    GerfautNotice(
+                      tone: NoticeTone.info,
+                      message:
+                          'Gerfaut opens an empty vault and the restore page. '
+                          'The vault it cannot open is set aside under another '
+                          'name, not deleted.',
+                      liveRegion: true,
+                      actionsBelow: true,
+                      action: ConfirmActions(
+                        cancel: SecondaryButton(
+                          label: 'Cancel',
+                          onPressed: () =>
+                              setState(() => _confirmingStartOver = false),
+                        ),
+                        confirm: DangerButton(
+                          label: 'Start over',
+                          onPressed: widget.onStartOver,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

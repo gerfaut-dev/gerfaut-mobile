@@ -1,0 +1,1050 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:file_selector/file_selector.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:gerfaut/app.dart';
+import 'package:gerfaut/screens/add_wallet.dart';
+import 'package:gerfaut/screens/scan.dart';
+import 'package:gerfaut/src/bridge.dart';
+import 'package:gerfaut/src/lock.dart';
+import 'package:gerfaut/src/models.dart';
+import 'package:gerfaut/src/state.dart';
+import 'package:gerfaut/src/wallet_files.dart';
+import 'package:gerfaut/theme/tokens.dart';
+import 'package:gerfaut/widgets/choice_group.dart';
+import 'package:gerfaut/widgets/input_error.dart';
+import 'package:gerfaut/widgets/notice.dart';
+import 'package:gerfaut/widgets/select_field.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import 'core_fixtures.dart';
+import 'fakes.dart';
+
+Widget screen(
+  FakeBridge bridge, {
+  Future<XFile?> Function()? filePicker,
+  CameraBuilder? cameraBuilder,
+}) {
+  return ProviderScope(
+    retry: noRetry,
+    overrides: [bridgeProvider.overrideWithValue(bridge)],
+    child: MaterialApp(
+      theme: themeFrom(GerfautTokens.light, Brightness.light),
+      home: AddWalletScreen(
+        filePicker: filePicker,
+        cameraBuilder: cameraBuilder,
+      ),
+    ),
+  );
+}
+
+/// The provider container behind the running screen.
+ProviderContainer containerOf(WidgetTester tester) {
+  return ProviderScope.containerOf(
+    tester.element(find.byType(AddWalletScreen)),
+    listen: false,
+  );
+}
+
+void main() {
+  testWidgets('says which files Import a file opens, under the button', (
+    tester,
+  ) async {
+    await tester.pumpWidget(screen(FakeBridge()));
+    await tester.pumpAndSettle();
+    final button = tester.getRect(find.text('Import a file'));
+    final hint = find.text(walletFileHint);
+    expect(hint, findsOneWidget);
+    // Under the two ways in, in sight before the picker opens.
+    expect(tester.getRect(hint).top, greaterThan(button.bottom));
+    // Read with the button, once.
+    expect(
+      tester.getSemantics(find.text('Import a file')),
+      isSemantics(label: 'Import a file', hint: walletFileHint, isButton: true),
+    );
+    expect(find.bySemanticsLabel(walletFileHint), findsNothing);
+  });
+
+  testWidgets('pasting material reaches the confirmation step', (tester) async {
+    final bridge = FakeBridge(onParse: (_) => makeParsedInput());
+    await tester.pumpWidget(screen(bridge));
+    await tester.pumpAndSettle();
+    expectKeyboardKeepsNothing(tester);
+
+    await tester.enterText(
+      find.byType(TextField),
+      'wpkh([9a6a2580/84h/1h/0h]tpub.../0/*)',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+
+    // Confirmation step: recognized card, name field, network candidates.
+    expectKeyboardKeepsNothing(tester);
+    expect(find.text('NAME'), findsOneWidget);
+    expect(find.text('NETWORK'), findsOneWidget);
+    expect(find.text('Signet'), findsOneWidget);
+    expect(find.text('Testnet 4'), findsOneWidget);
+    expect(find.text('Add wallet'), findsOneWidget);
+    // A descriptor fixes its script type: no choice is offered.
+    expect(find.text('SCRIPT TYPE'), findsNothing);
+  });
+
+  testWidgets('the continue button scrolls into reach under the keyboard', (
+    tester,
+  ) async {
+    // A 16:9 phone with the keyboard up: the Pixel 2 at 411x731 keeps
+    // about 380 logical pixels for the page once the keyboard is open.
+    const ratio = 2.625;
+    tester.view.physicalSize = const Size(411 * ratio, 731 * ratio);
+    tester.view.devicePixelRatio = ratio;
+    tester.view.viewInsets = const FakeViewPadding(bottom: 350 * ratio);
+    addTearDown(tester.view.reset);
+
+    final bridge = FakeBridge(onParse: (_) => makeParsedInput());
+    await tester.pumpWidget(screen(bridge));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'wpkh(tpub.../0/*)');
+    await tester.pumpAndSettle();
+
+    // Reachable by scrolling, and fully above the keyboard once there.
+    await tester.ensureVisible(find.text('Continue'));
+    await tester.pumpAndSettle();
+    expect(
+      tester.getRect(find.text('Continue')).bottom,
+      lessThanOrEqualTo(731 - 350),
+    );
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    expect(find.text('NAME'), findsOneWidget);
+  });
+
+  ParsedInput extendedKey(ScriptKind script) {
+    return makeParsedInput(
+      kind: RecognizedKind.extendedKey,
+      payload: DescriptorsPayload(
+        external: '${script.id}(tpub.../0/*)#checksum',
+        internal: '${script.id}(tpub.../1/*)#checksum',
+        script: script,
+      ),
+      warnings: script == ScriptKind.segwit
+          ? const [InputWarning.assumedSegwit]
+          : const [],
+      scriptOptions: const [
+        ScriptKind.legacy,
+        ScriptKind.nestedSegwit,
+        ScriptKind.segwit,
+        ScriptKind.taproot,
+      ],
+      previewAddress: script == ScriptKind.taproot
+          ? 'tb1p0taproot0preview'
+          : 'tb1q0segwit0preview',
+    );
+  }
+
+  testWidgets('a lone extended key offers the script type choice', (
+    tester,
+  ) async {
+    final bridge = FakeBridge(
+      onParseWith: (_, script) => extendedKey(script ?? ScriptKind.segwit),
+    );
+    await tester.pumpWidget(screen(bridge));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'tpubD6NzV...');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('First address'), findsOneWidget);
+    expect(find.text('tb1q0segwit0preview'), findsOneWidget);
+    expect(
+      find.text(
+        'This key carries no script type. Check the one selected below.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('SCRIPT TYPE'), findsOneWidget);
+    expect(find.text('Native SegWit (P2WPKH)'), findsWidgets);
+    expect(
+      find.text('Compare the first address above with your wallet.'),
+      findsOneWidget,
+    );
+    expect(bridge.parseScripts, [null]);
+
+    // The addresses' start on the network the wallet goes to, never
+    // mainnet's on a test network.
+    final options = tester
+        .widget<GerfautSelect<ScriptKind>>(
+          find.byType(GerfautSelect<ScriptKind>),
+        )
+        .items;
+    expect(
+      options.firstWhere((o) => o.value == ScriptKind.segwit).subtitle,
+      'Addresses starting with tb1q',
+    );
+    expect(
+      options.map((o) => o.subtitle ?? '').join(' '),
+      isNot(contains('bc1')),
+    );
+  });
+
+  test('each network has its own address starts', () {
+    expect(ScriptKind.segwit.addressStart(Network.mainnet), 'bc1q');
+    expect(ScriptKind.taproot.addressStart(Network.signet), 'tb1p');
+    expect(ScriptKind.taproot.addressStart(Network.regtest), 'bcrt1p');
+    expect(ScriptKind.legacy.addressStart(Network.testnet4), 'm or n');
+    expect(ScriptKind.nestedSegwit.addressStart(Network.mainnet), '3');
+    expect(ScriptKind.witnessScript.addressStart(Network.signet), isNull);
+  });
+
+  testWidgets('a bare key states its missing script type outside the card', (
+    tester,
+  ) async {
+    final tokens = GerfautTokens.light;
+    final bridge = FakeBridge(
+      onParseWith: (_, script) => extendedKey(script ?? ScriptKind.segwit),
+    );
+    await tester.pumpWidget(screen(bridge));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'tpubD6NzV...');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+
+    // The card says what was recognized; the note is not in it.
+    final card = find
+        .ancestor(
+          of: find.text('First address'),
+          matching: find.byType(Container),
+        )
+        .first;
+    expect(
+      find.descendant(of: card, matching: find.byType(GerfautNotice)),
+      findsNothing,
+    );
+
+    // Amber, and reading as a panel rather than as small print.
+    final notice = find.byType(GerfautNotice);
+    expect(tester.widget<GerfautNotice>(notice).tone, NoticeTone.info);
+    expect(
+      tester.widget<Icon>(find.byIcon(LucideIcons.info)).color,
+      tokens.pending,
+    );
+    expect(
+      tester
+          .widget<Text>(find.text(InputWarning.assumedSegwit.label))
+          .style
+          ?.color,
+      tokens.pending,
+    );
+
+    // Under the card, above the choice it comments on.
+    expect(
+      tester.getRect(notice).top,
+      greaterThanOrEqualTo(tester.getRect(card).bottom),
+    );
+    expect(
+      tester.getRect(find.text('SCRIPT TYPE')).top,
+      greaterThanOrEqualTo(tester.getRect(notice).bottom),
+    );
+  });
+
+  testWidgets('choosing a script type re-parses through the core', (
+    tester,
+  ) async {
+    final bridge = FakeBridge(
+      onParseWith: (_, script) => extendedKey(script ?? ScriptKind.segwit),
+    );
+    await tester.pumpWidget(screen(bridge));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'tpubD6NzV...');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+
+    // Pick another network first: the re-parse must not reset it. The
+    // note pushes the choices past the fold on this small viewport.
+    await tester.ensureVisible(find.text('Testnet 4'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Testnet 4'));
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(find.byType(GerfautSelect<ScriptKind>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(GerfautSelect<ScriptKind>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Taproot (P2TR)').last);
+    await tester.pumpAndSettle();
+
+    // The network picked asked for the same key again, on testnet 4,
+    // and the script picked after it kept that network.
+    expect(bridge.parseScripts, [null, null, ScriptKind.taproot]);
+    expect(bridge.parseOptions.last.network, Network.testnet4);
+    // The core answered with new descriptors and a new first address.
+    expect(find.text('tb1p0taproot0preview'), findsOneWidget);
+    expect(find.text('tb1q0segwit0preview'), findsNothing);
+    expect(find.textContaining('Taproot (P2TR)'), findsWidgets);
+    expect(
+      find.text(
+        'This key carries no script type. Check the one selected below.',
+      ),
+      findsNothing,
+    );
+
+    // Adding uses the re-parsed material on the network kept.
+    await tester.enterText(find.byType(TextField), 'Hot');
+    await tester.pumpAndSettle();
+    // The step's actions are pinned under the form.
+    await tester.ensureVisible(find.text('Add wallet'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add wallet'));
+    await tester.pumpAndSettle();
+    expect(bridge.addWalletCalls, 1);
+    expect(bridge.wallets.single.network, Network.testnet4);
+  });
+
+  testWidgets('the first address shown is the one of the network picked', (
+    tester,
+  ) async {
+    // Regtest was shown the signet address, which no regtest wallet
+    // ever gives: the core derives it for the network asked, starting
+    // with the one on screen.
+    final bridge =
+        FakeBridge(
+            settings: const Settings(
+              preferences: kPreferences,
+              activeNetwork: Network.regtest,
+              backends: {},
+              appPrefs: {},
+            ),
+          )
+          ..onParseWithOptions = (_, options) => makeParsedInput(
+            previewAddress: options.network == Network.regtest
+                ? 'bcrt1q0regtest0preview'
+                : 'tb1q0signet0preview',
+          );
+    await tester.pumpWidget(screen(bridge));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(
+      find.byType(TextField),
+      'wpkh([9a6a2580/84h/1h/0h]tpub.../<0;1>/*)',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    expect(bridge.parseOptions.single.network, Network.regtest);
+    expect(find.text('bcrt1q0regtest0preview'), findsOneWidget);
+
+    await tester.ensureVisible(find.text('Signet'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Signet'));
+    await tester.pumpAndSettle();
+    expect(bridge.parseOptions.last.network, Network.signet);
+    expect(find.text('tb1q0signet0preview'), findsOneWidget);
+    expect(find.text('bcrt1q0regtest0preview'), findsNothing);
+  });
+
+  group('networks picked in a row', () {
+    /// The network the choices show as picked.
+    Network? shownNetwork(WidgetTester tester) => tester
+        .widget<ChoiceGroup<Network?>>(find.byType(ChoiceGroup<Network?>))
+        .value;
+
+    Future<void> confirmStep(WidgetTester tester, FakeBridge bridge) async {
+      await tester.pumpWidget(screen(bridge));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byType(TextField),
+        'wpkh([9a6a2580/84h/1h/0h]tpub.../<0;1>/*)',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Continue'));
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> pick(WidgetTester tester, String network) async {
+      await tester.ensureVisible(find.text(network));
+      await tester.pump();
+      await tester.tap(find.text(network));
+      await tester.pump();
+    }
+
+    ParsedInput on(Network network) => makeParsedInput(
+      previewAddress: switch (network) {
+        Network.testnet4 => 'tb1q0testnet0preview',
+        Network.regtest => 'bcrt1q0regtest0preview',
+        _ => 'tb1q0signet0preview',
+      },
+    );
+
+    testWidgets('an older answer landing last is dropped', (tester) async {
+      final answers = <Network, Completer<ParsedInput>>{};
+      final bridge = FakeBridge()
+        ..onParseWithOptions = (_, options) {
+          final network = options.network;
+          if (network != Network.testnet4 && network != Network.regtest) {
+            return on(Network.signet);
+          }
+          return (answers[network!] = Completer<ParsedInput>()).future;
+        };
+      await confirmStep(tester, bridge);
+      expect(shownNetwork(tester), Network.signet);
+
+      await pick(tester, 'Testnet 4');
+      await pick(tester, 'Regtest');
+      // Nothing answered yet: the network shown is still the one of the
+      // address shown.
+      expect(shownNetwork(tester), Network.signet);
+      expect(find.text('tb1q0signet0preview'), findsOneWidget);
+
+      // The newer pick is answered first, the older one after it.
+      answers[Network.regtest]!.complete(on(Network.regtest));
+      await tester.pumpAndSettle();
+      answers[Network.testnet4]!.complete(on(Network.testnet4));
+      await tester.pumpAndSettle();
+
+      expect(shownNetwork(tester), Network.regtest);
+      expect(find.text('bcrt1q0regtest0preview'), findsOneWidget);
+      expect(find.text('tb1q0testnet0preview'), findsNothing);
+
+      await tester.enterText(find.byType(TextField), 'Lab');
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Add wallet'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Add wallet'));
+      await tester.pumpAndSettle();
+      expect(bridge.wallets.single.network, Network.regtest);
+    });
+
+    testWidgets('going back before the answer keeps the network shown', (
+      tester,
+    ) async {
+      final answers = <Network, Completer<ParsedInput>>{};
+      final bridge = FakeBridge()
+        ..onParseWithOptions = (_, options) {
+          final network = options.network;
+          if (network != Network.testnet4) return on(Network.signet);
+          return (answers[network!] = Completer<ParsedInput>()).future;
+        };
+      await confirmStep(tester, bridge);
+
+      await pick(tester, 'Testnet 4');
+      await pick(tester, 'Signet');
+      answers[Network.testnet4]!.complete(on(Network.testnet4));
+      await tester.pumpAndSettle();
+      expect(shownNetwork(tester), Network.signet);
+      expect(find.text('tb1q0signet0preview'), findsOneWidget);
+    });
+
+    testWidgets('a refused pick keeps the network and its address', (
+      tester,
+    ) async {
+      final bridge = FakeBridge()
+        ..onParseWithOptions = (_, options) {
+          if (options.network == Network.testnet4) {
+            throw coreFailure('descriptor', 'no key for testnet 4');
+          }
+          return on(options.network ?? Network.signet);
+        };
+      await confirmStep(tester, bridge);
+
+      await pick(tester, 'Testnet 4');
+      await tester.pumpAndSettle();
+      expect(shownNetwork(tester), Network.signet);
+      expect(find.text('tb1q0signet0preview'), findsOneWidget);
+      expect(
+        find.text('This descriptor could not be used: no key for testnet 4'),
+        findsOneWidget,
+      );
+    });
+  });
+
+  testWidgets('private material is refused in words that say what to bring', (
+    tester,
+  ) async {
+    const message = 'input contains private key material and was rejected';
+    final bridge = FakeBridge(
+      onParse: (_) => throw coreFailure('private_material', message),
+    );
+    await tester.pumpWidget(screen(bridge));
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'xprv9s21ZrQH...');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+
+    expect(find.text(message), findsNothing);
+    expect(
+      find.text(
+        'This holds a private key, and Gerfaut only watches: nothing was '
+        'saved. Bring the public descriptor or extended public key instead.',
+      ),
+      findsOneWidget,
+    );
+    // Still on the input step.
+    expect(find.text('NAME'), findsNothing);
+  });
+
+  testWidgets('a refusal stands apart from the hint under the field', (
+    tester,
+  ) async {
+    final bridge = FakeBridge(
+      onParse: (_) => throw coreFailure(
+        'private_material',
+        'input contains private key material and was rejected',
+      ),
+    );
+    await tester.pumpWidget(screen(bridge));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'xprv9s21ZrQH...');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+
+    final tokens = GerfautTokens.light;
+    final refusal = tester.widget<Text>(
+      find.textContaining('This holds a private key'),
+    );
+    final hint = tester.widget<Text>(
+      find.textContaining('Gerfaut is watch-only'),
+    );
+    // As on the desktop app: the refusal in the text colour, medium,
+    // behind its glyph; the hint stays grey. Never red.
+    expect(refusal.style?.color, tokens.text);
+    expect(refusal.style?.fontWeight, FontWeight.w500);
+    expect(hint.style?.color, tokens.textMuted);
+    expect(
+      find.descendant(
+        of: find.byType(InputError),
+        matching: find.byIcon(LucideIcons.circleAlert),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.ancestor(
+        of: find.textContaining('This holds a private key'),
+        matching: find.byType(InputError),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('an input that fits one network says it plainly', (tester) async {
+    // A mainnet address: no group of one option that reads as a control
+    // doing nothing, the network said in words, and the wallet added on it.
+    final bridge = FakeBridge(
+      onParse: (_) => makeParsedInput(
+        kind: RecognizedKind.address,
+        networks: const [Network.mainnet],
+        payload: const AddressPayload(
+          address: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
+        ),
+        previewAddress: 'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
+      ),
+    );
+    await tester.pumpWidget(screen(bridge));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.byType(TextField),
+      'bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq',
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('NETWORK'), findsOneWidget);
+    expect(find.byType(ChoiceGroup<Network?>), findsNothing);
+    expect(find.text('Mainnet'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), 'Donations');
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Add wallet'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add wallet'));
+    await tester.pumpAndSettle();
+    expect(bridge.wallets.single.network, Network.mainnet);
+  });
+
+  testWidgets('a network that will not switch still opens the new wallet', (
+    tester,
+  ) async {
+    final bridge = FakeBridge(onParse: (_) => makeParsedInput())
+      ..onSetActiveNetwork = (_) {
+        throw const BridgeException('storage', 'the vault could not save');
+      };
+    await tester.pumpWidget(screen(bridge));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'wpkh(tpub.../0/*)');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Cold');
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Add wallet'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add wallet'));
+    await tester.pumpAndSettle();
+
+    // Added once, and not offered again as if it had failed.
+    expect(bridge.wallets, hasLength(1));
+    expect(find.byType(AddWalletScreen), findsNothing);
+    expect(find.textContaining('could not save'), findsNothing);
+  });
+
+  testWidgets('a wallet the core refuses at the add step says why', (
+    tester,
+  ) async {
+    final bridge = FakeBridge(onParse: (_) => makeParsedInput())
+      ..addWalletRefusal = coreFailure(
+        'descriptor',
+        "descriptor error: Key too short (<66 char), doesn't match any format",
+      );
+    await tester.pumpWidget(screen(bridge));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'wpkh(tpub.../0/*)');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Cold');
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Add wallet'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add wallet'));
+    await tester.pumpAndSettle();
+
+    expect(bridge.wallets, isEmpty);
+    expect(
+      find.text(
+        'This descriptor could not be used: Key too short (<66 char), '
+        "doesn't match any format",
+      ),
+      findsOneWidget,
+    );
+    // Said the way the first step says a refusal.
+    expect(find.byType(InputError), findsOneWidget);
+  });
+
+  testWidgets('a scanned code says the branches it named none of', (
+    tester,
+  ) async {
+    // The core read a crypto-output whose key gives no child path as
+    // receive and change: it says so beside the text it gave. The notice
+    // stays with that text, through a network picked, and goes once the
+    // field holds something else.
+    const scannedText = 'wpkh([9a6a2580/84h/1h/0h]tpub.../<0;1>/*)';
+    final asked = <String>[];
+    final bridge =
+        FakeBridge(
+            onParse: (input) {
+              asked.add(input);
+              return makeParsedInput();
+            },
+          )
+          ..onAssembleQr = (_) => const QrProgress(
+            format: QrFormat.ur,
+            received: 1,
+            total: 1,
+            complete: true,
+            text: scannedText,
+            warnings: [InputWarning.assumedBranches],
+          );
+    ValueChanged<String>? camera;
+    await tester.pumpWidget(
+      screen(
+        bridge,
+        cameraBuilder: (onFrame) {
+          camera = onFrame;
+          return const SizedBox.expand();
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Scan a QR code'));
+    await tester.pumpAndSettle();
+    camera!('ur:crypto-output/payload');
+    await tester.pumpAndSettle();
+
+    final notice = find.text(
+      'This QR code carries no receive or change path, so Gerfaut assumes '
+      'the usual 0/* and 1/*. Compare the first address with your signer.',
+    );
+    expect(find.text('NAME'), findsOneWidget);
+    expect(notice, findsOneWidget);
+    expect(asked.single, scannedText);
+
+    await tester.ensureVisible(find.text('Testnet 4'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Testnet 4'));
+    await tester.pumpAndSettle();
+    expect(bridge.parseOptions.last.network, Network.testnet4);
+    expect(notice, findsOneWidget);
+
+    await tester.ensureVisible(find.text('Back'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Back'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'wpkh(tpub.../0/*)');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+    expect(find.text('NAME'), findsOneWidget);
+    expect(notice, findsNothing);
+  });
+
+  testWidgets('a descriptor offers no derivation to change', (tester) async {
+    final bridge = FakeBridge(onParse: (_) => makeParsedInput());
+    await tester.pumpWidget(screen(bridge));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'wpkh(tpub.../0/*)');
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Continue'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Advanced'), findsNothing);
+  });
+
+  group('advanced derivation', () {
+    ParsedInput loneKey({
+      String receive = '0/*',
+      String? change = '1/*',
+      String? origin,
+      String preview = 'tb1q0segwit0preview',
+    }) {
+      return makeParsedInput(
+        kind: RecognizedKind.extendedKey,
+        payload: DescriptorsPayload(
+          external: 'wpkh(tpub...$receive)#checksum',
+          internal: change == null ? null : 'wpkh(tpub...$change)#checksum',
+          script: ScriptKind.segwit,
+        ),
+        scriptOptions: const [ScriptKind.segwit, ScriptKind.taproot],
+        previewAddress: preview,
+        derivationEditable: true,
+        derivation: DerivationChoice(
+          receive: receive,
+          change: change,
+          origin: origin,
+        ),
+      );
+    }
+
+    /// The text a derivation field holds, by its key.
+    String pathIn(WidgetTester tester, String field) {
+      return tester
+          .widget<TextField>(
+            find.descendant(
+              of: find.byKey(Key('derivation.$field')),
+              matching: find.byType(TextField),
+            ),
+          )
+          .controller!
+          .text;
+    }
+
+    Future<void> typePath(
+      WidgetTester tester,
+      String field,
+      String value,
+    ) async {
+      await tester.enterText(
+        find.descendant(
+          of: find.byKey(Key('derivation.$field')),
+          matching: find.byType(TextField),
+        ),
+        value,
+      );
+      await tester.pumpAndSettle();
+    }
+
+    Future<void> openAdvanced(WidgetTester tester, FakeBridge bridge) async {
+      // Tall enough to hold the whole confirm step with the disclosure
+      // open: the preview address and any refusal must both be built.
+      tester.view.physicalSize = const Size(800, 2400);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(screen(bridge));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'tpubD6NzV...');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Continue'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Advanced'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('the fields start on the paths the core is using', (
+      tester,
+    ) async {
+      final bridge = FakeBridge()
+        ..onParseWithOptions = (_, _) =>
+            loneKey(origin: "[deadbeef/84'/0'/0']");
+      await openAdvanced(tester, bridge);
+
+      expect(pathIn(tester, 'receive'), '0/*');
+      expect(pathIn(tester, 'change'), '1/*');
+      expect(pathIn(tester, 'origin'), "[deadbeef/84'/0'/0']");
+      expectKeyboardKeepsNothing(tester);
+    });
+
+    testWidgets('applying sends the typed paths, an empty change as null', (
+      tester,
+    ) async {
+      final bridge = FakeBridge()
+        ..onParseWithOptions = (_, options) => loneKey(
+          receive: options.derivation?.receive ?? '0/*',
+          change: options.derivation?.change,
+          preview: 'tb1q0other0preview',
+        );
+      await openAdvanced(tester, bridge);
+
+      await typePath(tester, 'receive', '5/*');
+      await typePath(tester, 'change', '');
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+
+      final applied = bridge.parseOptions.last.derivation!;
+      expect(applied.receive, '5/*');
+      expect(applied.change, isNull);
+      // The card follows the core's answer, never a local guess.
+      expect(find.text('tb1q0other0preview'), findsOneWidget);
+    });
+
+    testWidgets('a refused path is stated and the card stands', (tester) async {
+      var calls = 0;
+      final bridge = FakeBridge()
+        ..onParseWithOptions = (_, _) {
+          calls++;
+          if (calls == 1) return loneKey();
+          throw coreFailure(
+            'invalid_input',
+            'invalid derivation path: a hardened step cannot be derived',
+          );
+        };
+      await openAdvanced(tester, bridge);
+
+      await typePath(tester, 'receive', "0'/*");
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.textContaining('a hardened step cannot be derived'),
+        findsOneWidget,
+      );
+      expect(find.text('tb1q0segwit0preview'), findsOneWidget);
+    });
+
+    testWidgets('choosing a script type afterwards keeps the paths', (
+      tester,
+    ) async {
+      final bridge = FakeBridge()
+        ..onParseWithOptions = (_, options) =>
+            loneKey(receive: options.derivation?.receive ?? '0/*');
+      await openAdvanced(tester, bridge);
+
+      await typePath(tester, 'receive', '5/*');
+      await tester.tap(find.text('Apply'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(GerfautSelect<ScriptKind>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(ScriptKind.taproot.label).last);
+      await tester.pumpAndSettle();
+
+      expect(bridge.parseOptions.last.script, ScriptKind.taproot);
+      expect(bridge.parseOptions.last.derivation?.receive, '5/*');
+    });
+  });
+
+  testWidgets('the picker greys out no wallet file, a .bsms included', (
+    tester,
+  ) async {
+    const channel = MethodChannel('gerfaut/files');
+    const bsms =
+        'BSMS 1.0\n'
+        'wsh(sortedmulti(2,[73c5da0a/48h/1h/0h/2h]tpubA/<0;1>/*,'
+        '[0f056943/48h/1h/0h/2h]tpubB/<0;1>/*))\n'
+        '/0/*,/1/*\n'
+        'tb1qexampleaddress';
+    final calls = <MethodCall>[];
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      final bytes = Uint8List.fromList(utf8.encode(bsms));
+      return {'name': 'multisig.bsms', 'size': bytes.length, 'bytes': bytes};
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+    final parsed = <String>[];
+    final bridge = FakeBridge(
+      onParse: (input) {
+        parsed.add(input);
+        return makeParsedInput();
+      },
+    );
+    await tester.pumpWidget(screen(bridge));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Import a file'));
+    await tester.pumpAndSettle();
+
+    // No type filter: a provider names a .bsms or a .desc file
+    // application/octet-stream at best, and a filter hid it.
+    expect(calls.single.method, 'openDocument');
+    final arguments = calls.single.arguments as Map<Object?, Object?>;
+    expect(arguments['mimeTypes'], isEmpty);
+    expect(arguments['maxBytes'], 64 * 1024);
+    expect(parsed, [bsms]);
+  });
+
+  testWidgets('a file picked here survives the way back', (tester) async {
+    final parsed = <String>[];
+    final bridge = FakeBridge(
+      onParse: (input) {
+        parsed.add(input);
+        return makeParsedInput();
+      },
+    );
+    await tester.pumpWidget(
+      screen(
+        bridge,
+        filePicker: () async => XFile.fromData(
+          Uint8List.fromList(utf8.encode('wpkh(tpub.../0/*)#checksum')),
+          path: 'wallet.txt',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final lock = containerOf(tester).read(lockProvider.notifier);
+    lock
+      ..syncFromSettings(null)
+      ..syncFromSettings(const AppLock(kind: LockKind.pin, biometric: false));
+
+    await tester.tap(find.text('Import a file'));
+    await tester.pumpAndSettle();
+    // Android pauses Gerfaut behind the picker and resumes it after.
+    // Without the trip being announced the lock lands here and takes
+    // the file that was just chosen with it.
+    lock
+      ..noteHidden()
+      ..noteResumed();
+    expect(lock.state.locked, isFalse);
+    // What the picker handed over was parsed rather than dropped.
+    expect(parsed, ['wpkh(tpub.../0/*)#checksum']);
+  });
+
+  testWidgets('a file far too large is refused before it is read', (
+    tester,
+  ) async {
+    final parsed = <String>[];
+    final bridge = FakeBridge(
+      onParse: (input) {
+        parsed.add(input);
+        return makeParsedInput();
+      },
+    );
+    await tester.pumpWidget(
+      screen(
+        bridge,
+        filePicker: () async =>
+            XFile.fromData(Uint8List(64 * 1024 + 1), path: 'holiday.mp4'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Import a file'));
+    await tester.pumpAndSettle();
+    expect(find.text('This file is too large to be a wallet.'), findsOneWidget);
+    expect(parsed, isEmpty);
+  });
+
+  testWidgets('a file is read as UTF-8, accents and all', (tester) async {
+    final parsed = <String>[];
+    final bridge = FakeBridge(
+      onParse: (input) {
+        parsed.add(input);
+        return makeParsedInput();
+      },
+    );
+    const material = '{"label": "Épargne", "descriptor": "wpkh(tpub.../0/*)"}';
+    await tester.pumpWidget(
+      screen(
+        bridge,
+        filePicker: () async => XFile.fromData(
+          Uint8List.fromList(utf8.encode(material)),
+          path: 'wallet.json',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Import a file'));
+    await tester.pumpAndSettle();
+    expect(parsed, [material]);
+  });
+
+  testWidgets('a file that is not text says so', (tester) async {
+    final parsed = <String>[];
+    final bridge = FakeBridge(
+      onParse: (input) {
+        parsed.add(input);
+        return makeParsedInput();
+      },
+    );
+    await tester.pumpWidget(
+      screen(
+        bridge,
+        filePicker: () async => XFile.fromData(
+          Uint8List.fromList([0xff, 0xfe, 0x00, 0x9f]),
+          path: 'wallet.txt',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Import a file'));
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(
+      find.text('This file is not text Gerfaut can read.'),
+      findsOneWidget,
+    );
+    expect(parsed, isEmpty);
+  });
+
+  testWidgets('a picker that never opened does not cover a later trip', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      screen(
+        FakeBridge(),
+        filePicker: () async =>
+            throw PlatformException(code: 'ActivityNotFoundException'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final lock = containerOf(tester).read(lockProvider.notifier);
+    lock
+      ..syncFromSettings(null)
+      ..syncFromSettings(const AppLock(kind: LockKind.pin, biometric: false));
+    lockOnEveryTrip(containerOf(tester));
+
+    await tester.tap(find.text('Import a file'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('No app on this phone can open a file to read.'),
+      findsOneWidget,
+    );
+
+    lock
+      ..noteHidden()
+      ..noteHidden()
+      ..noteResumed();
+    expect(lock.state.locked, isTrue);
+  });
+}

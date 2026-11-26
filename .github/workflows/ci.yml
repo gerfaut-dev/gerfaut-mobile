@@ -1,0 +1,461 @@
+name: CI
+
+# Flutter formatting, analysis and widget tests, the Rust crate's
+# formatting, Clippy pass and tests, the generated half of the bridge
+# written again and compared, the iOS app built and run on the
+# simulator, and the checks of the signing script, on every push to
+# main, every pull request, and on demand (Actions, CI, Run workflow);
+# a pull request of documentation alone skips the Flutter, Rust, bridge
+# and iOS jobs (the `changes` job), and the push to main skips iOS. All four need the sibling gerfaut-core
+# checkout, at the revision reproducible/gerfaut-core.rev pins: the
+# crate and the generator build against it, the widget tests read its
+# reference JSON (test/core_fixtures.dart). It is public: no key reads
+# it. The APKs themselves are built by the release workflow.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A pull request pushed again stops its previous run: the macOS runners
+# of the iOS jobs are few, and a run on a commit nobody will merge only
+# holds the next one in the queue. Every other run has a group of its
+# own, so that a run on main always finishes: GitHub would otherwise
+# drop a pending one when a newer one arrives.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Whether the jobs that compile have anything to check. On a pull
+  # request whose files are all documentation, listed below, they are
+  # skipped, and a skipped job counts as passed. Any other path, a push to
+  # main and a manual run, run them all. Only an explicit `false` skips
+  # them: if this job fails or is cancelled, they still run.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.paths.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge commit of the pull request and its first parent, the
+          # base branch: the diff between them is what the merge changes.
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Read the changed paths
+        id: paths
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          code=true
+          if [ "$EVENT" = pull_request ]; then
+            paths=$(git -c core.quotePath=false diff --name-only --no-renames HEAD^1 HEAD)
+            [ -z "$paths" ] || code=false
+            while IFS= read -r path; do
+              case "$path" in
+                README.md | CONTRIBUTING.md | SECURITY.md | TRADEMARK.md) ;;
+                LICENSE | .github/PULL_REQUEST_TEMPLATE.md) ;;
+                .github/ISSUE_TEMPLATE/*.yml | .github/ISSUE_TEMPLATE/*.md) ;;
+                .github/images/*.svg | .github/images/*.webp) ;;
+                .github/images/*.png | CHANGELOG.md) ;;
+                .github/release-notes.md) ;;
+                *) code=true ;;
+              esac
+            done <<<"$paths"
+          fi
+          echo "code=$code" | tee -a "$GITHUB_OUTPUT"
+
+  flutter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    steps:
+      # No credentials left in .git/config: nothing after a checkout talks
+      # to GitHub, and the steps below run third-party code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: gerfaut-mobile
+          persist-credentials: false
+
+      - name: Read the pinned gerfaut-core revision
+        id: core
+        run: echo "rev=$(cat gerfaut-mobile/reproducible/gerfaut-core.rev)" >> "$GITHUB_OUTPUT"
+
+      - name: Check the pinned revision is on gerfaut-core's main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REV: ${{ steps.core.outputs.rev }}
+        run: gerfaut-mobile/.github/core-on-main.sh "$REV"
+
+      # Only its reference JSON is read here: nothing of it runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gerfaut-dev/gerfaut-core
+          ref: ${{ steps.core.outputs.rev }}
+          path: gerfaut-core
+          persist-credentials: false
+
+      # The Flutter the release builds with (reproducible/Dockerfile): a
+      # green run on another one says little about the APK.
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: 3.47.7
+          cache: true
+      - run: flutter pub get
+        working-directory: gerfaut-mobile
+      - name: Format
+        working-directory: gerfaut-mobile
+        run: dart format --output=none --set-exit-if-changed lib test integration_test
+      - name: Analyze
+        working-directory: gerfaut-mobile
+        run: flutter analyze
+      - name: Test
+        working-directory: gerfaut-mobile
+        run: flutter test
+      # Which lines of the price widget fit at the sizes launchers grant
+      # (android/app/src/test, on the JVM, against the runner's Android
+      # SDK): nothing of it goes into the APK.
+      - name: Widget layout
+        working-directory: gerfaut-mobile
+        run: |
+          flutter build apk --config-only
+          cd android && ./gradlew :app:testDebugUnitTest
+
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: gerfaut-mobile
+          persist-credentials: false
+
+      # The same revision the release builds against, so a green run here
+      # means the APK compiles.
+      - name: Read the pinned gerfaut-core revision
+        id: core
+        run: echo "rev=$(cat gerfaut-mobile/reproducible/gerfaut-core.rev)" >> "$GITHUB_OUTPUT"
+
+      - name: Check the pinned revision is on gerfaut-core's main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REV: ${{ steps.core.outputs.rev }}
+        run: gerfaut-mobile/.github/core-on-main.sh "$REV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gerfaut-dev/gerfaut-core
+          ref: ${{ steps.core.outputs.rev }}
+          path: gerfaut-core
+          persist-credentials: false
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: gerfaut-mobile/rust
+
+      - name: Format
+        working-directory: gerfaut-mobile/rust
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: gerfaut-mobile/rust
+        run: |
+          rustup show
+          cargo clippy --all-targets -- -D warnings
+
+      # The bridge's own tests: the release build logs nothing, an
+      # oversized QR frame is turned away, the isolates share one
+      # manager and one first-launch key.
+      - name: Test
+        working-directory: gerfaut-mobile/rust
+        run: cargo test
+
+      # Cargo only warns when a [patch] no longer matches what the
+      # dependencies ask for, and records it in Cargo.lock: the copy of
+      # sysinfo would stop applying once arti asks for another version,
+      # with every other step green.
+      - name: Check that every patch applies
+        working-directory: gerfaut-mobile/rust
+        run: if grep -n '^\[\[patch.unused\]\]' Cargo.lock; then exit 1; fi
+
+  # The generated half of the bridge: rust/src/frb_generated.rs,
+  # lib/src/rust/ and the Dart signatures in it are written by
+  # flutter_rust_bridge_codegen from rust/src/api/, at the version
+  # rust/Cargo.toml pins, and committed. Nothing else compares them with
+  # what the generator writes: a hand edit, or an api change committed
+  # without regenerating, would build and pass every other job. This one
+  # writes them again, and fails on any difference.
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: gerfaut-mobile
+          persist-credentials: false
+
+      - name: Read the pinned gerfaut-core revision
+        id: core
+        run: echo "rev=$(cat gerfaut-mobile/reproducible/gerfaut-core.rev)" >> "$GITHUB_OUTPUT"
+
+      - name: Check the pinned revision is on gerfaut-core's main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REV: ${{ steps.core.outputs.rev }}
+        run: gerfaut-mobile/.github/core-on-main.sh "$REV"
+
+      # The generator reads the crate, which builds against it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gerfaut-dev/gerfaut-core
+          ref: ${{ steps.core.outputs.rev }}
+          path: gerfaut-core
+          persist-credentials: false
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: 3.47.7
+          cache: true
+      - run: flutter pub get
+        working-directory: gerfaut-mobile
+
+      # Kept with the cache of the crate, so the generator is built once.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: gerfaut-mobile/rust
+
+      # The version of the crate: the generator and the runtime it
+      # generates for must be the same release, and the crate's pin is
+      # the one place that says which.
+      - name: Install the generator
+        working-directory: gerfaut-mobile
+        run: |
+          version=$(sed -n 's/^flutter_rust_bridge = "=\(.*\)"$/\1/p' rust/Cargo.toml)
+          [ -n "$version" ] || { echo "no pinned flutter_rust_bridge in rust/Cargo.toml"; exit 1; }
+          cargo install --locked --version "$version" flutter_rust_bridge_codegen
+
+      - name: Generate the bridge again
+        working-directory: gerfaut-mobile
+        run: flutter_rust_bridge_codegen generate
+
+      # A file the generator now writes that is not committed counts too.
+      - name: Compare with what is committed
+        working-directory: gerfaut-mobile
+        run: |
+          git add --intent-to-add .
+          git status --short
+          git diff --exit-code
+
+  # The iOS app, on the only runner that builds it. `simulator` compiles
+  # the core and arti for the simulator, starts the app there and runs
+  # integration_test/ against the real bridge; `device` compiles them for
+  # an iPhone, in release, unsigned: what TestFlight would get, short of
+  # the signature. Both fail when the build changed a tracked file under
+  # ios/, such as the Xcode project CocoaPods rewrites: what is committed
+  # is what builds.
+  # `duo` runs the app on the iPhone Duo simulator and keeps a picture
+  # of its main screens, on a manual run only; main does not require it,
+  # and ios-unchanged has no stand-in for it.
+  # macOS runners are the scarcest: these run on the pull request and on
+  # demand, never again on the push to main that merges what they checked.
+  ios:
+    runs-on: xcode-27
+    needs: changes
+    if: ${{ !cancelled() && github.event_name != 'push' && needs.changes.outputs.code != 'false' }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ github.event_name == 'workflow_dispatch' && fromJSON('["simulator", "device", "duo"]') || fromJSON('["simulator", "device"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: gerfaut-mobile
+          persist-credentials: false
+
+      - name: Read the pinned gerfaut-core revision
+        id: core
+        run: echo "rev=$(cat gerfaut-mobile/reproducible/gerfaut-core.rev)" >> "$GITHUB_OUTPUT"
+
+      - name: Check the pinned revision is on gerfaut-core's main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REV: ${{ steps.core.outputs.rev }}
+        run: gerfaut-mobile/.github/core-on-main.sh "$REV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gerfaut-dev/gerfaut-core
+          ref: ${{ steps.core.outputs.rev }}
+          path: gerfaut-core
+          persist-credentials: false
+
+      # Named, not the image's default, which moves under the workflow.
+      # The iOS 27.1 SDK is the first an iPhone Duo runs full screen:
+      # built with an older one, the app sits in a phone-sized window in
+      # the middle of the inner display.
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_27.1.app
+
+      - name: Pin the Rust toolchain
+        run: gerfaut-mobile/.github/ios-toolchain.sh gerfaut-mobile
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: 3.47.7
+          cache: true
+      - run: flutter pub get
+        working-directory: gerfaut-mobile
+
+      # The newest runtime the SDK can build for that has the device: an
+      # iPhone for `simulator`, the iPhone Duo for `duo`. The runner
+      # lists runtimes in no set order, and some hold a single device.
+      - name: Start a simulator
+        if: matrix.target != 'device'
+        id: sim
+        env:
+          DEVICE: ${{ matrix.target == 'duo' && 'iPhone Duo' || 'iPhone' }}
+        run: |
+          sdk=$(xcrun --sdk iphonesimulator --show-sdk-version)
+          udid=$(xcrun simctl list devices available -j | jq -r --arg device "$DEVICE" --arg sdk "$sdk" '
+            def version: capture("iOS-(?<major>[0-9]+)-(?<minor>[0-9]+)$")
+              | [(.major | tonumber), (.minor | tonumber)];
+            ($sdk | split(".") | map(tonumber) | .[0:2]) as $newest
+            | [.devices | to_entries[]
+                | select(.key | test("iOS-[0-9]+-[0-9]+$"))
+                | select((.key | version) <= $newest)]
+            | sort_by(.key | version) | reverse
+            | [.[].value[] | select(.name | startswith($device))
+                | select($device == "iPhone Duo" or (.name | contains("Duo") | not))][0].udid')
+          echo "SDK $sdk, $DEVICE: $udid"
+          [ -n "$udid" ] && [ "$udid" != null ] || { xcrun simctl list devices available; exit 1; }
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid"
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+
+      - name: Test on the simulator
+        if: matrix.target != 'device'
+        working-directory: gerfaut-mobile
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
+        run: flutter test integration_test/app_test.dart -d "$UDID"
+
+      # Every main screen, drawn at the device's size: one that overflows
+      # fails. On the iPhone Duo, each one is also photographed by the
+      # simulator itself, status bar, camera and safe areas included.
+      - name: Draw the main screens
+        if: matrix.target != 'device'
+        working-directory: gerfaut-mobile
+        env:
+          UDID: ${{ steps.sim.outputs.udid }}
+          SHOTS: ${{ matrix.target == 'duo' && '1' || '' }}
+        run: |
+          if [ -z "$SHOTS" ]; then
+            flutter test integration_test/screens_test.dart -d "$UDID"
+            exit 0
+          fi
+          set -o pipefail
+          out="$RUNNER_TEMP/iphone-duo"
+          mkdir -p "$out"
+          # What the simulator says of its displays and of the commands
+          # it takes: Apple documents opening an iPhone Duo only with
+          # Device Hub's buttons.
+          xcrun simctl io "$UDID" enumerate > "$out/displays.txt" 2>&1 || true
+          { xcrun simctl help; xcrun simctl help ui; xcrun simctl ui "$UDID"; } \
+            > "$out/simctl-help.txt" 2>&1 || true
+          .github/simulator-shots.sh "$UDID" com.gerfautwallet.gerfaut "$out" &
+          shooter=$!
+          trap 'kill "$shooter" 2>/dev/null' EXIT
+          flutter test integration_test/screens_test.dart -d "$UDID" \
+            --dart-define=GERFAUT_SHOTS=1 | tee "$out/screens.log"
+
+      - name: Keep the iPhone Duo pictures
+        if: always() && matrix.target == 'duo'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: iphone-duo-screens
+          path: ${{ runner.temp }}/iphone-duo
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Build for an iPhone, unsigned
+        if: matrix.target == 'device'
+        working-directory: gerfaut-mobile
+        run: flutter build ios --release --no-codesign
+
+      - name: Check that the build left ios/ as committed
+        working-directory: gerfaut-mobile
+        run: |
+          git add --intent-to-add ios
+          if ! git diff --exit-code --stat -- ios; then
+            git diff -- ios > "$RUNNER_TEMP/ios.diff"
+            echo "::error::the build changed ios/: commit the diff of the ios-diff artifact"
+            exit 1
+          fi
+
+      # The TestFlight workflow cannot run without its secrets: its
+      # signing script is tried here, on a copy of the project, so that
+      # it does not rot unseen.
+      - name: Try the TestFlight signing script
+        if: matrix.target == 'device'
+        run: |
+          copy="$RUNNER_TEMP/signing-try"
+          mkdir -p "$copy"
+          cp -R gerfaut-mobile/ios/Runner.xcodeproj "$copy/"
+          ruby gerfaut-mobile/.github/ios-signing.rb "$copy/Runner.xcodeproj" ABCDE12345 "Gerfaut App Store"
+          grep -q 'PROVISIONING_PROFILE_SPECIFIER = "Gerfaut App Store";' "$copy/Runner.xcodeproj/project.pbxproj"
+
+      - name: Keep the diff of ios/
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-diff-${{ matrix.target }}
+          path: ${{ runner.temp }}/ios.diff
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The two iOS checks main requires, when there is nothing to build:
+  # GitHub reports a skipped matrix job under its bare name, `ios`, so
+  # the skipped `ios` above never answers for `ios (simulator)` and
+  # `ios (device)`. These answer in its place, on a Linux runner, and
+  # only when no code changed.
+  ios-unchanged:
+    name: ios (${{ matrix.target }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.outputs.code == 'false' }}
+    strategy:
+      matrix:
+        target: [simulator, device]
+    steps:
+      - run: echo "No code changed, so there is nothing to build for iOS."
+
+  # What scripts/sign-release.ps1 checks before it signs a release, on
+  # throwaway git repositories: no key, no network. Pester comes with
+  # the runner image.
+  signing-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test
+        shell: pwsh
+        run: |
+          Import-Module Pester -MinimumVersion 5.5
+          Invoke-Pester -Path scripts -CI

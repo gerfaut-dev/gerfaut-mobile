@@ -1,0 +1,617 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import '../src/live.dart';
+import '../src/models.dart';
+import '../src/platform_features.dart';
+import '../src/state.dart';
+import '../src/sync_refresh.dart';
+import '../theme/tokens.dart';
+import '../widgets/amounts.dart';
+import '../widgets/app_bar.dart';
+import '../widgets/brand.dart';
+import '../widgets/buttons.dart';
+import '../widgets/empty_state.dart';
+import '../widgets/icon_chip.dart';
+import '../widgets/load_failure.dart';
+import '../widgets/mask_unsaved_notice.dart';
+import '../widgets/notice.dart';
+import '../widgets/overflow_menu.dart';
+import '../widgets/reorder.dart';
+import '../widgets/status_pill.dart';
+import '../widgets/sync_button.dart';
+import '../widgets/update_notice.dart';
+import '../widgets/sync_indicator.dart';
+import '../widgets/wallet_icon.dart';
+import 'add_wallet.dart';
+import 'broadcast.dart';
+import 'settings.dart';
+import 'wallet_home.dart';
+import '../widgets/toast.dart';
+import '../widgets/readable_width.dart';
+
+/// Home: the wallets of the active workspace network as cards, or the
+/// empty state. Pull down to sync them all; the one primary action sits
+/// at the bottom.
+class HomeScreen extends ConsumerWidget {
+  const HomeScreen({super.key});
+
+  /// One background refresh at startup, the first time this screen sees
+  /// wallets to refresh; data stays visibly stamped. Read off the build
+  /// rather than listened for: the list often loads before this screen
+  /// first builds — whatever feeds the home-screen widgets asks for it
+  /// first — and a listener would wait for a change that never comes.
+  void _autoSyncOnce(BuildContext context, WidgetRef ref) {
+    final wallets = ref.watch(walletsProvider).value;
+    final network = ref.read(settingsProvider).value?.activeNetwork;
+    if (wallets == null || wallets.isEmpty || network == null) return;
+    if (ref.read(autoSyncedProvider)) return;
+    // Off the frame: starting a sync moves provider state, which a
+    // build in progress must not.
+    Future.microtask(() {
+      if (!context.mounted || ref.read(autoSyncedProvider)) return;
+      ref.read(autoSyncedProvider.notifier).put(true);
+      ref.read(syncProvider.notifier).syncAll(network);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    _autoSyncOnce(context, ref);
+    // Listened, not watched: a page pushed over this one pauses what it
+    // watches, and the figures of that page are the ones kept fresh.
+    ref.listen(syncRefreshProvider, (_, _) {});
+
+    final settings = ref.watch(settingsProvider);
+    final wallets = ref.watch(walletsProvider);
+    final masked = ref.watch(maskedProvider);
+    final syncs = ref.watch(syncProvider);
+    final sync = ref.read(syncProvider.notifier);
+    final network = settings.value?.activeNetwork;
+
+    return Scaffold(
+      appBar: GerfautAppBar(
+        title: Row(
+          children: [
+            // The falcon alone: whoever opens the app knows its name,
+            // and the mark says it in the space of a glyph.
+            GerfautMark(
+              color: tokens.primary,
+              height: 26,
+              semanticLabel: 'Gerfaut',
+            ),
+            if (network != null && network != Network.mainnet) ...[
+              const SizedBox(width: GerfautSpacing.sm),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: GerfautSpacing.sm,
+                  vertical: 2,
+                ),
+                decoration: BoxDecoration(
+                  color: tokens.surfaceSunken,
+                  borderRadius: BorderRadius.circular(GerfautRadius.full),
+                ),
+                child: Text(
+                  network.label,
+                  style: tokens.label.copyWith(color: tokens.pending),
+                ),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          // The one action of the way past, and the only one left in
+          // the bar: syncs every wallet of the network at once, and
+          // turns for as long as any of them is still working.
+          SyncButton(
+            syncing: syncs.syncingAnyOf([
+              for (final wallet in wallets.value ?? const <WalletMeta>[])
+                wallet.id,
+            ]),
+            onPressed: network == null || (wallets.value?.isEmpty ?? true)
+                ? null
+                : () => sync.syncAll(network),
+          ),
+          OverflowMenu(
+            items: [
+              // The list shows balances, so it masks them from here too.
+              OverflowMenuItem(
+                icon: masked ? LucideIcons.eye : LucideIcons.eyeOff,
+                label: masked ? 'Show balances' : 'Hide balances',
+                onSelected: () => ref.read(maskedProvider.notifier).toggle(),
+              ),
+              // A transaction belongs to the workspace network, not to
+              // one wallet: broadcasting starts from here.
+              if (ref.watch(platformFeaturesProvider).broadcast)
+                OverflowMenuItem(
+                  icon: LucideIcons.radio,
+                  label: 'Broadcast',
+                  onSelected: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const BroadcastScreen(),
+                      ),
+                    );
+                  },
+                ),
+              OverflowMenuItem(
+                icon: LucideIcons.settings,
+                label: 'Settings',
+                onSelected: () => SettingsScreen.open(context),
+              ),
+            ],
+          ),
+          const SizedBox(width: GerfautSpacing.sm),
+        ],
+      ),
+      body: SafeArea(
+        child: ReadableWidth(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const UpdateNotice(),
+              const MaskUnsavedNotice(),
+              Expanded(
+                child: switch ((settings, wallets)) {
+                  // The wallets alone failed: the vault is open, and the
+                  // list can be asked for again.
+                  (AsyncData(), AsyncError(:final error)) => LoadFailure(
+                    what: 'The wallets',
+                    error: error,
+                    onRetry: () => ref.invalidate(walletsProvider),
+                  ),
+                  (AsyncError(), _) || (_, AsyncError()) => Center(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: GerfautSpacing.md,
+                      ),
+                      child: Text(
+                        'The vault could not be opened. Restart Gerfaut; if '
+                        'this persists, the secure storage refused access to '
+                        'the vault key.',
+                        style: tokens.bodySmall.copyWith(
+                          color: tokens.textMuted,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
+                  // A value, the current one or the last while the vault
+                  // is read again — refreshed after a drop, or reloaded
+                  // behind a settings change: the list stays mounted
+                  // through it, and what it holds — a drop on its way,
+                  // the note of a refused one — survives, instead of
+                  // giving way to the opening line and coming back blank.
+                  (_, AsyncValue(:final value?)) when value.isEmpty =>
+                    EmptyState(
+                      // The first screen of the app: the full logo, once,
+                      // where every other empty state gets a watermark.
+                      art: GerfautLockup(
+                        color: tokens.primary,
+                        width: 160,
+                        semanticLabel: 'Gerfaut',
+                      ),
+                      title: 'No wallets yet',
+                      hint:
+                          'Import a descriptor, xpub, or address to start '
+                          'watching it.',
+                    ),
+                  (_, AsyncValue(:final value?)) => _WalletList(
+                    wallets: value,
+                    refreshing: wallets.isLoading,
+                    onRefresh: () async {
+                      if (network == null) return;
+                      final report = await sync.syncAll(network);
+                      if (report == null || !context.mounted) return;
+                      // A benign confirmation: the summary may disappear,
+                      // per-wallet failures stay on the freshness lines.
+                      final synced = report.reports.length;
+                      final failed = report.failures.length;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        Toast(
+                          failed == 0
+                              ? (synced == 1
+                                    ? '1 wallet synced'
+                                    : '$synced wallets synced')
+                              : '$synced synced, $failed failed',
+                        ),
+                      );
+                    },
+                  ),
+                  _ => Center(
+                    child: Text(
+                      'Opening the vault…',
+                      style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+                    ),
+                  ),
+                },
+              ),
+              Padding(
+                padding: const EdgeInsets.all(GerfautSpacing.md),
+                child: PrimaryButton(
+                  label: 'Add a wallet',
+                  expand: true,
+                  onPressed: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute<void>(
+                        builder: (_) => const AddWalletScreen(),
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// The wallet cards, in the vault's order, pulled down to sync them all
+/// and held down to move one. The order a card is dropped in is kept
+/// here until the vault has caught up, so nothing snaps back on the
+/// way; only this network's wallets are sent, so another network's keep
+/// their slots.
+class _WalletList extends ConsumerStatefulWidget {
+  const _WalletList({
+    required this.wallets,
+    required this.onRefresh,
+    this.refreshing = false,
+  });
+
+  final List<WalletMeta> wallets;
+  final Future<void> Function() onRefresh;
+
+  /// The list is being read again: after a sync, the one shown still
+  /// knows of none until the new one lands.
+  final bool refreshing;
+
+  @override
+  ConsumerState<_WalletList> createState() => _WalletListState();
+}
+
+class _WalletListState extends ConsumerState<_WalletList> {
+  /// The order the cards were dropped in, by id, until the vault has
+  /// caught up. A list that changed underneath takes the vault's back.
+  List<String>? _order;
+
+  /// The drop the vault refused: the order it asked for, and what the
+  /// vault said. Said above the cards until it is tried again or
+  /// dismissed — never a toast, which vanishes before it is read. The
+  /// cards meanwhile stand in the order the vault kept.
+  ({List<String> ids, String reason})? _refused;
+
+  /// The cards in the order they show: the vault's, unless a drop is
+  /// still on its way there.
+  List<WalletMeta> _inOrder() {
+    final order = _order;
+    final wallets = widget.wallets;
+    if (order == null) return wallets;
+    final byId = {for (final wallet in wallets) wallet.id: wallet};
+    if (order.length != wallets.length || !order.every(byId.containsKey)) {
+      _order = null;
+      return wallets;
+    }
+    return [for (final id in order) byId[id]!];
+  }
+
+  Future<void> _reorder(int from, int to) async {
+    if (from == to) return;
+    final ids = [for (final wallet in _inOrder()) wallet.id];
+    ids.insert(to, ids.removeAt(from));
+    await _apply(ids);
+  }
+
+  /// Hands [ids] to the vault, showing that order meanwhile.
+  Future<void> _apply(List<String> ids) async {
+    setState(() {
+      _order = ids;
+      _refused = null;
+    });
+    // The lock may take the screen away during the round trip: the list
+    // is read again through the container, which outlives it.
+    final container = ProviderScope.containerOf(context, listen: false);
+    try {
+      await ref.read(bridgeProvider).reorderWallets(ids);
+      // Read the vault back, then let the local order go: the provider
+      // moves from one list to the next without a gap, so nothing snaps
+      // back on the way, and an order set elsewhere afterwards — in the
+      // settings, say — is followed here rather than overruled by a
+      // drop long since landed. A newer drop keeps its own until then.
+      container.invalidate(walletsProvider);
+      await container.read(walletsProvider.future);
+      if (!mounted || !identical(_order, ids)) return;
+      setState(() => _order = null);
+    } catch (error) {
+      if (!mounted) return;
+      // The vault kept whatever order it had: read it back rather than
+      // trust the list in hand, and show that one under the note.
+      container.invalidate(walletsProvider);
+      setState(() {
+        _order = null;
+        _refused = (ids: ids, reason: '$error');
+      });
+    }
+  }
+
+  /// Whether [ids] are exactly the wallets on screen. A list that
+  /// changed underneath — a wallet added or removed meanwhile — leaves
+  /// a refused drop nothing to try again.
+  bool _covers(List<String> ids) {
+    final current = {for (final wallet in widget.wallets) wallet.id};
+    return ids.length == current.length && ids.every(current.contains);
+  }
+
+  /// The refused drop, once more.
+  void _retry() {
+    final refused = _refused;
+    if (refused == null || !_covers(refused.ids)) return;
+    _apply(refused.ids);
+  }
+
+  void _dismiss() => setState(() => _refused = null);
+
+  @override
+  Widget build(BuildContext context) {
+    final shown = _inOrder();
+    final syncs = ref.watch(syncProvider);
+    final refused = _refused;
+    // A refused drop whose list has changed since says so, and keeps
+    // the way out alone: a "Try again" with nothing left to try would
+    // do nothing, and a note that simply vanished would say less.
+    final stale = refused != null && !_covers(refused.ids);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        // When the figures below were last read, said once for the list
+        // and always: a balance with no date passes for today's. It
+        // dates the least fresh of them, since one line speaks for all.
+        // A wallet that never synced has no date to give: its card shows
+        // a dash while its first sync runs, and says so when that sync
+        // failed.
+        Padding(
+          padding: const EdgeInsets.fromLTRB(
+            GerfautSpacing.md,
+            GerfautSpacing.sm,
+            GerfautSpacing.md,
+            0,
+          ),
+          child: SyncIndicator.brief(
+            stamp: leastFreshSync(shown),
+            // A first sync runs until its figure is read back, as on
+            // the card: the line never calls a wallet just synced
+            // "Never synced".
+            syncing:
+                syncs.syncingAnyOf(shown.map((wallet) => wallet.id)) ||
+                shown.any(
+                  (wallet) =>
+                      syncs.isFirstSync(wallet, refreshing: widget.refreshing),
+                ),
+            failed: shown.any((wallet) => syncs.failureOf(wallet.id) != null),
+            refreshing: widget.refreshing,
+          ),
+        ),
+        Expanded(child: _list(context, shown, syncs, refused, stale)),
+      ],
+    );
+  }
+
+  Widget _list(
+    BuildContext context,
+    List<WalletMeta> shown,
+    WalletSyncs syncs,
+    ({List<String> ids, String reason})? refused,
+    bool stale,
+  ) {
+    return RefreshIndicator(
+      onRefresh: widget.onRefresh,
+      child: ReorderableListView.builder(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(GerfautSpacing.md),
+        buildDefaultDragHandles: false,
+        proxyDecorator: liftedProxy,
+        // Above the cards, in the list's own margins: the header takes
+        // the top of the padding and the first card gives it up, so the
+        // gap under the note is the header's to set.
+        header: refused == null
+            ? null
+            : Padding(
+                padding: const EdgeInsets.only(bottom: GerfautSpacing.md),
+                child: GerfautNotice(
+                  tone: NoticeTone.info,
+                  // It lands in reaction to the drop, and nothing else
+                  // on the screen says the order went back.
+                  liveRegion: true,
+                  message: 'The new order could not be saved.',
+                  hint: stale ? 'The list changed. Drag again.' : null,
+                  detail: stale ? null : refused.reason,
+                  actionsBelow: true,
+                  action: stale
+                      ? SecondaryButton(label: 'Dismiss', onPressed: _dismiss)
+                      : ConfirmActions(
+                          cancel: SecondaryButton(
+                            label: 'Dismiss',
+                            onPressed: _dismiss,
+                          ),
+                          confirm: PrimaryButton(
+                            label: 'Try again',
+                            onPressed: _retry,
+                          ),
+                        ),
+                ),
+              ),
+        itemCount: shown.length,
+        onReorderItem: _reorder,
+        itemBuilder: (context, index) {
+          final wallet = shown[index];
+          // A hold lifts the card; a tap still opens it. A handle would
+          // be a permanent target for a rare gesture on every card.
+          return ReorderableDelayedDragStartListener(
+            key: ValueKey(wallet.id),
+            index: index,
+            child: _WalletCard(
+              wallet: wallet,
+              error: syncs.failureOf(wallet.id),
+              unknown: syncs.isFirstSync(wallet, refreshing: widget.refreshing),
+              // How much of it Live follows, only while Live runs and
+              // cannot follow everything.
+              coverage: ref.watch(walletCoverageProvider(wallet.id)),
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => WalletHomeScreen(walletId: wallet.id),
+                  ),
+                );
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// One watched wallet: surface card, hairline border, no shadow.
+///
+/// The name and the balance, nothing else. A freshness line repeated on
+/// every card spends a whole row on an answer nobody looks for while
+/// scanning a list; it belongs on the wallet's own page, where a single
+/// balance is being read and "where does this number come from?" is
+/// actually the question. What stays is what tells the cards apart, and
+/// they shrink by the line they lost: more wallets fit on screen, which
+/// is the one thing this list has to do.
+class _WalletCard extends StatelessWidget {
+  const _WalletCard({
+    required this.wallet,
+    required this.onTap,
+    this.error,
+    this.coverage,
+    this.unknown = false,
+  });
+
+  final WalletMeta wallet;
+  final VoidCallback onTap;
+
+  /// The wallet's first sync is under way: its zero is no answer, and a
+  /// dash stands in its place, saying "Syncing…" to a screen reader.
+  final bool unknown;
+
+  /// How much of the wallet Live follows, while Live cannot follow
+  /// every wallet whole; null otherwise, and then nothing is said.
+  final WalletCoverage? coverage;
+
+  /// The one exception to the rule above: a sync that failed contradicts
+  /// the figure right above it, and a stale balance stated as fact is a
+  /// lie. A sync that went well has nothing to say.
+  final String? error;
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    // Held and moving, the card is the one thing on screen that really
+    // floats, and gets the one shadow. At rest, never.
+    final lifted = LiftedItem.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: GerfautSpacing.gutter),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(GerfautRadius.lg),
+          boxShadow: lifted ? [tokens.shadowOverlay] : null,
+        ),
+        child: Material(
+          color: tokens.surface,
+          borderRadius: BorderRadius.circular(GerfautRadius.lg),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(GerfautRadius.lg),
+            onTap: onTap,
+            child: Container(
+              padding: const EdgeInsets.all(GerfautSpacing.md),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(GerfautRadius.lg),
+                border: Border.all(color: tokens.border),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      // The wallet's glyph in the chip every row of the
+                      // app opens with: what tells two cards apart
+                      // before their names are read. Its ink stays
+                      // neutral, the accent is for what can be acted on.
+                      IconChip.glyph(
+                        glyph: WalletGlyph(wallet.icon),
+                        ink: tokens.textMuted,
+                        fill: tokens.surfaceSunken,
+                      ),
+                      const SizedBox(width: GerfautSpacing.gutter),
+                      Expanded(
+                        child: Text(
+                          wallet.name,
+                          style: tokens.h2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: GerfautSpacing.sm),
+                  BalanceAmount(
+                    sats: wallet.cachedBalance.total,
+                    network: wallet.network,
+                    unknown: unknown,
+                  ),
+                  if (coverage != null) ...[
+                    const SizedBox(height: GerfautSpacing.sm),
+                    LiveCoveragePill(coverage: coverage!),
+                  ],
+                  if (error != null) ...[
+                    const SizedBox(height: GerfautSpacing.sm),
+                    // One line, amber: the reason is a tap away here,
+                    // and spelled out on the wallet's page. A tap, not a
+                    // hold: holding the card is how it gets moved, and
+                    // two gestures on one press would fight for it.
+                    Tooltip(
+                      message: error!,
+                      triggerMode: TooltipTriggerMode.tap,
+                      // A full touch target: a tap on the line reads
+                      // the reason rather than opening the wallet
+                      // around it.
+                      child: ConstrainedBox(
+                        constraints: const BoxConstraints(
+                          minHeight: GerfautTouch.target,
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              LucideIcons.triangleAlert,
+                              size: 12,
+                              color: tokens.pending,
+                            ),
+                            const SizedBox(width: GerfautSpacing.xs),
+                            Flexible(
+                              child: Text(
+                                'Sync failed',
+                                style: tokens.label.copyWith(
+                                  color: tokens.pending,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}

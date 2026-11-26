@@ -1,0 +1,3412 @@
+import 'dart:async';
+import 'dart:ui' show SemanticsAction, Tristate;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:gerfaut/app.dart';
+import 'package:gerfaut/screens/settings.dart';
+import 'package:gerfaut/screens/settings/about_section.dart';
+import 'package:gerfaut/screens/settings/fields.dart';
+import 'package:gerfaut/screens/settings/network_section.dart';
+import 'package:gerfaut/screens/scan.dart';
+import 'package:gerfaut/src/bridge.dart';
+import 'package:gerfaut/src/format.dart';
+import 'package:gerfaut/src/disguise.dart';
+import 'package:gerfaut/src/models.dart';
+import 'package:gerfaut/src/platform_features.dart';
+import 'package:gerfaut/src/notifications.dart';
+import 'package:gerfaut/src/state.dart';
+import 'package:gerfaut/src/updates.dart' show isBetaVersion;
+import 'package:gerfaut/theme/tokens.dart';
+import 'package:gerfaut/widgets/buttons.dart';
+import 'package:gerfaut/widgets/notice.dart';
+import 'package:gerfaut/widgets/section_card.dart';
+import 'package:gerfaut/widgets/select_field.dart';
+import 'package:gerfaut/widgets/setting_switch.dart';
+import 'package:gerfaut/widgets/wallet_icon.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import 'core_fixtures.dart';
+import 'fakes.dart';
+import 'menu.dart';
+
+/// The settings opened on [section], or on the root list of sections.
+Widget settingsApp(
+  FakeBridge bridge, {
+  SettingsSection? section,
+  PlatformFeatures? platform,
+}) {
+  return ProviderScope(
+    retry: noRetry,
+    overrides: [
+      bridgeProvider.overrideWithValue(bridge),
+      disguiseServiceProvider.overrideWithValue(FakeDisguise()),
+      if (platform != null)
+        platformFeaturesProvider.overrideWithValue(platform),
+    ],
+    child: creditedApp(
+      theme: themeFrom(GerfautTokens.light, Brightness.light),
+      home: SettingsScreen(section: section),
+    ),
+  );
+}
+
+/// A surface tall enough to build every settings section at once.
+void useTallSurface(WidgetTester tester) {
+  tester.view.physicalSize = const Size(800, 3600);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+}
+
+/// Two made-up SHA-256 fingerprints, in the shape the core stores them:
+/// thirty-two uppercase hex pairs joined by colons.
+const String _fingerprint =
+    '4B:CD:74:1F:2A:39:58:67:76:85:94:A3:B2:C1:D0:EF:'
+    '0E:1D:2C:3B:4A:59:68:77:86:95:A4:B3:C2:D1:E0:FF';
+const String _otherFingerprint =
+    'AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:'
+    '99:88:77:66:55:44:33:22:11:00:FF:EE:DD:CC:BB:AA';
+
+/// The public server picker, for the options it offers.
+GerfautSelect<String?> serverField(WidgetTester tester) {
+  return tester.widget<GerfautSelect<String?>>(
+    find.byType(GerfautSelect<String?>),
+  );
+}
+
+void main() {
+  testWidgets('switching the theme applies it and persists the pref', (
+    tester,
+  ) async {
+    // A vault opened before: the welcome tour is behind this user.
+    final bridge = FakeBridge(
+      settings: const Settings(
+        preferences: kPreferences,
+        activeNetwork: Network.mainnet,
+        backends: {},
+        appPrefs: {'onboarding.seen': '1'},
+      ),
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [
+          bridgeProvider.overrideWithValue(bridge),
+          disguiseServiceProvider.overrideWithValue(FakeDisguise()),
+        ],
+        child: const GerfautApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // Light is the default.
+    var app = tester.widget<MaterialApp>(find.byType(MaterialApp));
+    expect(app.themeMode, ThemeMode.light);
+
+    await pickFromMenu(tester, 'Settings');
+    expect(find.text('Network'), findsOneWidget);
+    await tester.tap(find.text('General'));
+    await tester.pumpAndSettle();
+
+    await tester.scrollUntilVisible(find.text('Dark'), 100);
+    await tester.ensureVisible(find.text('Dark'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Dark'));
+    await tester.pumpAndSettle();
+
+    app = tester.widget<MaterialApp>(find.byType(MaterialApp));
+    expect(app.themeMode, ThemeMode.dark);
+    expect(bridge.appPrefs['mobile.theme'], 'dark');
+
+    await tester.tap(find.text('System'));
+    await tester.pumpAndSettle();
+    app = tester.widget<MaterialApp>(find.byType(MaterialApp));
+    expect(app.themeMode, ThemeMode.system);
+    expect(bridge.appPrefs['mobile.theme'], 'system');
+  });
+
+  testWidgets('with Tor out of reach, the price line says so', (tester) async {
+    // With a .onion node the core sends the price through Tor, and
+    // nothing at all while Tor cannot be had: not a source that failed
+    // to answer.
+    useTallSurface(tester);
+    final bridge = FakeBridge()
+      ..onFetchPrice = (_, _) => throw coreFailure(
+        'tor',
+        'tor: no Tor proxy answers at 127.0.0.1:9050',
+      );
+    await tester.pumpWidget(
+      settingsApp(bridge, section: SettingsSection.general),
+    );
+    await tester.pumpAndSettle();
+    ProviderScope.containerOf(tester.element(find.byType(SettingsScreen)))
+        .read(fiatEnabledProvider.notifier)
+        .set(true);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text(
+        'Tor is not available, so no price was asked. Amounts show '
+        'without fiat until it is.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('did not answer'), findsNothing);
+  });
+
+  testWidgets('the theme options carry a glyph each', (tester) async {
+    useTallSurface(tester);
+    await tester.pumpWidget(
+      settingsApp(FakeBridge(), section: SettingsSection.general),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byIcon(LucideIcons.sun), findsOneWidget);
+    expect(find.byIcon(LucideIcons.moon), findsOneWidget);
+    expect(find.byIcon(LucideIcons.monitor), findsOneWidget);
+    expect(find.text('Light'), findsOneWidget);
+    expect(find.text('Dark'), findsOneWidget);
+    expect(find.text('System'), findsOneWidget);
+
+    // Tapping the glyph selects the option like tapping its label.
+    await tester.tap(find.byIcon(LucideIcons.moon));
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<Icon>(find.byIcon(LucideIcons.moon)).color,
+      GerfautTokens.light.onPrimary,
+    );
+  });
+
+  testWidgets('the display and wallet hints read as one sentence each', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    await tester.pumpWidget(
+      settingsApp(FakeBridge(), section: SettingsSection.wallets),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        'How many unused addresses Gerfaut scans past the last used one.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('20 is the norm'), findsNothing);
+
+    await tester.pumpWidget(
+      settingsApp(FakeBridge(), section: SettingsSection.general),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Shows the fiat value next to every amount.'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('IP address'), findsNothing);
+
+    // The price source hint only shows once fiat is on.
+    expect(
+      find.text('Serves the fiat value and the overview price.'),
+      findsNothing,
+    );
+    await tester.tap(find.byType(Switch).first);
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Serves the fiat value and the overview price.'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('One request per minute'), findsNothing);
+  });
+
+  testWidgets('wallet rows wear their icon, the subtitle tells the kind', (
+    tester,
+  ) async {
+    final bridge = FakeBridge(
+      wallets: [
+        makeMeta(id: 'w1', name: 'Cold storage'),
+        makeMeta(
+          id: 'w2',
+          name: 'Donation address',
+          icon: WalletIcon.mapPin,
+          kind: const SingleAddressKind(address: 'bc1qwatched'),
+        ),
+      ],
+    );
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [
+          bridgeProvider.overrideWithValue(bridge),
+          disguiseServiceProvider.overrideWithValue(FakeDisguise()),
+        ],
+        child: const GerfautApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await pickFromMenu(tester, 'Settings');
+    await tester.tap(find.text('Wallets'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Descriptor wallet'), findsOneWidget);
+    expect(find.text('Single address'), findsOneWidget);
+    // The section header and the first row wear the generic wallet;
+    // the second row wears the glyph its owner picked.
+    expect(find.byIcon(LucideIcons.wallet), findsNWidgets(2));
+    expect(find.byIcon(LucideIcons.mapPin), findsOneWidget);
+  });
+
+  testWidgets('a wallet renamed here stays out of the keyboard memory', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge(wallets: [makeMeta(name: 'Cold storage')]);
+    await tester.pumpWidget(
+      settingsApp(bridge, section: SettingsSection.wallets),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Rename'));
+    await tester.pumpAndSettle();
+
+    expect(find.bySemanticsLabel('Wallet name'), findsOneWidget);
+    expectKeyboardKeepsNothing(tester);
+  });
+
+  testWidgets('the server fields stay out of the keyboard memory', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge();
+    await tester.pumpWidget(
+      settingsApp(bridge, section: SettingsSection.network),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('My own Electrum server'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(MonoField), findsWidgets);
+    expectKeyboardKeepsNothing(tester);
+  });
+
+  group('wallet icons', () {
+    testWidgets('the icon action offers the seven glyphs and stores the pick', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final handle = tester.ensureSemantics();
+      final bridge = FakeBridge(wallets: [makeMeta()]);
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.wallets),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Icon'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Wallet icon'), findsOneWidget);
+      // Seven choices, in the core's order, each named for the screen
+      // reader and sized for a thumb; the current one announced as such,
+      // and every one activatable by that reader, not only by a finger.
+      for (final icon in WalletIcon.values) {
+        final tile = find.bySemanticsLabel(icon.label);
+        expect(tile, findsOneWidget, reason: icon.label);
+        final size = tester.getSize(tile);
+        expect(size.width, greaterThanOrEqualTo(GerfautTouch.target));
+        expect(size.height, greaterThanOrEqualTo(GerfautTouch.target));
+        final semantics = tester.getSemantics(tile);
+        expect(
+          semantics.flagsCollection.isSelected,
+          icon == WalletIcon.wallet ? Tristate.isTrue : Tristate.isFalse,
+          reason: icon.label,
+        );
+        expect(
+          semantics.getSemanticsData().hasAction(SemanticsAction.tap),
+          isTrue,
+          reason: icon.label,
+        );
+      }
+      expect(find.byType(WalletIconPicker), findsOneWidget);
+
+      await tester.tap(find.bySemanticsLabel('Snowflake'));
+      await tester.pumpAndSettle();
+
+      expect(bridge.iconCalls, [(id: 'w1', icon: WalletIcon.snowflake)]);
+      expect(find.byType(WalletIconPicker), findsNothing);
+      // The row wears it at once, and the change is confirmed.
+      expect(find.byIcon(LucideIcons.snowflake), findsOneWidget);
+      expect(find.text('Setting saved'), findsOneWidget);
+      handle.dispose();
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('the picker sheet clears the gesture bar', (tester) async {
+      useTallSurface(tester);
+      tester.view.padding = const FakeViewPadding(bottom: 48);
+      await tester.pumpWidget(
+        settingsApp(
+          FakeBridge(wallets: [makeMeta()]),
+          section: SettingsSection.wallets,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Icon'));
+      await tester.pumpAndSettle();
+
+      // The sheet's own frame is the theme's: no shape of its own.
+      expect(
+        tester.widget<BottomSheet>(find.byType(BottomSheet)).shape,
+        isNull,
+      );
+      // Scrolled to its end, the last tile stands on the bar, not
+      // under it.
+      final last = find.bySemanticsLabel(WalletIcon.values.last.label);
+      await tester.drag(
+        find.descendant(
+          of: find.byType(WalletIconPicker),
+          matching: find.byType(Scrollable),
+        ),
+        const Offset(0, -2000),
+      );
+      await tester.pumpAndSettle();
+      final screen = tester.view.physicalSize / tester.view.devicePixelRatio;
+      expect(
+        tester.getRect(last).bottom,
+        lessThanOrEqualTo(screen.height - 48 - GerfautSpacing.md),
+      );
+    });
+
+    testWidgets('picking the icon already worn writes nothing', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(wallets: [makeMeta()]);
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.wallets),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Icon'));
+      await tester.pumpAndSettle();
+      // The grid's wallet tile, not the row's glyph or the card's.
+      await tester.tap(
+        find.descendant(
+          of: find.byType(WalletIconPicker),
+          matching: find.byIcon(LucideIcons.wallet),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(bridge.iconCalls, isEmpty);
+      expect(find.byType(WalletIconPicker), findsNothing);
+    });
+  });
+
+  group('live pins', () {
+    FakeBridge two({bool pinSecond = false}) => FakeBridge(
+      wallets: [
+        makeMeta(id: 'w1', name: 'Cold storage'),
+        makeMeta(id: 'w2', name: 'Spending', livePinned: pinSecond),
+      ],
+    );
+
+    testWidgets('the pins stay folded under Advanced until asked for', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final handle = tester.ensureSemantics();
+      await tester.pumpWidget(
+        settingsApp(two(), section: SettingsSection.wallets),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Advanced'), findsOneWidget);
+      expect(find.text('Always watch live first'), findsNothing);
+      expect(
+        tester
+            .getSemantics(find.bySemanticsLabel('Advanced'))
+            .flagsCollection
+            .isExpanded,
+        Tristate.isFalse,
+      );
+
+      await tester.tap(find.text('Advanced'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Always watch live first'), findsOneWidget);
+      expect(
+        find.text(
+          'When Live cannot follow every address, the wallets turned on '
+          'here are followed first.',
+        ),
+        findsOneWidget,
+      );
+      // One switch a wallet, read with the wallet's name, all off.
+      final switches = tester
+          .widgetList<SettingSwitch>(find.byType(SettingSwitch))
+          .toList();
+      expect([for (final s in switches) s.title], ['Cold storage', 'Spending']);
+      expect(switches.every((s) => !s.value), isTrue);
+      expect(
+        find.bySemanticsLabel(RegExp('^Always watch Spending live first')),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .getSemantics(find.bySemanticsLabel('Advanced'))
+            .flagsCollection
+            .isExpanded,
+        Tristate.isTrue,
+      );
+      handle.dispose();
+    });
+
+    testWidgets('a pin is stored and the switch follows the vault', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = two();
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.wallets),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Advanced'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.descendant(
+          of: find.widgetWithText(SettingSwitch, 'Spending'),
+          matching: find.byType(Switch),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(bridge.pinCalls, [(id: 'w2', pinned: true)]);
+      expect(
+        tester
+            .widget<SettingSwitch>(
+              find.widgetWithText(SettingSwitch, 'Spending'),
+            )
+            .value,
+        isTrue,
+      );
+      expect(find.text('Setting saved'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('folded, the button says how many wallets are pinned', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        settingsApp(two(pinSecond: true), section: SettingsSection.wallets),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Advanced · 1 wallet watched live first'),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Advanced · 1 wallet watched live first'));
+      await tester.pumpAndSettle();
+      expect(find.text('Advanced'), findsOneWidget);
+    });
+
+    testWidgets('a refused pin is said under its wallet', (tester) async {
+      useTallSurface(tester);
+      final bridge = two()
+        ..onSetLivePinned = (id, pinned) {
+          throw const BridgeException('storage', 'The vault could not save.');
+        };
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.wallets),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Advanced'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.descendant(
+          of: find.widgetWithText(SettingSwitch, 'Cold storage'),
+          matching: find.byType(Switch),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('The vault could not save.'), findsOneWidget);
+      expect(
+        tester
+            .widget<SettingSwitch>(
+              find.widgetWithText(SettingSwitch, 'Cold storage'),
+            )
+            .value,
+        isFalse,
+      );
+    });
+
+    testWidgets('no wallet, no pins', (tester) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        settingsApp(FakeBridge(), section: SettingsSection.wallets),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Advanced'), findsNothing);
+    });
+  });
+
+  group('wallet order', () {
+    FakeBridge two() => FakeBridge(
+      wallets: [
+        makeMeta(id: 'w1', name: 'Cold storage'),
+        makeMeta(id: 'w2', name: 'Spending'),
+      ],
+    );
+
+    /// Where a wallet's name sits, top to bottom.
+    double top(WidgetTester tester, String name) =>
+        tester.getTopLeft(find.text(name)).dy;
+
+    testWidgets('dragging a row by its handle stores the new order', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = two();
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.wallets),
+      );
+      await tester.pumpAndSettle();
+
+      final handles = find.byIcon(LucideIcons.gripVertical);
+      expect(handles, findsNWidgets(2));
+      expect(top(tester, 'Cold storage'), lessThan(top(tester, 'Spending')));
+
+      // The handle starts the drag at once: no hold to wait out.
+      // Three quarters of a row down: far enough for the row to take
+      // the next one's place, not so far that it overshoots it.
+      final pitch = top(tester, 'Spending') - top(tester, 'Cold storage');
+      final from = tester.getCenter(handles.first);
+      final to = from + Offset(0, pitch * 0.75);
+      final gesture = await tester.startGesture(from);
+      await tester.pump();
+      await gesture.moveTo(from + const Offset(0, 30));
+      await tester.pumpAndSettle();
+      await gesture.moveTo(to);
+      await tester.pumpAndSettle();
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      // The ids of the rows shown, in their new order, and nothing else.
+      expect(bridge.reorderCalls, [
+        ['w2', 'w1'],
+      ]);
+      expect(bridge.wallets.map((w) => w.id), ['w2', 'w1']);
+      expect(top(tester, 'Spending'), lessThan(top(tester, 'Cold storage')));
+    });
+
+    testWidgets('a refused order falls back and says why', (tester) async {
+      useTallSurface(tester);
+      final bridge = two();
+      bridge.onReorderWallets = (_) =>
+          throw const BridgeException('vault', 'the vault is read only');
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.wallets),
+      );
+      await tester.pumpAndSettle();
+
+      final handles = find.byIcon(LucideIcons.gripVertical);
+      // Three quarters of a row down: far enough for the row to take
+      // the next one's place, not so far that it overshoots it.
+      final pitch = top(tester, 'Spending') - top(tester, 'Cold storage');
+      final from = tester.getCenter(handles.first);
+      final to = from + Offset(0, pitch * 0.75);
+      final gesture = await tester.startGesture(from);
+      await tester.pump();
+      await gesture.moveTo(from + const Offset(0, 30));
+      await tester.pumpAndSettle();
+      await gesture.moveTo(to);
+      await tester.pumpAndSettle();
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(bridge.reorderCalls, hasLength(1));
+      expect(find.text('the vault is read only'), findsOneWidget);
+      // Back where the vault has it.
+      expect(top(tester, 'Cold storage'), lessThan(top(tester, 'Spending')));
+    });
+
+    testWidgets('a row held at the edge scrolls the page to its place', (
+      tester,
+    ) async {
+      // A phone's frame: six rows do not fit it at once.
+      tester.view.physicalSize = const Size(411, 731);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final bridge = FakeBridge(
+        wallets: [
+          for (var i = 1; i <= 6; i++) makeMeta(id: 'w$i', name: 'Wallet $i'),
+        ],
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.wallets),
+      );
+      await tester.pumpAndSettle();
+
+      // Down to the last row, which starts below the fold.
+      await tester.scrollUntilVisible(
+        find.text('Wallet 6'),
+        200,
+        // The page's own, not the gap limit field's.
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Wallet 1'), findsNothing);
+
+      // Held just under the top edge, the row makes the page scroll
+      // under it until the first row is in reach; there it is dropped.
+      final page = tester.getRect(find.byType(CustomScrollView));
+      final handle = tester.getCenter(
+        find.byIcon(LucideIcons.gripVertical).last,
+      );
+      final gesture = await tester.startGesture(handle);
+      await tester.pump();
+      await gesture.moveTo(handle - const Offset(0, 30));
+      await tester.pump();
+      await gesture.moveTo(Offset(handle.dx, page.top + 4));
+      await tester.pumpAndSettle();
+      expect(find.text('Wallet 1'), findsOneWidget);
+      await gesture.moveBy(const Offset(0, 1));
+      await tester.pumpAndSettle();
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(bridge.reorderCalls, [
+        ['w6', 'w1', 'w2', 'w3', 'w4', 'w5'],
+      ]);
+      expect(top(tester, 'Wallet 6'), lessThan(top(tester, 'Wallet 1')));
+    });
+
+    testWidgets('one wallet has no handle', (tester) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        settingsApp(
+          FakeBridge(wallets: [makeMeta()]),
+          section: SettingsSection.wallets,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.byIcon(LucideIcons.gripVertical), findsNothing);
+    });
+  });
+
+  testWidgets(
+    'removing a wallet asks in a panel, the buttons under the words',
+    (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(wallets: [makeMeta(name: 'Cold storage')]);
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.wallets),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Remove'));
+      await tester.pumpAndSettle();
+
+      const sentence =
+          'You are removing "Cold storage" from Gerfaut. This only stops '
+          'watching. Nothing moves on chain.';
+      final notice = tester.widget<GerfautNotice>(find.byType(GerfautNotice));
+      expect(notice.tone, NoticeTone.info);
+      expect(notice.actionsBelow, isTrue);
+      expect(find.text(sentence), findsOneWidget);
+
+      // The sentence has the whole width; the two buttons share a row of
+      // their own under it, the way out first and the destructive one at
+      // the end.
+      final words = tester.getRect(find.text(sentence));
+      final cancel = tester.getRect(
+        find.widgetWithText(SecondaryButton, 'Cancel'),
+      );
+      final remove = tester.getRect(
+        find.widgetWithText(DangerButton, 'Remove wallet'),
+      );
+      final panel = tester.getRect(find.byType(GerfautNotice));
+      expect(words.width, greaterThan(panel.width * 0.7));
+      expect(cancel.top, greaterThanOrEqualTo(words.bottom));
+      expect(remove.top, greaterThanOrEqualTo(words.bottom));
+      expect(cancel.center.dy, closeTo(remove.center.dy, 1));
+      expect(cancel.right, lessThan(remove.left));
+      expect(remove.right, closeTo(panel.right - 12, 1));
+      expect(remove.height, GerfautTouch.target);
+
+      // Nothing has moved yet; Cancel closes the panel and keeps the row.
+      expect(bridge.wallets, hasLength(1));
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(find.byType(GerfautNotice), findsNothing);
+      expect(find.text('Cold storage'), findsOneWidget);
+
+      await tester.tap(find.text('Remove'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Remove wallet'));
+      await tester.pumpAndSettle();
+      expect(bridge.wallets, isEmpty);
+      expect(find.text('Wallet removed'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+    },
+  );
+
+  testWidgets('the confirmation buttons stack at twice the text size', (
+    tester,
+  ) async {
+    // A small phone, the text doubled: "Cancel" and "Remove wallet" no
+    // longer share a line, and used to run past the panel's edge — an
+    // overflow the framework reports, which is what fails this test.
+    tester.view.physicalSize = const Size(360, 3600);
+    tester.view.devicePixelRatio = 1;
+    tester.platformDispatcher.textScaleFactorTestValue = 2;
+    addTearDown(tester.view.reset);
+    addTearDown(tester.platformDispatcher.clearAllTestValues);
+    final bridge = FakeBridge(wallets: [makeMeta(name: 'Cold storage')]);
+    await tester.pumpWidget(
+      settingsApp(bridge, section: SettingsSection.wallets),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+
+    final cancel = tester.getRect(
+      find.widgetWithText(SecondaryButton, 'Cancel'),
+    );
+    final remove = tester.getRect(
+      find.widgetWithText(DangerButton, 'Remove wallet'),
+    );
+    final panel = tester.getRect(find.byType(GerfautNotice));
+    // Two lines, the deed last, both inside the panel and full targets.
+    expect(remove.top, greaterThanOrEqualTo(cancel.bottom));
+    expect(remove.right, lessThanOrEqualTo(panel.right));
+    expect(cancel.right, lessThanOrEqualTo(panel.right));
+    expect(remove.height, GerfautTouch.target);
+    expect(cancel.height, GerfautTouch.target);
+
+    await tester.tap(find.text('Remove wallet'));
+    await tester.pumpAndSettle();
+    expect(bridge.wallets, isEmpty);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('the gap limit is seeded from the settings and committed', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge(
+      settings: const Settings(
+        preferences: kPreferences,
+        activeNetwork: Network.mainnet,
+        backends: {},
+        appPrefs: {},
+        gapLimit: 25,
+      ),
+    );
+    await tester.pumpWidget(
+      settingsApp(bridge, section: SettingsSection.wallets),
+    );
+    await tester.pumpAndSettle();
+
+    // Seeded from the vault settings.
+    expect(find.text('Gap limit'), findsOneWidget);
+    expect(find.widgetWithText(TextField, '25'), findsOneWidget);
+
+    await tester.enterText(find.widgetWithText(TextField, '25'), '45');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(bridge.lastGapLimitSet, 45);
+    expect(bridge.settings.gapLimit, 45);
+    expect(find.text('Setting saved'), findsOneWidget);
+
+    // Flush the snackbar timer.
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+  });
+
+  testWidgets('an invalid gap limit snaps back without noise', (tester) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge();
+    await tester.pumpWidget(
+      settingsApp(bridge, section: SettingsSection.wallets),
+    );
+    await tester.pumpAndSettle();
+
+    // Out of range: nothing saved, the field returns to the current
+    // value, no toast.
+    await tester.enterText(find.widgetWithText(TextField, '20'), '600');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(bridge.lastGapLimitSet, isNull);
+    expect(bridge.settings.gapLimit, 20);
+    expect(find.widgetWithText(TextField, '20'), findsOneWidget);
+    expect(find.text('Setting saved'), findsNothing);
+
+    // Cleared entirely: same silent return.
+    await tester.enterText(find.widgetWithText(TextField, '20'), '');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(bridge.lastGapLimitSet, isNull);
+    expect(find.widgetWithText(TextField, '20'), findsOneWidget);
+  });
+
+  group('display currency', () {
+    /// Turns the fiat display on: the currency and source controls only
+    /// exist once it is.
+    Future<void> enableFiat(WidgetTester tester) async {
+      await tester.tap(find.byType(Switch).first);
+      await tester.pumpAndSettle();
+    }
+
+    GerfautSelect<FiatCurrency> currencyField(WidgetTester tester) {
+      return tester.widget<GerfautSelect<FiatCurrency>>(
+        find.byType(GerfautSelect<FiatCurrency>),
+      );
+    }
+
+    InkWell sourcePill(WidgetTester tester, String label) {
+      return tester.widget<InkWell>(
+        find.ancestor(of: find.text(label), matching: find.byType(InkWell)),
+      );
+    }
+
+    testWidgets('every currency is offered, grouped by what quotes it', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        settingsApp(FakeBridge(), section: SettingsSection.general),
+      );
+      await tester.pumpAndSettle();
+      await enableFiat(tester);
+
+      final groups = currencyField(tester).groups;
+      // Every currency the core lists, in its order, in two named groups.
+      expect(groups, hasLength(2));
+      expect([
+        for (final group in groups) ...group.items.map((i) => i.value),
+      ], kPriceTable.currencies.map((entry) => entry.currency));
+      // The ones every source quotes come first, then the ones
+      // CoinGecko alone serves, each with its name beside the code.
+      expect(groups.first.label, 'Every source');
+      expect(groups.first.items, hasLength(4));
+      expect(groups.first.items.first.subtitle, 'Euro');
+      expect(groups.last.label, 'CoinGecko only');
+      expect(groups.last.items, hasLength(3));
+    });
+
+    testWidgets('the currency list reads group by group', (tester) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        settingsApp(FakeBridge(), section: SettingsSection.general),
+      );
+      await tester.pumpAndSettle();
+      await enableFiat(tester);
+
+      await tester.tap(find.byType(GerfautSelect<FiatCurrency>));
+      await tester.pumpAndSettle();
+
+      expect(find.text('EVERY SOURCE'), findsOneWidget);
+      expect(find.text('Euro'), findsWidgets);
+      expect(find.text('US dollar'), findsOneWidget);
+
+      // The second group sits below the fold of a phone-sized menu.
+      await tester.scrollUntilVisible(
+        find.text('COINGECKO ONLY'),
+        120,
+        scrollable: find.byType(Scrollable).last,
+      );
+      expect(find.text('COINGECKO ONLY'), findsOneWidget);
+      expect(find.text('Indian rupee'), findsOneWidget);
+    });
+
+    testWidgets('picking a currency saves it', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.general),
+      );
+      await tester.pumpAndSettle();
+      await enableFiat(tester);
+
+      await tester.tap(find.byType(GerfautSelect<FiatCurrency>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('US dollar'));
+      await tester.pumpAndSettle();
+
+      expect(currencyField(tester).value, FiatCurrency('usd'));
+      expect(bridge.preferences.fiatCurrency, FiatCurrency('usd'));
+    });
+
+    testWidgets('a CoinGecko-only currency moves the source over', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.general),
+      );
+      await tester.pumpAndSettle();
+      await enableFiat(tester);
+
+      // mempool.space by default, first, as the core lists it.
+      expect(bridge.preferences.priceSource, PriceSource.mempoolSpace);
+      expect(
+        tester.getTopLeft(find.text('mempool.space')).dx,
+        lessThan(tester.getTopLeft(find.text('CoinGecko')).dx),
+      );
+      expect(sourcePill(tester, 'mempool.space').onTap, isNotNull);
+
+      currencyField(tester).onChanged!(FiatCurrency('ngn'));
+      await tester.pumpAndSettle();
+
+      // Only the currency is asked for: the core moves the source, and
+      // the screen shows the one it kept.
+      expect(bridge.preferencesChanges.last.toJson(), {'fiat_currency': 'ngn'});
+      expect(bridge.preferences.fiatCurrency, FiatCurrency('ngn'));
+      expect(bridge.preferences.priceSource, PriceSource.coingecko);
+      expect(
+        find.text('CoinGecko is the only source that quotes NGN.'),
+        findsOneWidget,
+      );
+      // The source that cannot quote it is out of reach, not silently
+      // wrong.
+      expect(sourcePill(tester, 'mempool.space').onTap, isNull);
+      expect(sourcePill(tester, 'CoinGecko').onTap, isNotNull);
+      expect(
+        tester.widget<Text>(find.text('mempool.space')).style!.color,
+        GerfautTokens.light.textMuted,
+      );
+
+      // Back to a currency everyone quotes: the sources return, and
+      // the one the core kept stays.
+      currencyField(tester).onChanged!(FiatCurrency('chf'));
+      await tester.pumpAndSettle();
+      expect(sourcePill(tester, 'mempool.space').onTap, isNotNull);
+      expect(bridge.preferences.priceSource, PriceSource.coingecko);
+      expect(find.textContaining('the only source that quotes'), findsNothing);
+    });
+
+    testWidgets('CoinGecko is credited while it serves the price', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        settingsApp(FakeBridge(), section: SettingsSection.general),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Powered by CoinGecko'), findsNothing);
+
+      await enableFiat(tester);
+      // mempool.space, the default, asks for no credit.
+      expect(find.text('Powered by CoinGecko'), findsNothing);
+
+      await tester.tap(find.text('CoinGecko'));
+      await tester.pumpAndSettle();
+      expect(find.text('Powered by CoinGecko'), findsOneWidget);
+      // The API terms ask for a legible line, not a hidden one: 12 px,
+      // under the page, after the rate it comes with.
+      expect(
+        tester.widget<Text>(find.text('Powered by CoinGecko')).style!.fontSize!,
+        greaterThanOrEqualTo(12),
+      );
+      expect(
+        tester.getTopLeft(find.text('Powered by CoinGecko')).dy,
+        greaterThan(tester.getTopLeft(find.textContaining('1 BTC =')).dy),
+      );
+
+      // Back to mempool.space: the credit goes.
+      await tester.tap(find.text('mempool.space'));
+      await tester.pumpAndSettle();
+      expect(find.text('Powered by CoinGecko'), findsNothing);
+    });
+
+    testWidgets('a disabled source announces itself as such', (tester) async {
+      useTallSurface(tester);
+      final handle = tester.ensureSemantics();
+      await tester.pumpWidget(
+        settingsApp(FakeBridge(), section: SettingsSection.general),
+      );
+      await tester.pumpAndSettle();
+      await enableFiat(tester);
+
+      currencyField(tester).onChanged!(FiatCurrency('inr'));
+      await tester.pumpAndSettle();
+
+      final mempool = tester.getSemantics(find.text('mempool.space'));
+      expect(mempool.label, 'mempool.space');
+      expect(mempool.flagsCollection.isEnabled, Tristate.isFalse);
+      final coingecko = tester.getSemantics(find.text('CoinGecko'));
+      expect(coingecko.flagsCollection.isEnabled, Tristate.isTrue);
+      expect(coingecko.flagsCollection.isSelected, Tristate.isTrue);
+      handle.dispose();
+    });
+  });
+
+  testWidgets('a network switch the vault refuses is said, nothing moves', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()
+      ..onSetActiveNetwork = (_) {
+        throw const BridgeException('storage', 'The vault could not save.');
+      };
+    await tester.pumpWidget(
+      settingsApp(bridge, section: SettingsSection.network),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Signet'));
+    await tester.pumpAndSettle();
+    expect(find.text('The vault could not save.'), findsOneWidget);
+    expect(find.text('Setting saved'), findsNothing);
+    expect(find.text('Backend · Mainnet'), findsOneWidget);
+  });
+
+  testWidgets('the network and backend cards read as one choice of many', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final handle = tester.ensureSemantics();
+    await tester.pumpWidget(
+      settingsApp(FakeBridge(), section: SettingsSection.network),
+    );
+    await tester.pumpAndSettle();
+
+    final mainnet = tester.getSemantics(
+      find.bySemanticsLabel(RegExp('^Mainnet')),
+    );
+    expect(mainnet.flagsCollection.isSelected, Tristate.isTrue);
+    expect(mainnet.flagsCollection.isInMutuallyExclusiveGroup, isTrue);
+    final signet = tester.getSemantics(
+      find.bySemanticsLabel(RegExp('^Signet')),
+    );
+    expect(signet.flagsCollection.isSelected, Tristate.isFalse);
+    final public = tester.getSemantics(
+      find.bySemanticsLabel(RegExp('^Public API')),
+    );
+    expect(public.flagsCollection.isSelected, Tristate.isTrue);
+    // The card titles are headings to jump between.
+    expect(
+      tester
+          .getSemantics(find.bySemanticsLabel('Network').first)
+          .flagsCollection
+          .isHeader,
+      isTrue,
+    );
+    handle.dispose();
+  });
+
+  group('public server choice', () {
+    testWidgets('the public backend defaults to the automatic rotation', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      // The Tor card offers an "Automatic" of its own: this one is the
+      // server picker's.
+      expect(
+        find.descendant(
+          of: find.byType(GerfautSelect<String?>),
+          matching: find.text('Automatic'),
+        ),
+        findsOneWidget,
+      );
+      // What it does is a line of the open list; closed, the field
+      // still says it to a screen reader.
+      expect(find.text('Rotates over every public Esplora.'), findsNothing);
+      expect(
+        tester.getSemantics(find.byType(GerfautSelect<String?>)).value,
+        'Automatic, Rotates over every public Esplora.',
+      );
+      // The hint says who answers, and nothing about fee estimates: the
+      // app no longer serves any.
+      expect(find.textContaining('fee estimates'), findsNothing);
+
+      await tester.tap(find.text('Save backend'));
+      await tester.pumpAndSettle();
+
+      final saved = bridge.savedBackends[Network.mainnet]! as PublicEsplora;
+      expect(saved.server, isNull);
+      expect(saved.toJson(), {'type': 'public_esplora'});
+    });
+
+    testWidgets('a chosen server gives way to Automatic again', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(
+        settings: const Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.mainnet,
+          backends: {
+            Network.mainnet: PublicEsplora(server: 'blockstream.info'),
+          },
+          appPrefs: {},
+        ),
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+      expect(serverField(tester).value, 'blockstream.info');
+
+      // Picked from the menu as a finger would, not handed to the field.
+      await tester.tap(find.byType(GerfautSelect<String?>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Automatic').last);
+      await tester.pumpAndSettle();
+      expect(serverField(tester).value, isNull);
+
+      await tester.tap(find.text('Save backend'));
+      await tester.pumpAndSettle();
+      final saved = bridge.savedBackends[Network.mainnet]! as PublicEsplora;
+      expect(saved.server, isNull);
+    });
+
+    testWidgets('a server the core no longer offers is named, until another '
+        'is chosen', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(
+        settings: const Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.mainnet,
+          backends: {
+            Network.mainnet: PublicEsplora(
+              server: 'electrum:retired.example.org',
+            ),
+          },
+          appPrefs: {},
+        ),
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      const said =
+          'The server you chose, retired.example.org, is no longer offered. '
+          'Gerfaut tries the public servers in turn until you choose '
+          'another.';
+      expect(find.text(said), findsOneWidget);
+      // The field falls back to Automatic, as the core does.
+      expect(serverField(tester).value, isNull);
+
+      await tester.tap(find.byType(GerfautSelect<String?>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('blockstream.info').last);
+      await tester.pumpAndSettle();
+      expect(find.text(said), findsNothing);
+
+      await tester.tap(find.text('Save backend'));
+      await tester.pumpAndSettle();
+      expect(find.text(said), findsNothing);
+      expect(find.textContaining('is no longer offered'), findsNothing);
+    });
+
+    testWidgets('a server still offered says nothing of the kind', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(
+        settings: const Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.mainnet,
+          backends: {
+            Network.mainnet: PublicEsplora(server: 'blockstream.info'),
+          },
+          appPrefs: {},
+        ),
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('is no longer offered'), findsNothing);
+    });
+
+    testWidgets('every server of the network is offered, protocol included', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        settingsApp(FakeBridge(), section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      final items = serverField(tester).items;
+      // The automatic rotation, then every mainnet server the core
+      // lists, in its order, each labelled with its host.
+      expect(items.first.title, 'Automatic');
+      expect(items.first.value, isNull);
+      expect(
+        items.skip(1).map((item) => item.title).toList(),
+        defaultPublicServers[Network.mainnet]!.map((s) => s.label).toList(),
+      );
+      // Three Esplora instances, seven Electrum servers, each marked.
+      expect(items.where((i) => i.subtitle == 'Esplora'), hasLength(3));
+      expect(
+        items.where((i) => i.subtitle?.startsWith('Electrum') ?? false),
+        hasLength(7),
+      );
+    });
+
+    testWidgets('choosing a server stores its identifier', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(GerfautSelect<String?>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('blockstream.info').last);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Save backend'));
+      await tester.pumpAndSettle();
+
+      final saved = bridge.savedBackends[Network.mainnet]! as PublicEsplora;
+      expect(saved.server, 'blockstream.info');
+      expect(saved.toJson(), {
+        'type': 'public_esplora',
+        'server': 'blockstream.info',
+      });
+    });
+
+    // The core reads a single address from an Electrum server as it does
+    // from an Esplora one: choosing one carries no caveat.
+    testWidgets('an Electrum server is chosen like any other', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      final field = tester.widget<GerfautSelect<String?>>(
+        find.byType(GerfautSelect<String?>),
+      );
+      field.onChanged!('electrum:electrum.diynodes.com');
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('single-address'), findsNothing);
+
+      await tester.tap(find.text('Save backend'));
+      await tester.pumpAndSettle();
+      expect(
+        (bridge.savedBackends[Network.mainnet]! as PublicEsplora).server,
+        'electrum:electrum.diynodes.com',
+      );
+    });
+
+    testWidgets('the choice is re-seeded when the network changes', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(
+        settings: const Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.mainnet,
+          backends: {
+            Network.mainnet: PublicEsplora(server: 'blockstream.info'),
+            Network.signet: PublicEsplora(server: 'mempool.emzy.de'),
+          },
+          appPrefs: {},
+        ),
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<GerfautSelect<String?>>(find.byType(GerfautSelect<String?>))
+            .value,
+        'blockstream.info',
+      );
+
+      await tester.tap(find.text('Signet'));
+      await tester.pumpAndSettle();
+
+      expect(
+        tester
+            .widget<GerfautSelect<String?>>(find.byType(GerfautSelect<String?>))
+            .value,
+        'mempool.emzy.de',
+      );
+      // Signet has no electrum.diynodes.com: the list follows the network.
+      expect(find.text('electrum.diynodes.com:50022'), findsNothing);
+    });
+
+    testWidgets('a network without a public server says so', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(
+        settings: const Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.regtest,
+          backends: {},
+          appPrefs: {},
+        ),
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(GerfautSelect<String?>), findsNothing);
+      expect(
+        find.textContaining('No public server exists on Regtest'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a self-signed server says so before it is picked', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      final items = serverField(tester).items;
+      final selfSigned = items.firstWhere(
+        (item) => item.title == 'bitcoin.lu.ke:50002',
+      );
+      expect(selfSigned.subtitle, 'Electrum · signs its own certificate');
+      // A server a public authority vouches for says nothing more.
+      expect(
+        items
+            .firstWhere((i) => i.title == 'electrum.diynodes.com:50022')
+            .subtitle,
+        'Electrum',
+      );
+
+      // Picked, it repeats it under the field: the hint line closes
+      // with the menu.
+      serverField(tester).onChanged!('electrum:bitcoin.lu.ke');
+      await tester.pumpAndSettle();
+      expect(
+        find.text(
+          'This server signs its own certificate. Gerfaut shows you its '
+          'fingerprint before it connects.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('an unreachable catalogue degrades to a quiet line', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      bridge.onPublicServers = (_) {
+        throw const BridgeException('not_initialized', 'call init first');
+      };
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byType(GerfautSelect<String?>), findsNothing);
+      expect(
+        find.textContaining('The server list is unavailable'),
+        findsOneWidget,
+      );
+      // The backend still saves: automatic is the fallback anyway.
+      await tester.tap(find.text('Save backend'));
+      await tester.pumpAndSettle();
+      expect(bridge.savedBackends[Network.mainnet], isA<PublicEsplora>());
+    });
+  });
+
+  group('electrum certificates', () {
+    /// A workspace already pointed at a self-hosted Electrum server, so
+    /// saving the backend is one tap.
+    FakeBridge ownElectrum({Map<String, String> certs = const {}}) {
+      return FakeBridge(
+        settings: Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.mainnet,
+          backends: const {
+            Network.mainnet: CustomElectrum(url: 'ssl://node.local:50002'),
+          },
+          appPrefs: const {},
+          electrumCerts: certs,
+        ),
+      );
+    }
+
+    Future<void> save(WidgetTester tester) async {
+      await tester.tap(find.text('Save backend'));
+      await tester.pumpAndSettle();
+    }
+
+    const unknown = UnknownCertificate(
+      fingerprint: _fingerprint,
+      reason:
+          'self-signed, or signed by an authority this machine does '
+          'not know',
+      subject: 'CN=node.local',
+      expires: 1893456000,
+    );
+
+    testWidgets('an address the core refuses is said, and nothing saved', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      const reason =
+          'invalid server address: x.onion:50001 is not a server name';
+      final bridge = ownElectrum();
+      bridge.onInspectCertificate = (_) =>
+          const UnreachableCertificate(detail: 'not a server name');
+      bridge.onSetBackend = (_, _) =>
+          throw coreFailure('invalid_input', reason);
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      expect(find.text(reason), findsOneWidget);
+      expect(find.text('Setting saved'), findsNothing);
+      expect(bridge.savedBackends, isEmpty);
+      // Announced: nothing else on screen says the save was turned down.
+      final handle = tester.ensureSemantics();
+      expect(
+        tester.getSemantics(find.text(reason)).flagsCollection.isLiveRegion,
+        isTrue,
+      );
+      handle.dispose();
+    });
+
+    // A key or a seed typed as the host, its port after it as in a
+    // one-line address: the core refuses it as private material at
+    // every call. The page goes past the check of the certificate, as
+    // for a server that did not answer, and says the refusal of the
+    // save in its own words, never in the secret's.
+    for (final (what, typed, shown) in [
+      (
+        'a seed phrase',
+        '${List.filled(11, 'abandon').join(' ')} about:50002',
+        'abandon',
+      ),
+      ('an extended private key', 'xprv9s21ZrQH143Kexample:50002', 'xprv'),
+    ]) {
+      testWidgets('$what typed as the host is refused, and never quoted', (
+        tester,
+      ) async {
+        useTallSurface(tester);
+        final bridge = ownElectrum();
+        final private = coreFailure('private_material');
+        bridge.onInspectCertificate = (_) => throw private;
+        bridge.onSetBackend = (_, _) => throw private;
+        await tester.pumpWidget(
+          settingsApp(bridge, section: SettingsSection.network),
+        );
+        await tester.pumpAndSettle();
+        await tester.enterText(find.byType(TextField).first, typed);
+        await tester.pumpAndSettle();
+        await save(tester);
+
+        expect(bridge.inspectedCertificates, ['ssl://$typed:50002']);
+        // The screen's own sentence, not the core's words.
+        expect(find.text(privateKeyNotAServer), findsOneWidget);
+        expect(find.text(private.message), findsNothing);
+        // The field holds what was typed; nothing else on the page does.
+        expect(find.textContaining(shown), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(TextField).first,
+            matching: find.textContaining(shown),
+          ),
+          findsOneWidget,
+        );
+        expect(find.text('Setting saved'), findsNothing);
+        expect(bridge.savedBackends, isEmpty);
+        expect(bridge.trustedCertificates, isEmpty);
+      });
+    }
+
+    testWidgets('an unvouched certificate is shown before anything is saved', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum();
+      bridge.onInspectCertificate = (_) => unknown;
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      // Checked over the endpoint the backend is about to use.
+      expect(bridge.inspectedCertificates, ['ssl://node.local:50002']);
+      expect(
+        find.text('This server signs its own certificate'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining(
+          'No public authority vouches for the certificate of node.local:50002',
+        ),
+        findsOneWidget,
+      );
+
+      // The fingerprint, in mono, in rows of eight byte pairs.
+      final digits = tester.widget<Text>(
+        find.text(groupFingerprint(_fingerprint)),
+      );
+      expect(digits.style!.fontFamily, GerfautTokens.light.data.fontFamily);
+      expect(groupFingerprint(_fingerprint).split('\n'), hasLength(4));
+
+      // What the certificate says about itself, and why nothing vouches.
+      expect(
+        find.text(
+          'Why it is asked: self-signed, or signed by an authority this '
+          'machine does not know',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Subject: CN=node.local'), findsOneWidget);
+      expect(
+        find.text('Valid until: ${formatTimestamp(1893456000)}'),
+        findsOneWidget,
+      );
+      // And how to read the same string off the server itself.
+      expect(
+        find.text('openssl x509 -noout -fingerprint -sha256 -in <cert>'),
+        findsOneWidget,
+      );
+
+      // Nothing is decided yet.
+      expect(bridge.trustedCertificates, isEmpty);
+      expect(bridge.savedBackends, isEmpty);
+    });
+
+    testWidgets('cancelling trusts nothing and saves nothing', (tester) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum();
+      bridge.onInspectCertificate = (_) => unknown;
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('This server signs its own certificate'), findsNothing);
+      expect(bridge.trustedCertificates, isEmpty);
+      expect(bridge.savedBackends, isEmpty);
+      expect(bridge.settings.electrumCerts, isEmpty);
+      expect(find.text('Trusted certificates'), findsNothing);
+    });
+
+    testWidgets('accepting saves the backend with the fingerprint', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum();
+      bridge.onInspectCertificate = (_) => unknown;
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      await tester.tap(find.text('Accept and save'));
+      await tester.pumpAndSettle();
+
+      expect(bridge.trustedCertificates, [
+        (url: 'ssl://node.local:50002', fingerprint: _fingerprint),
+      ]);
+      expect(
+        (bridge.savedBackends[Network.mainnet]! as CustomElectrum).url,
+        'ssl://node.local:50002',
+      );
+      // Recorded against the socket, and listed from there on.
+      expect(bridge.settings.electrumCerts, {'node.local:50002': _fingerprint});
+      expect(find.text('Trusted certificates'), findsOneWidget);
+    });
+
+    testWidgets('a certificate a public authority vouches for asks nothing', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum();
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      expect(find.text('This server signs its own certificate'), findsNothing);
+      expect(bridge.trustedCertificates, isEmpty);
+      expect(bridge.savedBackends[Network.mainnet], isA<CustomElectrum>());
+    });
+
+    testWidgets('a plain TCP server is saved, and said so calmly', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum();
+      bridge.onInspectCertificate = (_) => const NotTlsCertificate();
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(bridge.savedBackends[Network.mainnet], isA<CustomElectrum>());
+      expect(
+        find.text(
+          'No TLS: what Gerfaut asks this server and '
+          'what it answers travel in the clear.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    /// A workspace pointed at an Esplora instance of one's own at [url].
+    FakeBridge ownEsplora(String url) {
+      return FakeBridge(
+        settings: Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.mainnet,
+          backends: {Network.mainnet: CustomEsplora(url: url)},
+          appPrefs: const {},
+          electrumCerts: const {},
+        ),
+      );
+    }
+
+    const inTheClear =
+        'No TLS: what Gerfaut asks this server and '
+        'what it answers travel in the clear.';
+
+    // Plain HTTP reads like plain TCP to anything on the path, so it is
+    // said the same way. An onion is carried encrypted by Tor whatever
+    // the scheme, whichever way its name is written.
+    for (final (url, said) in [
+      ('http://192.168.1.20:3002/api', true),
+      (' HTTP://node.local/api ', true),
+      ('https://node.local:3002/api', false),
+      ('http://abcdef.onion/api', false),
+      ('http://abcdef.ONION./api', false),
+    ]) {
+      testWidgets(
+        'an Esplora at $url is ${said ? '' : 'not '}said to be in the clear',
+        (tester) async {
+          useTallSurface(tester);
+          final bridge = ownEsplora(url);
+          await tester.pumpWidget(
+            settingsApp(bridge, section: SettingsSection.network),
+          );
+          await tester.pumpAndSettle();
+          await save(tester);
+
+          expect(bridge.inspectedCertificates, isEmpty);
+          expect(bridge.savedBackends[Network.mainnet], isA<CustomEsplora>());
+          expect(find.text(inTheClear), said ? findsOneWidget : findsNothing);
+        },
+      );
+    }
+
+    testWidgets('a server that does not answer is saved anyway', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum();
+      bridge.onInspectCertificate = (_) =>
+          const UnreachableCertificate(detail: 'connection refused');
+      bridge.onCheckBackend = (_) =>
+          backendCheckCase('refused', {'host': 'node.local:50002'});
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(bridge.savedBackends[Network.mainnet], isA<CustomElectrum>());
+      // The test that follows the save says why, in place of a note on
+      // the certificate.
+      expect(
+        find.text('Could not connect to node.local:50002'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('certificate is unchecked'), findsNothing);
+    });
+
+    testWidgets('a changed certificate is refused, and never by default', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum(
+        certs: const {'node.local:50002': _fingerprint},
+      );
+      bridge.onInspectCertificate = (_) => const ChangedCertificate(
+        stored: _fingerprint,
+        presented: _otherFingerprint,
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      expect(find.text("This server's certificate changed"), findsOneWidget);
+      expect(
+        find.textContaining(
+          'node.local:50002 was accepted with one certificate and now '
+          'presents another',
+        ),
+        findsOneWidget,
+      );
+      // One panel component carries both tones, so no caller derives
+      // its own — and this one is red, which is what a fingerprint that
+      // changed under you is for.
+      expect(
+        tester
+            .widget<GerfautNotice>(
+              find.ancestor(
+                of: find.textContaining('was accepted with one certificate'),
+                matching: find.byType(GerfautNotice),
+              ),
+            )
+            .tone,
+        NoticeTone.alert,
+      );
+      // Both fingerprints, side by side, so the difference is visible.
+      expect(find.text('ACCEPTED BEFORE'), findsOneWidget);
+      expect(find.text('PRESENTED NOW'), findsOneWidget);
+      expect(find.text(groupFingerprint(_otherFingerprint)), findsOneWidget);
+      // Backing out is the prominent action, trusting is not.
+      expect(find.widgetWithText(PrimaryButton, 'Cancel'), findsOneWidget);
+      expect(
+        find.widgetWithText(PrimaryButton, 'Trust the new certificate'),
+        findsNothing,
+      );
+
+      // One tap accepts nothing: it only asks again, in so many words.
+      await tester.tap(find.text('Trust the new certificate'));
+      await tester.pumpAndSettle();
+      expect(bridge.trustedCertificates, isEmpty);
+      expect(
+        find.textContaining('Do it only if you know why it changed.'),
+        findsOneWidget,
+      );
+
+      // Backing out at the second step leaves everything as it was.
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(bridge.trustedCertificates, isEmpty);
+      expect(bridge.savedBackends, isEmpty);
+      expect(bridge.settings.electrumCerts, {'node.local:50002': _fingerprint});
+    });
+
+    testWidgets('the new certificate is taken only after two deliberate taps', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum(
+        certs: const {'node.local:50002': _fingerprint},
+      );
+      bridge.onInspectCertificate = (_) => const ChangedCertificate(
+        stored: _fingerprint,
+        presented: _otherFingerprint,
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      await tester.tap(find.text('Trust the new certificate'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Trust it anyway'));
+      await tester.pumpAndSettle();
+
+      expect(bridge.trustedCertificates, [
+        (url: 'ssl://node.local:50002', fingerprint: _otherFingerprint),
+      ]);
+      expect(bridge.savedBackends[Network.mainnet], isA<CustomElectrum>());
+      expect(bridge.settings.electrumCerts, {
+        'node.local:50002': _otherFingerprint,
+      });
+    });
+
+    group('a certificate is kept with its backend or not at all', () {
+      const reason = 'invalid server address: not a server name';
+
+      testWidgets('accepted, then the server refused: nothing trusted', (
+        tester,
+      ) async {
+        useTallSurface(tester);
+        final bridge = ownElectrum();
+        bridge.onInspectCertificate = (_) => unknown;
+        bridge.onSetBackend = (_, _) =>
+            throw coreFailure('invalid_input', reason);
+        await tester.pumpWidget(
+          settingsApp(bridge, section: SettingsSection.network),
+        );
+        await tester.pumpAndSettle();
+        await save(tester);
+        await tester.tap(find.text('Accept and save'));
+        await tester.pumpAndSettle();
+
+        expect(find.text(reason), findsOneWidget);
+        expect(bridge.savedBackends, isEmpty);
+        expect(bridge.trustedCertificates, isEmpty);
+        expect(bridge.settings.electrumCerts, isEmpty);
+        expect(find.text('Trusted certificates'), findsNothing);
+      });
+
+      testWidgets('a fingerprint trusted before stays the one trusted', (
+        tester,
+      ) async {
+        useTallSurface(tester);
+        final bridge = ownElectrum(
+          certs: const {'node.local:50002': _fingerprint},
+        );
+        bridge.onInspectCertificate = (_) => const ChangedCertificate(
+          stored: _fingerprint,
+          presented: _otherFingerprint,
+        );
+        bridge.onSetBackend = (_, _) =>
+            throw coreFailure('invalid_input', reason);
+        await tester.pumpWidget(
+          settingsApp(bridge, section: SettingsSection.network),
+        );
+        await tester.pumpAndSettle();
+        await save(tester);
+        await tester.tap(find.text('Trust the new certificate'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Trust it anyway'));
+        await tester.pumpAndSettle();
+
+        expect(find.text(reason), findsOneWidget);
+        expect(bridge.settings.electrumCerts, {
+          'node.local:50002': _fingerprint,
+        });
+      });
+
+      testWidgets('accepted and saved in one write', (tester) async {
+        useTallSurface(tester);
+        final bridge = ownElectrum();
+        bridge.onInspectCertificate = (_) => unknown;
+        await tester.pumpWidget(
+          settingsApp(bridge, section: SettingsSection.network),
+        );
+        await tester.pumpAndSettle();
+        await save(tester);
+        await tester.tap(find.text('Accept and save'));
+        await tester.pumpAndSettle();
+
+        expect(bridge.trustedCertificates, [
+          (url: 'ssl://node.local:50002', fingerprint: _fingerprint),
+        ]);
+        expect(bridge.settings.electrumCerts, {
+          'node.local:50002': _fingerprint,
+        });
+        expect(bridge.savedBackends[Network.mainnet], isA<CustomElectrum>());
+      });
+
+      testWidgets('a public Electrum server keeps its certificate too', (
+        tester,
+      ) async {
+        useTallSurface(tester);
+        final bridge = FakeBridge();
+        bridge.onInspectCertificate = (_) => unknown;
+        await tester.pumpWidget(
+          settingsApp(bridge, section: SettingsSection.network),
+        );
+        await tester.pumpAndSettle();
+        serverField(tester).onChanged!('electrum:electrum.diynodes.com');
+        await tester.pumpAndSettle();
+        await save(tester);
+        await tester.tap(find.text('Accept and save'));
+        await tester.pumpAndSettle();
+
+        expect(
+          (bridge.savedBackends[Network.mainnet]! as PublicEsplora).server,
+          'electrum:electrum.diynodes.com',
+        );
+        expect(bridge.settings.electrumCerts, {
+          'electrum.diynodes.com:50022': _fingerprint,
+        });
+      });
+    });
+
+    testWidgets('accepted certificates are listed, and forgotten on request', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum(
+        certs: const {'node.local:50002': _fingerprint},
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Trusted certificates'), findsOneWidget);
+      expect(find.text('node.local:50002'), findsOneWidget);
+      expect(find.text(groupFingerprint(_fingerprint)), findsOneWidget);
+
+      // Forgetting asks first.
+      await tester.tap(find.text('Forget'));
+      await tester.pumpAndSettle();
+      expect(bridge.forgottenCertificates, isEmpty);
+      expect(
+        find.text(
+          'Syncs with node.local:50002 will fail until you press Save '
+          'backend again and accept its certificate.',
+        ),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(bridge.forgottenCertificates, isEmpty);
+      expect(bridge.settings.electrumCerts, isNotEmpty);
+
+      await tester.tap(find.text('Forget'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Forget certificate'));
+      await tester.pumpAndSettle();
+
+      expect(bridge.forgottenCertificates, ['node.local:50002']);
+      expect(bridge.settings.electrumCerts, isEmpty);
+      // The section goes with the last certificate it listed.
+      expect(find.text('Trusted certificates'), findsNothing);
+    });
+
+    testWidgets('every electrum server is checked before it is saved', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      // A public Esplora is reached over the web PKI like any web site:
+      // there is nothing to settle.
+      await save(tester);
+      expect(bridge.inspectedCertificates, isEmpty);
+
+      // Every Electrum server is checked, whether the catalogue calls it
+      // self-signed or not: what it presents today is what counts.
+      serverField(tester).onChanged!('electrum:electrum.diynodes.com');
+      await tester.pumpAndSettle();
+      await save(tester);
+      expect(bridge.inspectedCertificates, [
+        'ssl://electrum.diynodes.com:50022',
+      ]);
+
+      serverField(tester).onChanged!('electrum:bitcoin.lu.ke');
+      await tester.pumpAndSettle();
+      await save(tester);
+      expect(bridge.inspectedCertificates, [
+        'ssl://electrum.diynodes.com:50022',
+        'ssl://bitcoin.lu.ke:50002',
+      ]);
+    });
+
+    group('leaving while the server is checked', () {
+      /// The Network page pushed from the root list, as the app opens
+      /// it, with a save of [bridge]'s Electrum server under way and the
+      /// server not answering yet.
+      Future<Completer<void>> checking(
+        WidgetTester tester,
+        FakeBridge bridge,
+      ) async {
+        useTallSurface(tester);
+        final gate = Completer<void>();
+        bridge.inspectGate = gate;
+        await tester.pumpWidget(settingsApp(bridge));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Network'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Save backend'));
+        // The spinner turns until the server answers: no settling.
+        await tester.pump(const Duration(milliseconds: 100));
+        return gate;
+      }
+
+      Future<void> pumpABit(WidgetTester tester) async {
+        for (var i = 0; i < 10; i++) {
+          await tester.pump(const Duration(milliseconds: 100));
+        }
+      }
+
+      testWidgets('the button says the server is being checked', (
+        tester,
+      ) async {
+        final bridge = ownElectrum();
+        final gate = await checking(tester, bridge);
+
+        final button = tester.widget<PrimaryButton>(
+          find.widgetWithText(PrimaryButton, 'Checking the certificate…'),
+        );
+        expect(button.busy, isTrue);
+        expect(find.text('Save backend'), findsNothing);
+
+        gate.complete();
+        await tester.pumpAndSettle();
+        expect(find.text('Save backend'), findsOneWidget);
+        expect(bridge.savedBackends, hasLength(1));
+      });
+
+      testWidgets('Back asks, and staying keeps the choice', (tester) async {
+        final bridge = ownElectrum();
+        final gate = await checking(tester, bridge);
+
+        // The system back, which the predictive gesture also is.
+        await tester.binding.handlePopRoute();
+        await pumpABit(tester);
+        expect(find.text('Leave without saving?'), findsOneWidget);
+        // Staying is the filled button.
+        expect(find.widgetWithText(PrimaryButton, 'Stay'), findsOneWidget);
+
+        await tester.tap(find.text('Stay'));
+        await pumpABit(tester);
+        expect(find.text('Leave without saving?'), findsNothing);
+        expect(find.byType(SettingsSectionScreen), findsOneWidget);
+
+        gate.complete();
+        await tester.pumpAndSettle();
+        expect(
+          (bridge.savedBackends[Network.mainnet]! as CustomElectrum).url,
+          'ssl://node.local:50002',
+        );
+        expect(find.text('Setting saved'), findsOneWidget);
+      });
+
+      testWidgets('leaving by the arrow saves nothing, ever', (tester) async {
+        final bridge = ownElectrum();
+        final gate = await checking(tester, bridge);
+
+        await tester.tap(find.byType(BackButton));
+        await pumpABit(tester);
+        expect(find.text('Leave without saving?'), findsOneWidget);
+        await tester.tap(find.text('Leave'));
+        await pumpABit(tester);
+        expect(find.byType(SettingsSectionScreen), findsNothing);
+
+        // The server answers after the page is gone.
+        gate.complete();
+        await tester.pumpAndSettle();
+        expect(bridge.savedBackends, isEmpty);
+        expect(find.text('Setting saved'), findsNothing);
+      });
+
+      testWidgets('an answer that comes while asking waits for the person', (
+        tester,
+      ) async {
+        final bridge = ownElectrum();
+        final gate = await checking(tester, bridge);
+
+        await tester.binding.handlePopRoute();
+        await pumpABit(tester);
+        gate.complete();
+        await pumpABit(tester);
+        // Nothing is written behind the question.
+        expect(bridge.savedBackends, isEmpty);
+        expect(find.text('Leave without saving?'), findsOneWidget);
+
+        await tester.tap(find.text('Leave'));
+        await tester.pumpAndSettle();
+        expect(bridge.savedBackends, isEmpty);
+        expect(find.byType(SettingsSectionScreen), findsNothing);
+      });
+
+      testWidgets('a certificate question waits for the answer too', (
+        tester,
+      ) async {
+        final bridge = ownElectrum();
+        bridge.onInspectCertificate = (_) => unknown;
+        final gate = await checking(tester, bridge);
+
+        await tester.binding.handlePopRoute();
+        await pumpABit(tester);
+        gate.complete();
+        await pumpABit(tester);
+        // One question at a time.
+        expect(
+          find.text('This server signs its own certificate'),
+          findsNothing,
+        );
+
+        await tester.tap(find.text('Stay'));
+        await pumpABit(tester);
+        expect(
+          find.text('This server signs its own certificate'),
+          findsOneWidget,
+        );
+        await tester.tap(find.text('Accept and save'));
+        await tester.pumpAndSettle();
+        expect(bridge.trustedCertificates, hasLength(1));
+        expect(bridge.savedBackends, hasLength(1));
+      });
+
+      testWidgets('the page taken away mid-check writes nothing', (
+        tester,
+      ) async {
+        final bridge = ownElectrum();
+        bridge.onInspectCertificate = (_) => unknown;
+        final gate = await checking(tester, bridge);
+
+        // What the app lock does: every route above the first one goes,
+        // past any PopScope.
+        tester
+            .state<NavigatorState>(find.byType(Navigator))
+            .popUntil((route) => route.isFirst);
+        await pumpABit(tester);
+        gate.complete();
+        await tester.pumpAndSettle();
+
+        // No certificate question opens over whatever is in front now.
+        expect(
+          find.text('This server signs its own certificate'),
+          findsNothing,
+        );
+        expect(bridge.trustedCertificates, isEmpty);
+        expect(bridge.savedBackends, isEmpty);
+      });
+
+      testWidgets('Back while the choice is written leaves once it is', (
+        tester,
+      ) async {
+        useTallSurface(tester);
+        final bridge = ownElectrum();
+        final writing = Completer<void>();
+        bridge.setBackendGate = writing;
+        await tester.pumpWidget(settingsApp(bridge));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Network'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Save backend'));
+        await pumpABit(tester);
+        expect(find.text('Saving…'), findsOneWidget);
+
+        // A moment's work: no question, the page waits for it.
+        await tester.binding.handlePopRoute();
+        await pumpABit(tester);
+        expect(find.text('Leave without saving?'), findsNothing);
+        expect(find.byType(SettingsSectionScreen), findsOneWidget);
+
+        writing.complete();
+        await tester.pumpAndSettle();
+        expect(find.byType(SettingsSectionScreen), findsNothing);
+        expect(bridge.savedBackends, hasLength(1));
+        // Said on the page that comes back.
+        expect(find.text('Setting saved'), findsOneWidget);
+      });
+
+      testWidgets('Back while the choice is written stays if it is refused', (
+        tester,
+      ) async {
+        useTallSurface(tester);
+        const reason = 'invalid server address: not a server name';
+        final bridge = ownElectrum();
+        final writing = Completer<void>();
+        bridge.setBackendGate = writing;
+        bridge.onSetBackend = (_, _) =>
+            throw coreFailure('invalid_input', reason);
+        await tester.pumpWidget(settingsApp(bridge));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Network'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Save backend'));
+        await pumpABit(tester);
+        await tester.binding.handlePopRoute();
+        await pumpABit(tester);
+
+        writing.complete();
+        await tester.pumpAndSettle();
+        // The reason is on the page, which stays to say it.
+        expect(find.byType(SettingsSectionScreen), findsOneWidget);
+        expect(find.text(reason), findsOneWidget);
+        expect(bridge.savedBackends, isEmpty);
+      });
+
+      testWidgets('with nothing under way, Back leaves at once', (
+        tester,
+      ) async {
+        useTallSurface(tester);
+        await tester.pumpWidget(settingsApp(ownElectrum()));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Network'));
+        await tester.pumpAndSettle();
+
+        await tester.binding.handlePopRoute();
+        await tester.pumpAndSettle();
+        expect(find.text('Leave without saving?'), findsNothing);
+        expect(find.byType(SettingsSectionScreen), findsNothing);
+      });
+    });
+  });
+
+  group('a number field holds its value whole', () {
+    /// The text an editable field shows, unscrolled: its widest line
+    /// fits the box it was given.
+    void expectWhole(WidgetTester tester, String text, String reason) {
+      final editable = tester.allRenderObjects
+          .whereType<RenderEditable>()
+          .firstWhere((r) => r.text?.toPlainText() == text);
+      expect(
+        editable.getMaxIntrinsicWidth(double.infinity),
+        lessThanOrEqualTo(editable.size.width),
+        reason: reason,
+      );
+    }
+
+    /// A hint, a paragraph of its own, drawn whole.
+    void expectHintWhole(WidgetTester tester, String hint, String reason) {
+      final paragraph = tester.renderObject<RenderParagraph>(find.text(hint));
+      expect(
+        paragraph.getMaxIntrinsicWidth(double.infinity),
+        lessThanOrEqualTo(paragraph.size.width),
+        reason: reason,
+      );
+    }
+
+    for (final width in [411.0, 320.0]) {
+      for (final scale in [1.0, 1.5, 2.0]) {
+        final at = '${width.round()} dp, text x$scale';
+
+        testWidgets('the port of an Electrum server, $at', (tester) async {
+          tester.view.physicalSize = Size(width, 3600);
+          tester.view.devicePixelRatio = 1;
+          tester.platformDispatcher.textScaleFactorTestValue = scale;
+          addTearDown(tester.view.reset);
+          addTearDown(tester.platformDispatcher.clearAllTestValues);
+          final bridge = FakeBridge(
+            settings: Settings(
+              preferences: kPreferences,
+              activeNetwork: Network.mainnet,
+              backends: const {
+                Network.mainnet: CustomElectrum(url: 'ssl://node.local:50005'),
+              },
+              appPrefs: const {},
+            ),
+          );
+          await tester.pumpWidget(
+            settingsApp(bridge, section: SettingsSection.network),
+          );
+          await tester.pumpAndSettle();
+
+          expectWhole(tester, '50005', at);
+          // The TLS switch stays on the card, beside the port or under it.
+          final tls = tester.getRect(find.text('TLS'));
+          final card = tester.getRect(
+            find.ancestor(
+              of: find.text('TLS'),
+              matching: find.byType(SectionCard),
+            ),
+          );
+          expect(tls.right, lessThanOrEqualTo(card.right), reason: at);
+
+          await tester.enterText(
+            find.descendant(
+              of: find.bySemanticsLabel('Port'),
+              matching: find.byType(EditableText),
+            ),
+            '',
+          );
+          await tester.pump();
+          expectHintWhole(tester, '50002', at);
+        });
+
+        testWidgets('the gap limit, $at', (tester) async {
+          tester.view.physicalSize = Size(width, 3600);
+          tester.view.devicePixelRatio = 1;
+          tester.platformDispatcher.textScaleFactorTestValue = scale;
+          addTearDown(tester.view.reset);
+          addTearDown(tester.platformDispatcher.clearAllTestValues);
+          final bridge = FakeBridge(
+            settings: Settings(
+              preferences: kPreferences,
+              activeNetwork: Network.mainnet,
+              backends: const {},
+              appPrefs: const {},
+              gapLimit: 500,
+            ),
+          );
+          await tester.pumpWidget(
+            settingsApp(bridge, section: SettingsSection.wallets),
+          );
+          await tester.pumpAndSettle();
+
+          expectWhole(tester, '500', at);
+          // The explanation has the card's whole width, under the line
+          // of the field: beside it, it was a column seven lines high
+          // on a narrow phone.
+          final help = tester.getRect(
+            find.textContaining('How many unused addresses'),
+          );
+          final field = tester.getRect(find.byType(CountField));
+          expect(help.top, greaterThanOrEqualTo(field.bottom), reason: at);
+          expect(help.right, greaterThan(field.left), reason: at);
+          // A count is a figure, not an identifier: the interface face,
+          // against the right edge.
+          final drawn = tester.widget<TextField>(
+            find.descendant(
+              of: find.byType(CountField),
+              matching: find.byType(TextField),
+            ),
+          );
+          expect(drawn.style!.fontFamily, GerfautFonts.ui, reason: at);
+          expect(drawn.textAlign, TextAlign.end, reason: at);
+          await tester.enterText(
+            find.descendant(
+              of: find.bySemanticsLabel('Gap limit'),
+              matching: find.byType(EditableText),
+            ),
+            '',
+          );
+          await tester.pump();
+          expectHintWhole(tester, '1-500', at);
+        });
+      }
+    }
+  });
+
+  group('this is my node', () {
+    FakeBridge withBackend(BackendConfig config) {
+      return FakeBridge(
+        settings: Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.mainnet,
+          backends: {Network.mainnet: config},
+          appPrefs: const {},
+        ),
+      );
+    }
+
+    Finder ownNodeSwitch() => find.descendant(
+      of: find.widgetWithText(SettingSwitch, 'This is my node'),
+      matching: find.byType(Switch),
+    );
+
+    Future<void> save(WidgetTester tester) async {
+      await tester.ensureVisible(find.text('Save backend'));
+      await tester.tap(find.text('Save backend'));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('off until declared, then saved with the server', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = withBackend(
+        const CustomElectrum(url: 'ssl://node.local:50002'),
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<Switch>(ownNodeSwitch()).value, isFalse);
+      expect(
+        find.textContaining('Live then follows up to 20 000 addresses'),
+        findsOneWidget,
+      );
+      await tester.tap(ownNodeSwitch());
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      final saved = bridge.savedBackends[Network.mainnet]! as CustomElectrum;
+      expect(saved.url, 'ssl://node.local:50002');
+      expect(saved.ownNode, isTrue);
+      expect(saved.toJson()['own_node'], isTrue);
+    });
+
+    testWidgets('saving the address again keeps the node declared', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = withBackend(
+        const CustomElectrum(url: 'ssl://node.local:50002', ownNode: true),
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.widget<Switch>(ownNodeSwitch()).value, isTrue);
+      // Another port, and nothing said about the switch: the save must
+      // not take it for off.
+      await tester.enterText(
+        find
+            .descendant(
+              of: find.byType(MonoField),
+              matching: find.byType(TextField),
+            )
+            .at(1),
+        '50001',
+      );
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      final saved = bridge.savedBackends[Network.mainnet]! as CustomElectrum;
+      expect(saved.url, 'ssl://node.local:50001');
+      expect(saved.ownNode, isTrue);
+    });
+
+    testWidgets("an Esplora of one's own keeps it too", (tester) async {
+      useTallSurface(tester);
+      final bridge = withBackend(
+        const CustomEsplora(url: 'https://node.local:3002/api', ownNode: true),
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+      await save(tester);
+
+      final saved = bridge.savedBackends[Network.mainnet]! as CustomEsplora;
+      expect(saved.ownNode, isTrue);
+    });
+
+    testWidgets("a public server is never anyone's node", (tester) async {
+      useTallSurface(tester);
+      final bridge = withBackend(
+        const CustomElectrum(url: 'ssl://node.local:50002', ownNode: true),
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Public API'));
+      await tester.pumpAndSettle();
+      expect(find.text('This is my node'), findsNothing);
+      await save(tester);
+
+      expect(bridge.savedBackends[Network.mainnet], isA<PublicEsplora>());
+      expect(
+        bridge.savedBackends[Network.mainnet]!.toJson().containsKey('own_node'),
+        isFalse,
+      );
+    });
+  });
+
+  group('the Tor card', () {
+    FakeBridge withTor(TorMode mode) {
+      return FakeBridge(
+        settings: Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.mainnet,
+          backends: const {},
+          appPrefs: const {},
+          tor: TorSettings(mode: mode),
+        ),
+      );
+    }
+
+    testWidgets('the system proxy is named for what it is on a phone', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        settingsApp(withTor(TorMode.system), section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      // Any app may hold the local port first and answer for the
+      // server: the card says so, and says what Automatic does about it.
+      expect(
+        find.text(
+          'Only the Tor on this device, at 127.0.0.1:9050. On a phone any '
+          'app can answer on that port and pose as Tor, which is why '
+          'Automatic never falls back to it on a phone.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('automatic is the built-in client and nothing else', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        settingsApp(withTor(TorMode.auto), section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      // On Android the core never falls back to a local port under
+      // Automatic: a Tor app on the phone is used only when chosen.
+      expect(
+        find.text(
+          'The built-in Tor. A Tor app on this device is used only when '
+          'you choose it below.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('if it answers'), findsNothing);
+      expect(find.textContaining('built-in Tor first'), findsNothing);
+    });
+
+    testWidgets('the caution follows the core, which says whether the '
+        'local port can be trusted', (tester) async {
+      useTallSurface(tester);
+      final bridge = withTor(TorMode.auto);
+      bridge.onTorStatus = (tor) => TorStatus(
+        mode: tor.mode,
+        socksProxy: '127.0.0.1:9050',
+        via: null,
+        socks: null,
+        running: false,
+        bootstrapped: false,
+        bootstrapPercent: 0,
+        error: null,
+        embeddedAvailable: true,
+        systemSocksTrusted: true,
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(
+          'The Tor on this device if it answers, the built-in one otherwise.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('pose as Tor'), findsNothing);
+    });
+
+    testWidgets('the hint of Automatic follows the core, not the platform', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      const builtIn =
+          'The built-in Tor. A Tor app on this device is used only when you '
+          'choose it below.';
+      const ifItAnswers =
+          'The Tor on this device if it answers, the built-in one otherwise.';
+      TorStatus status(TorSettings tor, {required bool trusted}) => TorStatus(
+        mode: tor.mode,
+        socksProxy: '127.0.0.1:9050',
+        via: null,
+        socks: null,
+        running: false,
+        bootstrapped: false,
+        bootstrapPercent: 0,
+        error: null,
+        embeddedAvailable: true,
+        systemSocksTrusted: trusted,
+      );
+
+      // An iPhone whose core trusts no local port says what Android says.
+      final phone = withTor(TorMode.auto)
+        ..onTorStatus = (tor) => status(tor, trusted: false);
+      await tester.pumpWidget(
+        settingsApp(
+          phone,
+          section: SettingsSection.network,
+          platform: PlatformFeatures.ios,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(builtIn), findsOneWidget);
+      expect(find.text(ifItAnswers), findsNothing);
+
+      // And an Android whose core did trust it would say the other.
+      final trusting = withTor(TorMode.auto)
+        ..onTorStatus = (tor) => status(tor, trusted: true);
+      await tester.pumpWidget(
+        settingsApp(
+          trusting,
+          section: SettingsSection.network,
+          platform: PlatformFeatures.android,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text(ifItAnswers), findsOneWidget);
+      expect(find.text(builtIn), findsNothing);
+    });
+
+    testWidgets('a test of the connection shows Tor starting, as on the '
+        'desktop', (tester) async {
+      useTallSurface(tester);
+      final bridge = withTor(TorMode.embedded);
+      var percent = 0;
+      bridge.onTorStatus = (tor) => TorStatus(
+        mode: tor.mode,
+        socksProxy: '127.0.0.1:9050',
+        via: TorVia.embedded,
+        socks: null,
+        running: percent > 0,
+        bootstrapped: percent >= 100,
+        bootstrapPercent: percent,
+        error: null,
+        embeddedAvailable: true,
+      );
+      final connected = Completer<TorRoute>();
+      bridge.onTorConnect = () => connected.future;
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Starting the built-in Tor'), findsNothing);
+
+      await tester.tap(find.text('Test the connection'));
+      await tester.pump();
+      // The status is read again every second while the test runs.
+      percent = 47;
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      expect(find.text('Starting the built-in Tor… 40%'), findsOneWidget);
+      percent = 85;
+      await tester.pump(const Duration(seconds: 1));
+      await tester.pump();
+      expect(find.text('Starting the built-in Tor… 80%'), findsOneWidget);
+
+      percent = 100;
+      connected.complete(
+        const TorRoute(socks: '127.0.0.1:41000', via: TorVia.embedded),
+      );
+      await tester.pumpAndSettle();
+      expect(find.textContaining('Starting the built-in Tor'), findsNothing);
+      expect(find.text('Reached through the built-in Tor.'), findsOneWidget);
+    });
+
+    testWidgets('a build without its own Tor says what to choose', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = withTor(TorMode.auto);
+      bridge.onTorStatus = (tor) => TorStatus(
+        mode: tor.mode,
+        socksProxy: '127.0.0.1:9050',
+        via: null,
+        socks: null,
+        running: false,
+        bootstrapped: false,
+        bootstrapPercent: 0,
+        error: null,
+        embeddedAvailable: false,
+      );
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.network),
+      );
+      await tester.pumpAndSettle();
+
+      // Starting Orbot is not enough on its own: Automatic would still
+      // not use it, so the card names the mode to pick. And the price
+      // follows the node through Tor, as the update check does.
+      expect(
+        find.text(
+          'An address ending in .onion goes through Tor. This build has no '
+          'Tor of its own: choose System below, with a Tor app such as '
+          'Orbot running on this device. When one of your nodes is a '
+          '.onion address, the price goes through Tor too, or is not '
+          'fetched while Tor is out of reach.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('start Tor or Orbot first'), findsNothing);
+    });
+  });
+
+  group('scanning a server address', () {
+    /// What the form says of a scanned onion address, under the default
+    /// Tor mode.
+    const onionNote =
+        'A Tor hidden service: reached through Tor only (mode: Automatic).';
+
+    /// The settings screen with the camera replaced by a button that
+    /// hands one frame over, the way a printed code in front of the
+    /// lens does.
+    Widget settingsWithCamera(FakeBridge bridge, String frame) {
+      return ProviderScope(
+        retry: noRetry,
+        overrides: [
+          bridgeProvider.overrideWithValue(bridge),
+          disguiseServiceProvider.overrideWithValue(FakeDisguise()),
+        ],
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: SettingsScreen(
+            section: SettingsSection.network,
+            cameraBuilder: (onFrame) => TextButton(
+              onPressed: () => onFrame(frame),
+              child: const Text('frame'),
+            ),
+          ),
+        ),
+      );
+    }
+
+    /// A workspace already pointed at an Electrum server over TLS: the
+    /// form a scan comes to overwrite.
+    FakeBridge ownElectrum() {
+      return FakeBridge(
+        settings: const Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.mainnet,
+          backends: {
+            Network.mainnet: CustomElectrum(url: 'ssl://node.local:50002'),
+          },
+          appPrefs: {},
+        ),
+      );
+    }
+
+    Future<void> scan(WidgetTester tester) async {
+      await tester.tap(find.text('Scan'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('frame'));
+      await tester.pumpAndSettle();
+    }
+
+    /// What every field of the form holds, in reading order: the
+    /// backend fields first, the gap limit last.
+    List<String> fieldTexts(WidgetTester tester) {
+      return tester
+          .widgetList<TextField>(find.byType(TextField))
+          .map((field) => field.controller!.text)
+          .toList();
+    }
+
+    /// Where the TLS toggle of the Electrum form stands.
+    bool tlsOn(WidgetTester tester) {
+      return tester
+          .widget<Switch>(
+            find.descendant(
+              of: find
+                  .ancestor(of: find.text('TLS'), matching: find.byType(Row))
+                  .first,
+              matching: find.byType(Switch),
+            ),
+          )
+          .value;
+    }
+
+    testWidgets('the one-liner a node prints fills the form as scanned', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum();
+      bridge.onParseBackend = (_) => const ScannedBackend(
+        kind: 'electrum',
+        url: 'tcp://gerfautexample123.onion:50001',
+        host: 'gerfautexample123.onion',
+        port: 50001,
+        tls: false,
+        onion: true,
+      );
+      await tester.pumpWidget(
+        settingsWithCamera(bridge, 'gerfautexample123.onion:50001:t'),
+      );
+      await tester.pumpAndSettle();
+      expect(tlsOn(tester), isTrue);
+
+      // The same scanner as the wallet import, told what it is for.
+      await tester.tap(find.text('Scan'));
+      await tester.pumpAndSettle();
+      expect(find.text(NetworkSection.backendScanCaption), findsOneWidget);
+      await tester.tap(find.text('frame'));
+      await tester.pumpAndSettle();
+
+      // Read by the core, never by the screen.
+      expect(bridge.parsedBackends, ['gerfautexample123.onion:50001:t']);
+      expect(fieldTexts(tester).take(2), ['gerfautexample123.onion', '50001']);
+      expect(tlsOn(tester), isFalse);
+      // What the core made of the address is said under the fields,
+      // with the Tor mode in force; nothing is saved or switched for it.
+      expect(find.text(onionNote), findsOneWidget);
+      expect(find.byIcon(LucideIcons.eyeOff), findsOneWidget);
+      expect(bridge.savedBackends, isEmpty);
+      expect(bridge.torSettingsCalls, isEmpty);
+
+      await tester.tap(find.text('Save backend'));
+      await tester.pumpAndSettle();
+      expect(
+        (bridge.savedBackends[Network.mainnet]! as CustomElectrum).url,
+        'tcp://gerfautexample123.onion:50001',
+      );
+    });
+
+    testWidgets('another server read from a code is not the own node', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      FakeBridge declared() => FakeBridge(
+        settings: const Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.mainnet,
+          backends: {
+            Network.mainnet: CustomElectrum(
+              url: 'ssl://node.local:50002',
+              ownNode: true,
+            ),
+          },
+          appPrefs: {},
+        ),
+      );
+      ScannedBackend electrum(String host) => ScannedBackend(
+        kind: 'electrum',
+        url: 'ssl://$host:50002',
+        host: host,
+        port: 50002,
+        tls: true,
+        onion: false,
+      );
+      Finder ownNodeSwitch() => find.descendant(
+        of: find.widgetWithText(SettingSwitch, 'This is my node'),
+        matching: find.byType(Switch),
+      );
+
+      // The stored server read again keeps the switch.
+      var bridge = declared();
+      bridge.onParseBackend = (_) => electrum('node.local');
+      await tester.pumpWidget(settingsWithCamera(bridge, 'node.local:50002:s'));
+      await tester.pumpAndSettle();
+      await scan(tester);
+      expect(tester.widget<Switch>(ownNodeSwitch()).value, isTrue);
+
+      // Another one turns it off.
+      bridge = declared();
+      bridge.onParseBackend = (_) => electrum('electrum.example.org');
+      await tester.pumpWidget(const SizedBox());
+      await tester.pumpWidget(
+        settingsWithCamera(bridge, 'electrum.example.org:50002:s'),
+      );
+      await tester.pumpAndSettle();
+      await scan(tester);
+      expect(fieldTexts(tester).first, 'electrum.example.org');
+      expect(tester.widget<Switch>(ownNodeSwitch()).value, isFalse);
+    });
+
+    testWidgets('the onion fact names the Tor mode in force', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(
+        settings: const Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.mainnet,
+          backends: {
+            Network.mainnet: CustomElectrum(url: 'ssl://node.local:50002'),
+          },
+          appPrefs: {},
+          tor: TorSettings(mode: TorMode.embedded),
+        ),
+      );
+      bridge.onParseBackend = (_) => const ScannedBackend(
+        kind: 'esplora',
+        url: 'http://gerfautexample123.onion/api',
+        host: 'gerfautexample123.onion',
+        port: null,
+        tls: false,
+        onion: true,
+      );
+      await tester.pumpWidget(
+        settingsWithCamera(bridge, 'http://gerfautexample123.onion/api'),
+      );
+      await tester.pumpAndSettle();
+
+      await scan(tester);
+
+      // An Esplora endpoint on an onion address: the note sits under
+      // its URL field just the same.
+      expect(find.text('SERVER URL'), findsOneWidget);
+      expect(
+        find.text(
+          'A Tor hidden service: reached through Tor only (mode: Built-in).',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('the onion fact goes with the fields it described', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum();
+      bridge.onParseBackend = (_) => const ScannedBackend(
+        kind: 'electrum',
+        url: 'tcp://gerfautexample123.onion:50001',
+        host: 'gerfautexample123.onion',
+        port: 50001,
+        tls: false,
+        onion: true,
+      );
+      await tester.pumpWidget(
+        settingsWithCamera(bridge, 'gerfautexample123.onion:50001:t'),
+      );
+      await tester.pumpAndSettle();
+      await scan(tester);
+      expect(find.text(onionNote), findsOneWidget);
+
+      // A keystroke in the host: the fields no longer hold what was
+      // scanned, so the fact no longer describes them.
+      await tester.enterText(find.byType(TextField).first, 'node.local');
+      await tester.pumpAndSettle();
+      expect(find.text(onionNote), findsNothing);
+
+      // Scanned again, then another backend option chosen: gone again.
+      await scan(tester);
+      expect(find.text(onionNote), findsOneWidget);
+      await tester.tap(find.text('My own Esplora'));
+      await tester.pumpAndSettle();
+      expect(find.text(onionNote), findsNothing);
+    });
+
+    testWidgets('an Esplora endpoint scanned here switches the choice', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum();
+      bridge.onParseBackend = (_) => const ScannedBackend(
+        kind: 'esplora',
+        url: 'https://esplora.example.org/api',
+        host: 'esplora.example.org',
+        port: null,
+        tls: true,
+        onion: false,
+      );
+      await tester.pumpWidget(
+        settingsWithCamera(bridge, 'https://esplora.example.org/api'),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('HOST'), findsOneWidget);
+
+      await scan(tester);
+
+      // Refusing it would be pedantic: the QR says which backend it is.
+      expect(find.text('SERVER URL'), findsOneWidget);
+      expect(find.text('HOST'), findsNothing);
+      expect(fieldTexts(tester).first, 'https://esplora.example.org/api');
+      // A plain host on the web: nothing to say about Tor.
+      expect(find.byIcon(LucideIcons.eyeOff), findsNothing);
+
+      await tester.tap(find.text('Save backend'));
+      await tester.pumpAndSettle();
+      expect(
+        (bridge.savedBackends[Network.mainnet]! as CustomEsplora).url,
+        'https://esplora.example.org/api',
+      );
+    });
+
+    testWidgets('wallet material is refused in the words of the core', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      const reason =
+          'this is an extended public key, not the address of a server';
+      final bridge = ownElectrum();
+      bridge.onParseBackend = (_) =>
+          throw const BridgeException('server', reason);
+      await tester.pumpWidget(
+        settingsWithCamera(bridge, 'xpub661MyMwAqRbcFexample'),
+      );
+      await tester.pumpAndSettle();
+
+      await scan(tester);
+
+      expect(find.text(reason), findsOneWidget);
+      // A hint under the field, not a panel — but announced: it lands
+      // in reaction to a scan, the camera has closed by then, and
+      // nothing else on screen says the code was turned down.
+      final handle = tester.ensureSemantics();
+      expect(
+        tester.getSemantics(find.text(reason)).flagsCollection.isLiveRegion,
+        isTrue,
+      );
+      handle.dispose();
+      // Not one field moved, and the choice is where it was.
+      expect(find.text('HOST'), findsOneWidget);
+      expect(fieldTexts(tester).take(2), ['node.local', '50002']);
+      expect(tlsOn(tester), isTrue);
+      expect(bridge.savedBackends, isEmpty);
+
+      // Typing drops the refusal: it no longer describes the field.
+      await tester.enterText(find.byType(TextField).first, 'other.local');
+      await tester.pumpAndSettle();
+      expect(find.text(reason), findsNothing);
+    });
+
+    testWidgets('a private key is refused in the words of this screen', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum();
+      bridge.onParseBackend = (_) => throw const BridgeException(
+        'private_material',
+        'input contains private key material and was rejected',
+      );
+      await tester.pumpWidget(
+        settingsWithCamera(bridge, 'xprv9s21ZrQH143Kexample'),
+      );
+      await tester.pumpAndSettle();
+
+      await scan(tester);
+
+      expect(
+        find.text(
+          'This holds a private key, not the address of a server. Gerfaut '
+          'never takes a key: show the QR code your node prints instead.',
+        ),
+        findsOneWidget,
+      );
+      expect(bridge.savedBackends, isEmpty);
+    });
+
+    testWidgets('the server scanner says a private key in its own words', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum()
+        ..onAssembleQr = (_) => throw coreFailure(
+          'private_material',
+          'input contains private key material and was rejected',
+        );
+      await tester.pumpWidget(
+        settingsWithCamera(bridge, 'ur:crypto-output/1-1/private'),
+      );
+      await tester.pumpAndSettle();
+
+      await scan(tester);
+
+      expect(find.byType(ScanScreen), findsOneWidget);
+      expect(find.text(privateKeyNotAServer), findsOneWidget);
+      expect(bridge.savedBackends, isEmpty);
+    });
+
+    testWidgets('a scan that reads nothing leaves the form alone', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = ownElectrum();
+      await tester.pumpWidget(settingsWithCamera(bridge, 'node.local:50002:s'));
+      await tester.pumpAndSettle();
+
+      // Backing out of the scanner asks the core nothing.
+      await tester.tap(find.text('Scan'));
+      await tester.pumpAndSettle();
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+
+      expect(bridge.parsedBackends, isEmpty);
+      expect(fieldTexts(tester).take(2), ['node.local', '50002']);
+    });
+  });
+
+  group('the root list', () {
+    /// A wallet is watched, the gap limit is not the default: two facts
+    /// the rows have to say.
+    FakeBridge bridge() => FakeBridge(
+      wallets: [makeMeta()],
+      settings: const Settings(
+        preferences: kPreferences,
+        activeNetwork: Network.mainnet,
+        backends: {},
+        appPrefs: {},
+        gapLimit: 25,
+      ),
+    );
+
+    testWidgets('names seven sections and says where each stands', (
+      tester,
+    ) async {
+      await tester.pumpWidget(settingsApp(bridge()));
+      await tester.pumpAndSettle();
+
+      // The desktop's taxonomy, word for word, in its order.
+      expect(SettingsSection.values.map((s) => s.title), [
+        'General',
+        'Network',
+        'Wallets',
+        'Security',
+        'Notifications',
+        'Backup & sync',
+        'About',
+      ]);
+      for (final section in SettingsSection.values) {
+        expect(find.text(section.title), findsOneWidget);
+        expect(find.byIcon(section.icon), findsOneWidget);
+      }
+      expect(find.byIcon(LucideIcons.chevronRight), findsNWidgets(7));
+      // One line each, from state the root already holds.
+      expect(find.text('BTC · no fiat · Light theme'), findsOneWidget);
+      expect(find.text('Mainnet · Public API'), findsOneWidget);
+      expect(find.text('1 wallet · gap limit 25'), findsOneWidget);
+      expect(find.text('No app lock'), findsOneWidget);
+      expect(find.text('Off'), findsOneWidget);
+      expect(find.text('Export or restore the wallet list'), findsOneWidget);
+      // The beta rides with the version until 1.0.0.
+      expect(
+        find.text(
+          isBetaVersion(appVersion)
+              ? 'Gerfaut $appVersion · Beta'
+              : 'Gerfaut $appVersion',
+        ),
+        findsOneWidget,
+      );
+      // Nothing of the sections themselves is on the root.
+      expect(find.text('Gap limit'), findsNothing);
+      expect(find.text('Save backend'), findsNothing);
+      // A row is a 44px target at the least.
+      for (final section in SettingsSection.values) {
+        expect(
+          tester
+              .getSize(
+                find.ancestor(
+                  of: find.text(section.title),
+                  matching: find.byType(InkWell),
+                ),
+              )
+              .height,
+          greaterThanOrEqualTo(GerfautTouch.target),
+        );
+      }
+    });
+
+    testWidgets('the rows follow the state they summarise', (tester) async {
+      final locked = bridge()
+        ..lock = const AppLock(kind: LockKind.pin, biometric: true);
+      await tester.pumpWidget(settingsApp(locked));
+      await tester.pumpAndSettle();
+      expect(find.text('PIN lock · biometrics'), findsOneWidget);
+
+      final container = ProviderScope.containerOf(
+        tester.element(find.byType(SettingsScreen)),
+      );
+      container.read(unitProvider.notifier).set(AmountUnit.sats);
+      container.read(fiatEnabledProvider.notifier).set(true);
+      container.read(themeProvider.notifier).set(ThemePref.dark);
+      holdPreferences(container, const PreferencesChange(notifyNewTx: true));
+      container.read(backgroundCheckProvider.notifier).hydrate('900');
+      await tester.pumpAndSettle();
+      expect(find.text('sats · EUR · Dark theme'), findsOneWidget);
+      expect(find.text('On · every 15 min'), findsOneWidget);
+
+      // Disguised, nothing is posted, whatever the choice held.
+      await container.read(disguiseProvider.notifier).set(true);
+      await tester.pumpAndSettle();
+      expect(find.text('Off · disguised'), findsOneWidget);
+      expect(find.text('PIN lock · biometrics · disguised'), findsOneWidget);
+      await container.read(disguiseProvider.notifier).set(false);
+      await tester.pumpAndSettle();
+      expect(find.text('On · every 15 min'), findsOneWidget);
+
+      // Live is a name: it keeps its capital.
+      container.read(backgroundCheckProvider.notifier).hydrate('live');
+      await tester.pumpAndSettle();
+      expect(find.text('On · Live'), findsOneWidget);
+    });
+
+    testWidgets('each row opens a page titled after it, with its cards', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(settingsApp(bridge()));
+      await tester.pumpAndSettle();
+
+      const cards = <SettingsSection, List<String>>{
+        SettingsSection.general: ['Display', 'Appearance'],
+        SettingsSection.network: [
+          'Backend · Mainnet',
+          'Only wallets on the selected network are shown.',
+          'Test the connection',
+        ],
+        SettingsSection.wallets: ['Gap limit', 'Cold storage'],
+        SettingsSection.security: ['App lock'],
+        SettingsSection.notifications: [
+          'New transactions',
+          'Show balances on widgets',
+        ],
+        SettingsSection.backup: ['Export…', 'Restore…'],
+        SettingsSection.about: ['Check for updates', 'Show the welcome tour'],
+      };
+      for (final entry in cards.entries) {
+        await tester.tap(find.text(entry.key.title));
+        await tester.pumpAndSettle();
+        expect(find.byType(SettingsSectionScreen), findsOneWidget);
+        expect(find.widgetWithText(AppBar, entry.key.title), findsOneWidget);
+        expect(find.byType(BackButton), findsOneWidget);
+        for (final card in entry.value) {
+          expect(find.text(card), findsOneWidget, reason: card);
+        }
+        // The other sections stay on the root.
+        for (final other in SettingsSection.values) {
+          if (other != entry.key) expect(find.text(other.title), findsNothing);
+        }
+        await tester.pageBack();
+        await tester.pumpAndSettle();
+        expect(find.byType(SettingsSectionScreen), findsNothing);
+      }
+    });
+
+    testWidgets('a section opens directly, and the back arrow leaves it', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        ProviderScope(
+          retry: noRetry,
+          overrides: [
+            bridgeProvider.overrideWithValue(bridge()),
+            disguiseServiceProvider.overrideWithValue(FakeDisguise()),
+          ],
+          child: MaterialApp(
+            theme: themeFrom(GerfautTokens.light, Brightness.light),
+            home: Scaffold(
+              body: Builder(
+                builder: (context) => TextButton(
+                  onPressed: () => SettingsScreen.open(
+                    context,
+                    section: SettingsSection.wallets,
+                  ),
+                  child: const Text('open'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('open'));
+      await tester.pumpAndSettle();
+
+      // The Wallets page and nothing of the root: no list of sections
+      // stands between the caller and the wallet rows.
+      expect(find.widgetWithText(AppBar, 'Wallets'), findsOneWidget);
+      expect(find.text('Gap limit'), findsOneWidget);
+      expect(find.text('Cold storage'), findsOneWidget);
+      expect(find.text('General'), findsNothing);
+      expect(find.text('Settings'), findsNothing);
+
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.text('open'), findsOneWidget);
+      expect(find.byType(SettingsScreen), findsNothing);
+    });
+  });
+
+  group('rescan', () {
+    ButtonStyleButton button(WidgetTester tester, String label) {
+      return tester.widget<ButtonStyleButton>(
+        find.ancestor(
+          of: find.text(label),
+          matching: find.bySubtype<ButtonStyleButton>(),
+        ),
+      );
+    }
+
+    SyncReport report(String id, int newTxCount) => SyncReport(
+      walletId: id,
+      newTxCount: newTxCount,
+      balance: makeBalance(0),
+      tipHeight: 100,
+      tookMs: 1,
+      backend: 'mempool.space',
+    );
+
+    testWidgets('rescanning says so, then how many transactions it found', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final gate = Completer<void>();
+      var found = 2;
+      final bridge = FakeBridge(wallets: [makeMeta()]);
+      bridge.onRescan = (id) => gate.future.then((_) => report(id, found));
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.wallets),
+      );
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Rescan a wallet to look again from its first address.'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Rescan'));
+      await tester.pump();
+
+      expect(bridge.rescanCalls, 1);
+      expect(find.text('Rescanning…'), findsOneWidget);
+      expect(find.text('Rescan'), findsNothing);
+      // The row's other actions wait for it.
+      expect(button(tester, 'Rescanning…').onPressed, isNull);
+      expect(button(tester, 'Rename').onPressed, isNull);
+      expect(button(tester, 'Remove').onPressed, isNull);
+
+      gate.complete();
+      await tester.pumpAndSettle();
+
+      expect(find.text('Rescanned · 2 new transactions'), findsOneWidget);
+      expect(find.text('Rescan'), findsOneWidget);
+      expect(button(tester, 'Rename').onPressed, isNotNull);
+      expect(button(tester, 'Remove').onPressed, isNotNull);
+
+      // Flush the snackbar timer.
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+
+      // Singular, and nothing found, are said as such.
+      found = 1;
+      await tester.tap(find.text('Rescan'));
+      await tester.pumpAndSettle();
+      expect(find.text('Rescanned · 1 new transaction'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+
+      found = 0;
+      await tester.tap(find.text('Rescan'));
+      await tester.pumpAndSettle();
+      expect(find.text('Rescanned · no new transactions'), findsOneWidget);
+      expect(bridge.rescanCalls, 3);
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('a failed rescan states why under the row', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(wallets: [makeMeta()]);
+      bridge.onRescan = (_) =>
+          throw const BridgeException('sync', 'backend unreachable: timed out');
+      await tester.pumpWidget(
+        settingsApp(bridge, section: SettingsSection.wallets),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Rescan'));
+      await tester.pumpAndSettle();
+
+      expect(bridge.rescanCalls, 1);
+      expect(find.text('backend unreachable: timed out'), findsOneWidget);
+      expect(find.textContaining('Rescanned'), findsNothing);
+      // Back to an offer, with the row's other actions in reach.
+      expect(find.text('Rescan'), findsOneWidget);
+      expect(button(tester, 'Rename').onPressed, isNotNull);
+    });
+  });
+}

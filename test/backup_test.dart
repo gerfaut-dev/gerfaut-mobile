@@ -1,0 +1,1496 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:file_selector/file_selector.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:gerfaut/app.dart';
+import 'package:gerfaut/screens/backup_export.dart';
+import 'package:gerfaut/widgets/choice_group.dart';
+import 'package:gerfaut/screens/backup_qr.dart';
+import 'package:gerfaut/screens/backup_restore.dart';
+import 'package:gerfaut/src/bridge.dart';
+import 'package:gerfaut/screens/scan.dart';
+import 'package:gerfaut/src/documents.dart';
+import 'package:gerfaut/src/lock.dart';
+import 'package:gerfaut/src/models.dart';
+import 'package:gerfaut/src/screen.dart';
+import 'package:gerfaut/src/share.dart';
+import 'package:gerfaut/src/state.dart';
+import 'package:gerfaut/theme/tokens.dart';
+import 'package:gerfaut/widgets/buttons.dart';
+import 'package:gerfaut/widgets/notice.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+
+import 'core_fixtures.dart';
+import 'fakes.dart';
+
+/// Records what would have been shared instead of touching the system.
+class FakeBackupSharer implements BackupSharer {
+  final List<({List<int> bytes, String filename})> shared = [];
+
+  @override
+  Future<void> shareBackup({
+    required List<int> bytes,
+    required String filename,
+  }) async {
+    shared.add((bytes: bytes, filename: filename));
+  }
+}
+
+Widget screen(
+  FakeBridge bridge,
+  Widget home, {
+  BackupSharer? sharer,
+  DocumentSaver? saver,
+  ScreenKeeper? keeper,
+}) {
+  return ProviderScope(
+    retry: noRetry,
+    overrides: [
+      bridgeProvider.overrideWithValue(bridge),
+      if (sharer != null) backupSharerProvider.overrideWithValue(sharer),
+      if (saver != null) documentSaverProvider.overrideWithValue(saver),
+      if (keeper != null) screenKeeperProvider.overrideWithValue(keeper),
+    ],
+    child: MaterialApp(
+      theme: themeFrom(GerfautTokens.light, Brightness.light),
+      home: home,
+    ),
+  );
+}
+
+/// A surface tall enough to lay out a whole step without scrolling.
+void useTallSurface(WidgetTester tester) {
+  tester.view.physicalSize = const Size(800, 2400);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+}
+
+Future<void> typePasswords(
+  WidgetTester tester,
+  String password, [
+  String? confirm,
+]) async {
+  final fields = find.byType(TextField);
+  await tester.enterText(fields.at(0), password);
+  if (confirm != null) await tester.enterText(fields.at(1), confirm);
+  await tester.pumpAndSettle();
+}
+
+void main() {
+  group('export', () {
+    testWidgets('a password too short never reaches the core', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(wallets: [makeMeta()]);
+      await tester.pumpWidget(screen(bridge, const BackupExportScreen()));
+      await tester.pumpAndSettle();
+
+      await typePasswords(tester, 'short', 'short');
+      await tester.tap(find.text('Create backup'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Use at least 8 characters.'), findsOneWidget);
+      expect(bridge.backupExportCalls, isEmpty);
+    });
+
+    testWidgets('the password field says what it stands in front of', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        screen(FakeBridge(wallets: [makeMeta()]), const BackupExportScreen()),
+      );
+      await tester.pumpAndSettle();
+
+      expectKeyboardKeepsNothing(tester);
+      // The eight-character floor is what the core takes, not advice:
+      // a file guessed offline needs length, and the screen says so
+      // where the password is chosen.
+      expect(
+        find.text(
+          'This file can be copied and guessed offline: use a long '
+          'passphrase, several words.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('two different passwords are refused', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(wallets: [makeMeta()]);
+      await tester.pumpWidget(screen(bridge, const BackupExportScreen()));
+      await tester.pumpAndSettle();
+
+      await typePasswords(tester, 'correct horse', 'correct hors');
+      await tester.tap(find.text('Create backup'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('The two passwords differ.'), findsOneWidget);
+      expect(bridge.backupExportCalls, isEmpty);
+    });
+
+    testWidgets('every wallet by default, and the settings when asked', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(wallets: [makeMeta()]);
+      await tester.pumpWidget(
+        screen(bridge, const BackupExportScreen(), sharer: FakeBackupSharer()),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byType(Switch));
+      await tester.pumpAndSettle();
+      await typePasswords(tester, 'correct horse', 'correct horse');
+      await tester.tap(find.text('Create backup'));
+      await tester.pumpAndSettle();
+
+      expect(bridge.backupExportCalls, hasLength(1));
+      // Null means every wallet on every network, not a filtered list.
+      expect(bridge.backupExportCalls.single.walletIds, isNull);
+      expect(bridge.backupExportCalls.single.includeSettings, isTrue);
+      expect(find.textContaining('1 wallet'), findsWidgets);
+      expect(find.text('Save file'), findsOneWidget);
+      expect(find.text('Share'), findsOneWidget);
+      expect(find.text('Show QR code'), findsOneWidget);
+      // The backup is made: leaving is secondary like the two ways out
+      // above it, so the blue does not ask to close before either is
+      // used. It still reads as a button, full width.
+      final done = find.widgetWithText(SecondaryButton, 'Done');
+      expect(done, findsOneWidget);
+      expect(tester.widget<SecondaryButton>(done).expand, isTrue);
+      expect(find.byType(PrimaryButton), findsNothing);
+      expect(
+        tester.getRect(done).width,
+        closeTo(
+          tester
+              .getRect(find.widgetWithText(SecondaryButton, 'Show QR code'))
+              .width,
+          1,
+        ),
+      );
+
+      await tester.tap(done);
+      await tester.pumpAndSettle();
+      expect(find.byType(BackupExportScreen), findsNothing);
+    });
+
+    testWidgets('says the scope plainly when there is no choice to make', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(wallets: [makeMeta()]);
+      await tester.pumpWidget(screen(bridge, const BackupExportScreen()));
+      await tester.pumpAndSettle();
+
+      // Every wallet is on the network shown: no group of one option,
+      // which would read as a control, only the scope and its count.
+      expect(
+        find.byWidgetPredicate((widget) => widget is ChoiceGroup),
+        findsNothing,
+      );
+      expect(find.text('All wallets (1)'), findsOneWidget);
+      expect(find.textContaining(' only ('), findsNothing);
+    });
+
+    testWidgets('offers the network scope when it differs', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(
+        wallets: [
+          makeMeta(id: 'w1', network: Network.signet),
+          makeMeta(id: 'w2', name: 'Other', network: Network.mainnet),
+        ],
+        settings: const Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.signet,
+          backends: {},
+          appPrefs: {},
+        ),
+      );
+      await tester.pumpWidget(screen(bridge, const BackupExportScreen()));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byWidgetPredicate((widget) => widget is ChoiceGroup),
+        findsOneWidget,
+      );
+      expect(find.text('All wallets (2)'), findsOneWidget);
+      expect(find.text('Signet only (1)'), findsOneWidget);
+    });
+
+    testWidgets('the network scope sends only that network ids', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(
+        wallets: [
+          makeMeta(id: 'w1', network: Network.signet),
+          makeMeta(id: 'w2', name: 'Other', network: Network.mainnet),
+        ],
+        settings: const Settings(
+          preferences: kPreferences,
+          activeNetwork: Network.signet,
+          backends: {},
+          appPrefs: {},
+        ),
+      );
+      await tester.pumpWidget(screen(bridge, const BackupExportScreen()));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Signet only (1)'));
+      await tester.pumpAndSettle();
+      await typePasswords(tester, 'correct horse', 'correct horse');
+      await tester.tap(find.text('Create backup'));
+      await tester.pumpAndSettle();
+
+      expect(bridge.backupExportCalls.single.walletIds, ['w1']);
+    });
+
+    testWidgets('saving writes the decoded bytes where the user points', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final saver = FakeDocumentSaver();
+      final sharer = FakeBackupSharer();
+      final bridge = FakeBridge(wallets: [makeMeta()]);
+      await tester.pumpWidget(
+        screen(
+          bridge,
+          const BackupExportScreen(),
+          sharer: sharer,
+          saver: saver,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await typePasswords(tester, 'correct horse', 'correct horse');
+      await tester.tap(find.text('Create backup'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save file'));
+      await tester.pumpAndSettle();
+
+      // A file, literally: the system's save dialog, not a share sheet
+      // that happens to offer a drive among mail apps.
+      expect(saver.saved, hasLength(1));
+      expect(saver.saved.single.bytes, base64Decode('R0ZCQUNLVVA='));
+      expect(saver.saved.single.filename, endsWith('.gerfaut'));
+      expect(saver.saved.single.mimeType, 'application/octet-stream');
+      expect(sharer.shared, isEmpty);
+      expect(find.text('Saved'), findsOneWidget);
+
+      // Flush the snackbar timer.
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('a save dialog waved away says nothing', (tester) async {
+      useTallSurface(tester);
+      final saver = FakeDocumentSaver(answer: false);
+      final bridge = FakeBridge(wallets: [makeMeta()]);
+      await tester.pumpWidget(
+        screen(bridge, const BackupExportScreen(), saver: saver),
+      );
+      await tester.pumpAndSettle();
+
+      await typePasswords(tester, 'correct horse', 'correct horse');
+      await tester.tap(find.text('Create backup'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save file'));
+      await tester.pumpAndSettle();
+
+      expect(saver.saved, isEmpty);
+      expect(find.text('Saved'), findsNothing);
+      // The backup is still on screen, ready for another try.
+      expect(find.text('Save file'), findsOneWidget);
+    });
+
+    testWidgets('a write that fails is said in the words of the platform', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final saver = FakeDocumentSaver()
+        ..failure = const DocumentSaveException('The drive is full.');
+      final bridge = FakeBridge(wallets: [makeMeta()]);
+      await tester.pumpWidget(
+        screen(bridge, const BackupExportScreen(), saver: saver),
+      );
+      await tester.pumpAndSettle();
+
+      await typePasswords(tester, 'correct horse', 'correct horse');
+      await tester.tap(find.text('Create backup'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save file'));
+      await tester.pumpAndSettle();
+
+      // On the screen, under the buttons, in amber: a toast would be
+      // gone before the sentence was read, and the platform's words
+      // are the line to quote.
+      final note = tester.widget<GerfautNotice>(find.byType(GerfautNotice));
+      expect(note.tone, NoticeTone.info);
+      expect(note.message, 'The file could not be saved.');
+      expect(note.detail, 'The drive is full.');
+      expect(find.text('The drive is full.'), findsOneWidget);
+      expect(find.byType(SnackBar), findsNothing);
+      expect(find.text('Saved'), findsNothing);
+      // The backup is still here for another try, and the note goes
+      // with the next one.
+      saver.failure = null;
+      await tester.tap(find.text('Save file'));
+      await tester.pumpAndSettle();
+      expect(find.byType(GerfautNotice), findsNothing);
+      expect(find.text('Saved'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('sharing hands the decoded bytes to the system sheet', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final saver = FakeDocumentSaver();
+      final sharer = FakeBackupSharer();
+      final bridge = FakeBridge(wallets: [makeMeta()]);
+      await tester.pumpWidget(
+        screen(
+          bridge,
+          const BackupExportScreen(),
+          sharer: sharer,
+          saver: saver,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await typePasswords(tester, 'correct horse', 'correct horse');
+      await tester.tap(find.text('Create backup'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Share'));
+      await tester.pumpAndSettle();
+
+      // The share sheet stays, under its own name, for a backup bound
+      // straight for another app or device.
+      expect(sharer.shared, hasLength(1));
+      expect(sharer.shared.single.bytes, base64Decode('R0ZCQUNLVVA='));
+      expect(sharer.shared.single.filename, endsWith('.gerfaut'));
+      expect(saver.saved, isEmpty);
+    });
+
+    testWidgets('coming back from the save dialog or the sheet does not lock', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge(wallets: [makeMeta()]);
+      await tester.pumpWidget(
+        screen(
+          bridge,
+          const BackupExportScreen(),
+          sharer: FakeBackupSharer(),
+          saver: FakeDocumentSaver(answer: false),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final lock = ProviderScope.containerOf(
+        tester.element(find.byType(BackupExportScreen)),
+      ).read(lockProvider.notifier);
+      lock
+        ..syncFromSettings(null)
+        ..syncFromSettings(const AppLock(kind: LockKind.pin, biometric: false));
+
+      await typePasswords(tester, 'correct horse', 'correct horse');
+      await tester.tap(find.text('Create backup'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save file'));
+      await tester.pumpAndSettle();
+      // Android pauses Gerfaut behind the dialog and resumes it after.
+      lock
+        ..noteHidden()
+        ..noteResumed();
+
+      // The backup is still on screen, with its QR code still to show.
+      expect(lock.state.locked, isFalse);
+      expect(find.text('Show QR code'), findsOneWidget);
+
+      // The share sheet is a screen of the system's just the same.
+      await tester.tap(find.text('Share'));
+      await tester.pumpAndSettle();
+      lock
+        ..noteHidden()
+        ..noteResumed();
+      expect(lock.state.locked, isFalse);
+      expect(find.text('Show QR code'), findsOneWidget);
+    });
+
+    testWidgets('a dialog that never opened does not cover a later trip', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      // The save was refused before the dialog could come up: no app on
+      // the phone can save a file. Gerfaut never left the screen, so
+      // nothing ever comes back to spend the trip it announced — and
+      // the next absence, whenever it comes, has to lock.
+      final saver = FakeDocumentSaver()
+        ..failure = const DocumentSaveException(
+          'no app on this device can save a file',
+          dialogOpened: false,
+        );
+      await tester.pumpWidget(
+        screen(
+          FakeBridge(wallets: [makeMeta()]),
+          const BackupExportScreen(),
+          sharer: FakeBackupSharer(),
+          saver: saver,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final lock = ProviderScope.containerOf(
+        tester.element(find.byType(BackupExportScreen)),
+      ).read(lockProvider.notifier);
+      lock
+        ..syncFromSettings(null)
+        ..syncFromSettings(const AppLock(kind: LockKind.pin, biometric: false));
+      lockOnEveryTrip(
+        ProviderScope.containerOf(
+          tester.element(find.byType(BackupExportScreen)),
+        ),
+      );
+
+      await typePasswords(tester, 'correct horse', 'correct horse');
+      await tester.tap(find.text('Create backup'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save file'));
+      await tester.pumpAndSettle();
+
+      // The refusal is on screen and the backup is still here.
+      expect(
+        find.text('no app on this device can save a file'),
+        findsOneWidget,
+      );
+      expect(lock.state.locked, isFalse);
+
+      // The phone is put down and picked up again: that is a real
+      // absence, and the announcement must not have covered it.
+      lock
+        ..noteHidden()
+        ..noteHidden()
+        ..noteResumed();
+      expect(lock.state.locked, isTrue);
+    });
+
+    testWidgets('a write that failed after the dialog keeps its return', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      // The other side of the same trip: the dialog named a place and
+      // the bytes did not make it. Android hands that answer back
+      // before Flutter says the app resumed, so the trip is still owed
+      // a return, and taking the announcement back here would put the
+      // lock in front of someone who never left.
+      final saver = FakeDocumentSaver()
+        ..failure = const DocumentSaveException(
+          'the document could not be opened for writing',
+        );
+      await tester.pumpWidget(
+        screen(
+          FakeBridge(wallets: [makeMeta()]),
+          const BackupExportScreen(),
+          sharer: FakeBackupSharer(),
+          saver: saver,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final lock = ProviderScope.containerOf(
+        tester.element(find.byType(BackupExportScreen)),
+      ).read(lockProvider.notifier);
+      lock
+        ..syncFromSettings(null)
+        ..syncFromSettings(const AppLock(kind: LockKind.pin, biometric: false));
+
+      await typePasswords(tester, 'correct horse', 'correct horse');
+      await tester.tap(find.text('Create backup'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save file'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('the document could not be opened for writing'),
+        findsOneWidget,
+      );
+
+      // The return the dialog owes, arriving after its answer.
+      lock
+        ..noteHidden()
+        ..noteResumed();
+      expect(lock.state.locked, isFalse);
+      expect(find.text('Show QR code'), findsOneWidget);
+    });
+
+    testWidgets('a second tap while the dialog comes up is not a second save', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      // The dialog takes the screen a beat after the tap, and a thumb
+      // that doubles up lands in that beat. The second call used to
+      // reach the platform, be refused as busy, and have the refusal
+      // read as a dialog that never opened: the trip announced for the
+      // first dialog was taken back under it, and its return locked
+      // the app — popping this screen, and the backup on it.
+      final saver = FakeDocumentSaver()..hold = Completer<bool>();
+      await tester.pumpWidget(
+        screen(
+          FakeBridge(wallets: [makeMeta()]),
+          const BackupExportScreen(),
+          sharer: FakeBackupSharer(),
+          saver: saver,
+        ),
+      );
+      await tester.pumpAndSettle();
+      final lock = ProviderScope.containerOf(
+        tester.element(find.byType(BackupExportScreen)),
+      ).read(lockProvider.notifier);
+      lock
+        ..syncFromSettings(null)
+        ..syncFromSettings(const AppLock(kind: LockKind.pin, biometric: false));
+
+      await typePasswords(tester, 'correct horse', 'correct horse');
+      await tester.tap(find.text('Create backup'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save file'));
+      await tester.pump();
+
+      // The button says what it is doing, and neither way out takes a
+      // second tap until the dialog has answered.
+      expect(find.text('Saving…'), findsOneWidget);
+      final share = find.widgetWithText(SecondaryButton, 'Share');
+      expect(tester.widget<SecondaryButton>(share).onPressed, isNull);
+      await tester.tap(find.text('Saving…'), warnIfMissed: false);
+      await tester.tap(share, warnIfMissed: false);
+      await tester.pump();
+      expect(saver.calls, 1);
+
+      // The dialog is up, Gerfaut hidden behind it; a place is picked
+      // and the dialog closes.
+      lock.noteHidden();
+      saver.hold!.complete(true);
+      await tester.pumpAndSettle();
+      lock.noteResumed();
+
+      expect(lock.state.locked, isFalse);
+      expect(saver.saved, hasLength(1));
+      expect(find.text('Saved'), findsOneWidget);
+      expect(find.text('Save file'), findsOneWidget);
+      expect(find.text('Show QR code'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 5));
+      await tester.pumpAndSettle();
+    });
+
+    test('a backup shared earlier leaves the cache, folders and all', () async {
+      final cache = await Directory.systemTemp.createTemp('gerfaut-cache');
+      addTearDown(() => cache.delete(recursive: true));
+      final sep = Platform.pathSeparator;
+      // Where share_plus writes the backup it is handed from memory, and
+      // the copy it hands on to the other app.
+      final written = Directory('${cache.path}${sep}0b5f6d2e-uuid')
+        ..createSync();
+      final first = File(
+        '${written.path}${sep}gerfaut-backup-2026-10-16.gerfaut',
+      )..writeAsBytesSync([1, 2, 3]);
+      final handed = Directory('${cache.path}${sep}share_plus')..createSync();
+      final second = File(
+        '${handed.path}${sep}gerfaut-backup-2026-10-16.gerfaut',
+      )..writeAsBytesSync([1, 2, 3]);
+      final other = File('${cache.path}${sep}keep.txt')
+        ..writeAsStringSync('not ours');
+      final longAgo = DateTime.now().subtract(sharedCopyLifetime * 2);
+      first.setLastModifiedSync(longAgo);
+      second.setLastModifiedSync(longAgo);
+      other.setLastModifiedSync(longAgo);
+
+      expect((await sweepSharedCopies(cache: cache)).gone, 2);
+      expect(first.existsSync(), isFalse);
+      expect(written.existsSync(), isFalse);
+      expect(second.existsSync(), isFalse);
+      expect(handed.existsSync(), isFalse);
+      expect(other.existsSync(), isTrue);
+    });
+
+    test('a backup shared within the hour stays, however often the app '
+        'starts', () async {
+      final cache = await Directory.systemTemp.createTemp('gerfaut-cache');
+      addTearDown(() => cache.delete(recursive: true));
+      final sep = Platform.pathSeparator;
+      // Still being read, perhaps: a mail left in drafts, a slow upload.
+      final handed = Directory('${cache.path}${sep}share_plus')..createSync();
+      final copy = File('${handed.path}${sep}gerfaut-backup-2026-10-16.gerfaut')
+        ..writeAsBytesSync([1, 2, 3]);
+      copy.setLastModifiedSync(
+        DateTime.now().subtract(
+          sharedCopyLifetime - const Duration(minutes: 1),
+        ),
+      );
+
+      expect((await sweepSharedCopies(cache: cache)).gone, 0);
+      expect((await sweepSharedCopies(cache: cache)).gone, 0);
+      expect(copy.existsSync(), isTrue);
+
+      copy.setLastModifiedSync(
+        DateTime.now().subtract(
+          sharedCopyLifetime + const Duration(minutes: 1),
+        ),
+      );
+      expect((await sweepSharedCopies(cache: cache)).gone, 1);
+      expect(copy.existsSync(), isFalse);
+    });
+
+    test('a copy kept for its age says when it may go', () async {
+      final cache = await Directory.systemTemp.createTemp('gerfaut-cache');
+      addTearDown(() => cache.delete(recursive: true));
+      final sep = Platform.pathSeparator;
+      final handed = Directory('${cache.path}${sep}share_plus')..createSync();
+      File('${handed.path}${sep}gerfaut-backup-2026-10-16.gerfaut')
+        ..writeAsBytesSync([1, 2, 3])
+        ..setLastModifiedSync(
+          DateTime.now().subtract(const Duration(minutes: 20)),
+        );
+      File('${handed.path}${sep}savings-transactions.csv')
+        ..writeAsStringSync('txid,amount')
+        ..setLastModifiedSync(
+          DateTime.now().subtract(const Duration(minutes: 50)),
+        );
+
+      final sweep = await sweepSharedCopies(cache: cache);
+      expect(sweep.gone, 0);
+      // The older of the two, ten minutes from its hour.
+      expect(sweep.next!.inMinutes, inInclusiveRange(9, 10));
+    });
+
+    test('a copy kept for its age goes when it comes of age, the app '
+        'still running', () async {
+      final cache = await Directory.systemTemp.createTemp('gerfaut-cache');
+      addTearDown(() => cache.delete(recursive: true));
+      final sep = Platform.pathSeparator;
+      final handed = Directory('${cache.path}${sep}share_plus')..createSync();
+      final copy = File('${handed.path}${sep}gerfaut-backup-2026-10-16.gerfaut')
+        ..writeAsBytesSync([1, 2, 3]);
+      // The hour, shortened: the timer is real, and so is the file.
+      final sweeper = SharedCopySweeper(
+        cache: cache,
+        lifetime: const Duration(milliseconds: 400),
+      );
+      addTearDown(sweeper.cancel);
+
+      expect(await sweeper.sweep(), 0);
+      expect(copy.existsSync(), isTrue);
+
+      // No share and no start after this one: the sweeper wakes alone.
+      final end = DateTime.now().add(const Duration(seconds: 10));
+      while (copy.existsSync() && DateTime.now().isBefore(end)) {
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      expect(copy.existsSync(), isFalse);
+      expect(handed.existsSync(), isFalse);
+    });
+
+    /// A cache two sweeps can collide on: old copies in plenty, at its
+    /// top and in folders, and three young ones made first, which a cache
+    /// held in memory lists last, past where a collision stopped a sweep.
+    Future<({Directory cache, List<File> young})> crowdedCache(
+      List<Duration> youngAges,
+    ) async {
+      final cache = await Directory.systemTemp.createTemp('gerfaut-cache');
+      addTearDown(() => cache.delete(recursive: true));
+      final sep = Platform.pathSeparator;
+      final handed = Directory('${cache.path}${sep}share_plus')..createSync();
+      final young = [
+        File('${handed.path}${sep}gerfaut-backup-2026-10-16.gerfaut')
+          ..writeAsBytesSync([1, 2, 3]),
+        File('${handed.path}${sep}spending-transactions.csv')
+          ..writeAsStringSync('txid,amount'),
+        File('${cache.path}${sep}young-transactions.csv')
+          ..writeAsStringSync('txid,amount'),
+      ];
+      for (var i = 0; i < young.length; i++) {
+        young[i].setLastModifiedSync(DateTime.now().subtract(youngAges[i]));
+      }
+      final longAgo = DateTime.now().subtract(sharedCopyLifetime * 2);
+      for (var i = 0; i < 40; i++) {
+        File('${cache.path}${sep}wallet$i-transactions.csv')
+          ..writeAsStringSync('txid,amount')
+          ..setLastModifiedSync(longAgo);
+        final folder = Directory('${cache.path}${sep}uuid-$i')..createSync();
+        File('${folder.path}${sep}gerfaut-backup-2026-10-16.gerfaut')
+          ..writeAsBytesSync([1, 2, 3])
+          ..setLastModifiedSync(longAgo);
+      }
+      return (cache: cache, young: young);
+    }
+
+    test('two sweeps at once each delete what the other left, and both '
+        'still see the young copies', () async {
+      final (:cache, :young) = await crowdedCache(const [
+        Duration(minutes: 50),
+        Duration(minutes: 40),
+        Duration(minutes: 30),
+      ]);
+
+      final sweeps = await Future.wait([
+        sweepSharedCopies(cache: cache),
+        sweepSharedCopies(cache: cache),
+      ]);
+
+      // Each old copy went once, whichever sweep took it.
+      expect(sweeps[0].gone + sweeps[1].gone, 80);
+      // Both read to the end: each knows the oldest young copy, ten
+      // minutes from its hour.
+      for (final sweep in sweeps) {
+        expect(sweep.next?.inMinutes, inInclusiveRange(9, 10));
+      }
+      for (final copy in young) {
+        expect(copy.existsSync(), isTrue);
+      }
+    });
+
+    test(
+      'two sweeps at once still leave the young copies their hour',
+      () async {
+        final (:cache, :young) = await crowdedCache(const [
+          Duration.zero,
+          Duration.zero,
+          Duration.zero,
+        ]);
+        // The hour, shortened: long enough for both sweeps to finish.
+        final sweeper = SharedCopySweeper(
+          cache: cache,
+          lifetime: const Duration(seconds: 2),
+        );
+        addTearDown(sweeper.cancel);
+
+        await Future.wait([sweeper.sweep(), sweeper.sweep()]);
+        for (final copy in young) {
+          expect(copy.existsSync(), isTrue);
+        }
+
+        final end = DateTime.now().add(const Duration(seconds: 15));
+        while (young.any((copy) => copy.existsSync()) &&
+            DateTime.now().isBefore(end)) {
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        }
+        for (final copy in young) {
+          expect(copy.existsSync(), isFalse);
+        }
+      },
+    );
+  });
+
+  group('animated QR', () {
+    /// The frame on screen, read the way a screen reader would.
+    String? shownLabel(WidgetTester tester) =>
+        tester.widget<QrImageView>(find.byType(QrImageView)).semanticsLabel;
+
+    testWidgets('the frames loop, uppercased, with their position', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        screen(
+          FakeBridge(),
+          const BackupQrScreen(
+            frames: ['ur:bytes/1-2/aaa', 'ur:bytes/2-2/bbb'],
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(shownLabel(tester), 'Backup QR code, frame 1 of 2');
+      expect(find.text('1 / 2'), findsOneWidget);
+
+      await tester.pump(frameInterval);
+      expect(shownLabel(tester), 'Backup QR code, frame 2 of 2');
+      expect(find.text('2 / 2'), findsOneWidget);
+
+      // And back to the first: a receiver may join at any frame.
+      await tester.pump(frameInterval);
+      expect(shownLabel(tester), 'Backup QR code, frame 1 of 2');
+    });
+
+    testWidgets('the screen is kept on for the loop, then let go', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final keeper = FakeScreenKeeper();
+      await tester.pumpWidget(
+        screen(
+          FakeBridge(),
+          const BackupQrScreen(
+            frames: ['ur:bytes/1-2/aaa', 'ur:bytes/2-2/bbb'],
+          ),
+          keeper: keeper,
+        ),
+      );
+      await tester.pump();
+      expect(keeper.on, isTrue);
+      expect(keeper.holds, 1);
+
+      // Leaving the screen hands the phone its timeout back.
+      await tester.pumpWidget(
+        screen(FakeBridge(), const SizedBox.shrink(), keeper: keeper),
+      );
+      expect(keeper.on, isFalse);
+      expect(keeper.releases, 1);
+    });
+
+    testWidgets('a single frame stands still, with no counter', (tester) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(
+        screen(FakeBridge(), const BackupQrScreen(frames: ['ur:bytes/aaa'])),
+      );
+      await tester.pump();
+
+      expect(shownLabel(tester), 'Backup QR code');
+      expect(find.text('1 / 1'), findsNothing);
+      await tester.pump(frameInterval);
+      expect(shownLabel(tester), 'Backup QR code');
+    });
+  });
+
+  group('restore', () {
+    BackupPreview preview({
+      bool alreadyWatched = false,
+      bool settings = false,
+    }) {
+      return BackupPreview(
+        createdAt: 1755000000,
+        hasSettings: settings,
+        wallets: [
+          const BackupWalletPreview(
+            index: 0,
+            name: 'Cold storage',
+            network: Network.signet,
+            kind: DescriptorsKind(
+              external: 'wpkh(tpub.../0/*)#aaaaaaaa',
+              internal: null,
+              script: ScriptKind.segwit,
+            ),
+            alreadyWatched: false,
+          ),
+          BackupWalletPreview(
+            index: 1,
+            name: 'Savings',
+            network: Network.signet,
+            kind: const SingleAddressKind(address: 'tb1qexample'),
+            alreadyWatched: alreadyWatched,
+          ),
+        ],
+      );
+    }
+
+    /// Pushes the restore screen the way the settings page pushes it, so
+    /// what it says on its way out has a route to land on. The scanner's
+    /// camera is a button that hands one frame over.
+    Future<void> pushRestore(
+      WidgetTester tester,
+      FakeBridge bridge, {
+      BackupFilePicker? filePicker,
+    }) async {
+      await tester.pumpWidget(
+        screen(
+          bridge,
+          Builder(
+            builder: (context) => Scaffold(
+              body: TextButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => BackupRestoreScreen(
+                      filePicker: filePicker,
+                      cameraBuilder: (onFrame) => TextButton(
+                        onPressed: () => onFrame('gerfaut-backup:R0ZCQUNLVVA='),
+                        child: const Text('frame'),
+                      ),
+                    ),
+                  ),
+                ),
+                child: const Text('open restore'),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('open restore'));
+      await tester.pumpAndSettle();
+    }
+
+    /// Drives the screen to the preview step through a scanned code.
+    Future<void> openBackup(WidgetTester tester, FakeBridge bridge) async {
+      await pushRestore(tester, bridge);
+      await tester.tap(find.text('Scan a QR code'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('frame'));
+      await tester.pumpAndSettle();
+      expectKeyboardKeepsNothing(tester);
+      await tester.enterText(find.byType(TextField), 'correct horse');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open backup'));
+      await tester.pumpAndSettle();
+    }
+
+    /// Whether the caret sits in the password field — the only one on
+    /// this step, and what a phone raises its keyboard for.
+    bool passwordHasFocus(WidgetTester tester) => tester
+        .widget<EditableText>(find.byType(EditableText))
+        .focusNode
+        .hasFocus;
+
+    testWidgets('a scanned backup lands on the page, and takes the caret', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      await pushRestore(tester, bridge);
+      expect(find.textContaining('Backup read from'), findsNothing);
+
+      await tester.tap(find.text('Scan a QR code'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('frame'));
+      await tester.pumpAndSettle();
+
+      // The scanner closing over the page used to be all the person saw:
+      // the page now states what it holds and where the next step is.
+      expect(find.byType(ScanScreen), findsNothing);
+      expect(find.text('Backup read from the QR code'), findsOneWidget);
+      expect(find.text('Type its password to open it.'), findsOneWidget);
+      expect(passwordHasFocus(tester), isTrue);
+    });
+
+    testWidgets('the restore scanner says a private key in its own words', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge()
+        ..onAssembleQr = (_) => throw coreFailure(
+          'private_material',
+          'input contains private key material and was rejected',
+        );
+      await pushRestore(tester, bridge);
+      await tester.tap(find.text('Scan a QR code'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('frame'));
+      await tester.pumpAndSettle();
+
+      expect(find.byType(ScanScreen), findsOneWidget);
+      expect(find.text(privateKeyNotABackup), findsOneWidget);
+      expect(find.textContaining('descriptor'), findsNothing);
+    });
+
+    testWidgets('a file lands the same way, under its own name', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      await pushRestore(
+        tester,
+        bridge,
+        // On this platform an XFile takes its name from its path.
+        filePicker: () async =>
+            XFile.fromData(base64Decode('R0ZCQUNLVVA='), path: 'phone.gerfaut'),
+      );
+
+      await tester.tap(find.text('Open a file'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Backup read from phone.gerfaut'), findsOneWidget);
+      expect(find.text('Type its password to open it.'), findsOneWidget);
+      expect(passwordHasFocus(tester), isTrue);
+    });
+
+    testWidgets('coming back from the file picker does not lock the app', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      await pushRestore(
+        tester,
+        bridge,
+        // On this platform an XFile takes its name from its path.
+        filePicker: () async =>
+            XFile.fromData(base64Decode('R0ZCQUNLVVA='), path: 'phone.gerfaut'),
+      );
+      final lock = ProviderScope.containerOf(
+        tester.element(find.byType(BackupRestoreScreen)),
+      ).read(lockProvider.notifier);
+      // A lock that is already open: loaded first without one, so
+      // learning about it does not shut the screen on the spot.
+      lock
+        ..syncFromSettings(null)
+        ..syncFromSettings(const AppLock(kind: LockKind.pin, biometric: false));
+
+      await tester.tap(find.text('Open a file'));
+      await tester.pumpAndSettle();
+      // Android pauses Gerfaut behind the picker and resumes it after.
+      lock
+        ..noteHidden()
+        ..noteResumed();
+
+      // Being sent to a screen of the system's by Gerfaut itself is not
+      // leaving: the flow is still there to go on with.
+      expect(lock.state.locked, isFalse);
+      expect(find.text('Backup read from phone.gerfaut'), findsOneWidget);
+    });
+
+    testWidgets('a picker that never opened does not cover a later trip', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      await pushRestore(
+        tester,
+        bridge,
+        // No app on the phone answers the intent: the picker throws
+        // instead of showing, and Gerfaut never leaves the screen.
+        filePicker: () async =>
+            throw PlatformException(code: 'ActivityNotFoundException'),
+      );
+      final lock = ProviderScope.containerOf(
+        tester.element(find.byType(BackupRestoreScreen)),
+      ).read(lockProvider.notifier);
+      lock
+        ..syncFromSettings(null)
+        ..syncFromSettings(const AppLock(kind: LockKind.pin, biometric: false));
+      lockOnEveryTrip(
+        ProviderScope.containerOf(
+          tester.element(find.byType(BackupRestoreScreen)),
+        ),
+      );
+
+      await tester.tap(find.text('Open a file'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('No app on this phone can open a file to restore.'),
+        findsOneWidget,
+      );
+      expect(lock.state.locked, isFalse);
+
+      // A real absence afterwards still locks: the announcement was
+      // taken back rather than left to cover it.
+      lock
+        ..noteHidden()
+        ..noteHidden()
+        ..noteResumed();
+      expect(lock.state.locked, isTrue);
+    });
+
+    testWidgets('what was read holds at 340dp and twice the text size', (
+      tester,
+    ) async {
+      tester.view.physicalSize = const Size(340, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        screen(
+          FakeBridge(),
+          Builder(
+            builder: (context) => MediaQuery(
+              data: MediaQuery.of(context)
+                  .copyWith(textScaler: const TextScaler.linear(2)),
+              child: BackupRestoreScreen(
+                filePicker: () async => XFile.fromData(
+                  base64Decode('R0ZCQUNLVVA='),
+                  path: 'gerfaut-backup-2026-08-30.gerfaut',
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open a file'));
+      await tester.pumpAndSettle();
+
+      // A file name is as long as its owner made it, and the panel has
+      // to carry the longest one on the narrowest phone.
+      expect(tester.takeException(), isNull);
+      expect(
+        find.text('Backup read from gerfaut-backup-2026-08-30.gerfaut'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a wrong password says so in plain words', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      bridge.onPreviewBackup = (_, _) => throw coreFailure(
+        'wrong_key',
+        'vault decryption failed: wrong key or corrupted file',
+      );
+      await openBackup(tester, bridge);
+
+      expect(
+        find.text('Wrong password, or the file is damaged.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a file from a newer Gerfaut says to update', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      // The core refuses the file by its format, whichever layer is
+      // newer: reading it as a wrong password would send the person
+      // back to retype what they got right.
+      bridge.onPreviewBackup = (_, _) => throw coreFailure(
+        'newer_format',
+        'invalid backup: this backup was written by a newer Gerfaut '
+            '(backup version 3); update Gerfaut to open it',
+      );
+      await openBackup(tester, bridge);
+
+      expect(
+        find.text(
+          'This backup was made with a newer version of Gerfaut. Update '
+          'Gerfaut to open it.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Wrong password'), findsNothing);
+    });
+
+    testWidgets('a file that is not a backup is not blamed on the password', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      // Any vault failure used to read as a wrong password here. A
+      // picture picked by mistake is not one, and neither is a vault.
+      bridge.onPreviewBackup = (_, _) => throw coreFailure(
+        'unreadable_backup',
+        'invalid backup: this is not a Gerfaut backup',
+      );
+      await pushRestore(
+        tester,
+        bridge,
+        filePicker: () async => XFile.fromData(
+          utf8.encode('a holiday photo, as far as anyone knows'),
+          path: 'IMG_2041.jpg',
+        ),
+      );
+      await tester.tap(find.text('Open a file'));
+      await tester.pumpAndSettle();
+      expect(find.text('Backup read from IMG_2041.jpg'), findsOneWidget);
+      await tester.enterText(find.byType(TextField), 'correct horse');
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open backup'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('This is not a Gerfaut backup, or it is damaged.'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Wrong password'), findsNothing);
+    });
+
+    testWidgets('a backup holding a private key is refused in words', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      bridge.onPreviewBackup = (_, _) => preview();
+      bridge.onImportBackup = (_, _, _) => throw coreFailure(
+        'private_material',
+        'input contains private key material and was rejected',
+      );
+      await openBackup(tester, bridge);
+      await tester.tap(find.text('Restore 2 wallets'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text(
+          'A wallet in this backup holds a private key, and Gerfaut only '
+          'watches: nothing was restored.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Wrong password'), findsNothing);
+    });
+
+    testWidgets('a wallet the core refuses by name stops the restore', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      bridge.onPreviewBackup = (_, _) => preview();
+      // A network that does not match, or a private key, comes under
+      // invalid_input once the core has named the wallet.
+      const said =
+          'invalid backup: "Savings" cannot be restored: input contains '
+          'private key material and was rejected';
+      bridge.onImportBackup = (_, _, _) =>
+          throw coreFailure('invalid_input', said);
+      await openBackup(tester, bridge);
+      await tester.tap(find.text('Restore 2 wallets'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('Nothing was restored. The core says: $said'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('Wrong password'), findsNothing);
+    });
+
+    testWidgets('a refused wallet is listed, greyed, with its reason', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      const reason =
+          'descriptor error: the change descriptor does not spend under the '
+          "receive descriptor's keys and conditions";
+      bridge.onPreviewBackup = (_, _) => BackupPreview(
+        createdAt: 1755000000,
+        hasSettings: false,
+        wallets: [
+          preview().wallets.first,
+          const BackupWalletPreview(
+            index: 1,
+            name: 'Handed over',
+            network: Network.signet,
+            kind: DescriptorsKind(
+              external: 'wpkh(tpub.../0/*)',
+              internal: 'wpkh(tpub.../1/*)',
+              script: ScriptKind.segwit,
+            ),
+            alreadyWatched: false,
+            refused: reason,
+          ),
+        ],
+      );
+      bridge.onImportBackup = (_, _, _) => ImportReport(
+        added: [makeMeta(network: Network.signet)],
+        skipped: 1,
+        settingsApplied: false,
+      );
+      await openBackup(tester, bridge);
+
+      expect(find.text('Handed over'), findsOneWidget);
+      expect(find.textContaining('Cannot be restored'), findsOneWidget);
+      expect(find.text(reason), findsOneWidget);
+      final boxes = tester.widgetList<Checkbox>(find.byType(Checkbox)).toList();
+      expect(boxes[1].value, isFalse);
+      expect(boxes[1].onChanged, isNull);
+      await tester.tap(find.text('Handed over'));
+      await tester.pumpAndSettle();
+      expect(find.text('Restore 1 wallet'), findsOneWidget);
+
+      await tester.tap(find.text('Restore 1 wallet'));
+      await tester.pumpAndSettle();
+
+      // Never asked for, and named on the way out.
+      expect(bridge.importCalls.single.indexes, [0]);
+      expect(
+        find.text('1 wallet restored · 1 left out: Handed over'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('the wallets the core left out are named', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      bridge.onPreviewBackup = (_, _) => preview();
+      bridge.onImportBackup = (_, _, _) => ImportReport(
+        added: [makeMeta(network: Network.signet)],
+        skipped: 0,
+        settingsApplied: true,
+        refused: const [
+          RefusedWallet(index: 1, name: 'Savings', reason: 'no'),
+          RefusedWallet(index: 2, name: 'Wallet 3 of the backup', reason: 'no'),
+        ],
+      );
+      await openBackup(tester, bridge);
+      await tester.tap(find.text('Restore 2 wallets'));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.text('1 wallet restored · settings applied · 2 left out'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a watched wallet is listed but cannot be chosen', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      bridge.onPreviewBackup = (_, _) => preview(alreadyWatched: true);
+      await openBackup(tester, bridge);
+
+      expect(find.text('Savings'), findsOneWidget);
+      expect(find.textContaining('Already watched'), findsOneWidget);
+      final boxes = tester.widgetList<Checkbox>(find.byType(Checkbox)).toList();
+      expect(boxes, hasLength(2));
+      expect(boxes[0].value, isTrue);
+      expect(boxes[1].value, isFalse);
+      expect(boxes[1].onChanged, isNull);
+      expect(find.text('Restore 1 wallet'), findsOneWidget);
+    });
+
+    testWidgets('a watched wallet cannot be tapped into the restore', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      bridge.onPreviewBackup = (_, _) => preview(alreadyWatched: true);
+      bridge.onImportBackup = (_, _, _) => ImportReport(
+        added: [makeMeta(network: Network.signet)],
+        skipped: 1,
+        settingsApplied: false,
+      );
+      await openBackup(tester, bridge);
+
+      // The whole row, not only its box: the line reads as tappable and
+      // must answer the same way the box does.
+      await tester.tap(find.text('Savings'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byType(Checkbox).at(1), warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect(find.text('Restore 1 wallet'), findsOneWidget);
+
+      await tester.tap(find.text('Restore 1 wallet'));
+      await tester.pumpAndSettle();
+
+      // The core would skip it anyway; it is never even asked for.
+      expect(bridge.importCalls.single.indexes, [0]);
+    });
+
+    testWidgets('a backup that holds nothing new leaves nothing to restore', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      bridge.onPreviewBackup = (_, _) => BackupPreview(
+        createdAt: 1755000000,
+        hasSettings: false,
+        wallets: [
+          for (final wallet in preview(alreadyWatched: true).wallets)
+            BackupWalletPreview(
+              index: wallet.index,
+              name: wallet.name,
+              network: wallet.network,
+              kind: wallet.kind,
+              alreadyWatched: true,
+            ),
+        ],
+      );
+      await openBackup(tester, bridge);
+
+      // Every wallet stays on the list, said to be watched already:
+      // showing what will not be done reads better than a backup that
+      // seems to have lost its wallets.
+      expect(find.text('Cold storage'), findsOneWidget);
+      expect(find.text('Savings'), findsOneWidget);
+      expect(find.textContaining('Already watched'), findsNWidgets(2));
+      expect(
+        tester
+            .widgetList<Checkbox>(find.byType(Checkbox))
+            .every((box) => box.value == false && box.onChanged == null),
+        isTrue,
+      );
+
+      // And the action leads nowhere: there is nothing left to ask for.
+      await tester.tap(find.byType(PrimaryButton), warnIfMissed: false);
+      await tester.pumpAndSettle();
+      expect(bridge.importCalls, isEmpty);
+    });
+
+    testWidgets('unchecking a wallet leaves it out of the restore', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      bridge.onPreviewBackup = (_, _) => preview(settings: true);
+      bridge.onImportBackup = (_, _, choices) => ImportReport(
+        added: [makeMeta(network: Network.signet)],
+        skipped: choices.indexes?.length == 1 ? 1 : 0,
+        settingsApplied: choices.applySettings,
+      );
+      await openBackup(tester, bridge);
+
+      expect(find.text('Restore 2 wallets'), findsOneWidget);
+      await tester.tap(find.byType(Checkbox).at(1));
+      await tester.pumpAndSettle();
+      expect(find.text('Restore 1 wallet'), findsOneWidget);
+
+      // Node settings travel only when the box is ticked.
+      await tester.tap(find.byType(Switch));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Restore 1 wallet'));
+      await tester.pumpAndSettle();
+
+      expect(bridge.importCalls, hasLength(1));
+      expect(bridge.importCalls.single.indexes, [0]);
+      expect(bridge.importCalls.single.applySettings, isTrue);
+    });
+
+    testWidgets('the node settings say what they would put in place', (
+      tester,
+    ) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      bridge.onPreviewBackup = (_, _) => BackupPreview(
+        createdAt: 1755000000,
+        hasSettings: true,
+        wallets: preview().wallets,
+        backends: const [
+          BackupBackend(network: Network.mainnet, backend: 'node.example.org'),
+          BackupBackend(network: Network.signet, backend: 'signet.example.org'),
+        ],
+        electrumHosts: const ['node.example.org:50002'],
+      );
+      await openBackup(tester, bridge);
+
+      expect(
+        find.text(
+          "Replaces your backend choice and gap limit with the backup's, "
+          'and adds the certificates it accepted.',
+        ),
+        findsOneWidget,
+      );
+      // What would take their place, named: the machine every address
+      // is asked for, and the certificate this phone would then trust
+      // without asking again.
+      expect(find.text('NODES'), findsOneWidget);
+      expect(find.text('Mainnet'), findsOneWidget);
+      expect(find.text('node.example.org'), findsOneWidget);
+      expect(find.text('Signet'), findsOneWidget);
+      expect(find.text('signet.example.org'), findsOneWidget);
+      expect(find.text('PINNED CERTIFICATES'), findsOneWidget);
+      expect(find.text('node.example.org:50002'), findsOneWidget);
+    });
+
+    testWidgets('a backup that names no node lists nothing', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      bridge.onPreviewBackup = (_, _) => preview(settings: true);
+      await openBackup(tester, bridge);
+
+      // The toggle stands; there is simply nothing to list under it.
+      expect(find.text('Apply node settings'), findsOneWidget);
+      expect(find.text('NODES'), findsNothing);
+      expect(find.text('PINNED CERTIFICATES'), findsNothing);
+    });
+
+    testWidgets('a restore states what it added', (tester) async {
+      useTallSurface(tester);
+      final bridge = FakeBridge();
+      bridge.onPreviewBackup = (_, _) => preview();
+      bridge.onImportBackup = (_, _, _) => ImportReport(
+        added: [makeMeta(network: Network.signet)],
+        skipped: 1,
+        settingsApplied: false,
+      );
+      await openBackup(tester, bridge);
+      await tester.tap(find.text('Restore 2 wallets'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('1 wallet restored'), findsOneWidget);
+    });
+  });
+}

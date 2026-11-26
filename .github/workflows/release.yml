@@ -1,0 +1,156 @@
+# Builds the release APKs on every `v*` tag and attaches them, unsigned,
+# to a draft GitHub Release. The signature is added on the release
+# machine by scripts/sign-release.ps1, which swaps the signed files into
+# the draft and adds the signed SHA256SUMS; then publish.
+# Manual runs, even from a tag, build the same APKs and upload them as
+# workflow artifacts only. So does a pull request that changes what
+# Gradle, pub or Cargo resolve, or the build itself: a new plugin brings
+# Gradle modules that reproducible/verification-metadata.xml must list,
+# and this is the only build that checks them. A change to the Rust code
+# alone is compiled for Android by the manual run before a release.
+#
+# The APKs come out of the pinned container of `reproducible/`. The
+# signing key never comes near CI: a runner executes code this repository
+# does not control, and an Android signing key cannot be rotated once an
+# app is installed under it. Nothing here touches Bitcoin keys; Gerfaut
+# is watch-only by design.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - 'android/**'
+      - 'rust/Cargo.lock'
+      - 'rust/Cargo.toml'
+      - 'rust/rust-toolchain.toml'
+      - 'rust_builder/**'
+      - 'reproducible/**'
+      - '.github/core-on-main.sh'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to a pull request replaces its build; a tag and a manual
+# run are never cut short.
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      # No credentials left in .git/config: nothing after a checkout talks
+      # to GitHub.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: gerfaut-mobile
+          persist-credentials: false
+
+      # The Rust crate depends on the sibling gerfaut-core checkout, at the
+      # revision this release pins.
+      - name: Read the pinned gerfaut-core revision
+        id: core
+        run: echo "rev=$(cat gerfaut-mobile/reproducible/gerfaut-core.rev)" >> "$GITHUB_OUTPUT"
+
+      - name: Check the pinned revision is on gerfaut-core's main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REV: ${{ steps.core.outputs.rev }}
+        run: gerfaut-mobile/.github/core-on-main.sh "$REV"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gerfaut-dev/gerfaut-core
+          ref: ${{ steps.core.outputs.rev }}
+          path: gerfaut-core
+          persist-credentials: false
+
+      # The pinned image is 13 GB and the build writes several more. What
+      # goes is everything the container carries its own copy of, the
+      # runner's Android SDK included: nothing on the host signs anymore.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /usr/local/share/boost /opt/hostedtoolcache/CodeQL \
+                      /usr/local/lib/node_modules
+          df -h /
+
+      - name: Build the unsigned APKs
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            gerfaut-mobile/reproducible/build.sh --out "$PWD/unsigned" --version "$GITHUB_REF_NAME"
+          else
+            gerfaut-mobile/reproducible/build.sh --out "$PWD/unsigned"
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gerfaut-android-unsigned
+          if-no-files-found: error
+          path: |
+            unsigned/*-unsigned.apk
+            unsigned/SHA256SUMS
+          retention-days: 14
+
+  # The only job that can write to the repository. It runs `gh` on what
+  # the build handed over, plus a checkout narrowed to the release notes.
+  # Only on a pushed tag: a manual run, even from a tag, and a pull
+  # request stop at the artifact.
+  draft:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: apk
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/release-notes.md
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: gerfaut-android-unsigned
+          path: unsigned
+
+      # The draft carries the files under their `-unsigned` names until
+      # the signing script replaces them: a file nobody has signed must
+      # not look like one somebody has. `--verify-tag` refuses to invent a
+      # tag. A draft that already exists (a re-run) gets its assets
+      # replaced; a published release is never touched, `gh release
+      # create` fails on it. Every 0.x release is a beta and says so in
+      # its title; GitHub's pre-release box stays unticked, since it
+      # would hide the release from /releases/latest, which the site and
+      # the apps' update check read.
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::not a release tag: $GITHUB_REF_NAME"; exit 1; }
+          version="${GITHUB_REF_NAME#v}"
+          title="Gerfaut $version"
+          [ "${version%%.*}" != 0 ] || title="$title (beta)"
+          ls -l unsigned
+          if [ "$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)" = true ]; then
+            gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber unsigned/*-unsigned.apk
+          else
+            gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --draft --verify-tag \
+              --title "$title" \
+              --notes-file .github/release-notes.md \
+              unsigned/*-unsigned.apk
+          fi

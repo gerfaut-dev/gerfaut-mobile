@@ -1,0 +1,1672 @@
+import 'dart:async';
+
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:gerfaut/app.dart';
+import 'package:file_selector/file_selector.dart';
+import 'package:gerfaut/screens/broadcast.dart';
+import 'package:gerfaut/src/bridge.dart';
+import 'package:gerfaut/src/format.dart';
+import 'package:gerfaut/src/lock.dart';
+import 'package:gerfaut/src/models.dart';
+import 'package:gerfaut/src/state.dart';
+import 'package:gerfaut/src/disguise.dart';
+import 'package:gerfaut/src/tx_file.dart';
+import 'package:gerfaut/theme/tokens.dart';
+import 'package:gerfaut/widgets/amounts.dart';
+import 'package:gerfaut/widgets/buttons.dart';
+import 'package:gerfaut/widgets/icon_chip.dart';
+import 'package:gerfaut/widgets/notice.dart';
+import 'package:gerfaut/widgets/op_return_preview.dart';
+import 'package:gerfaut/widgets/tx_diagram.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import 'core_fixtures.dart';
+import 'fakes.dart';
+import 'menu.dart';
+
+/// The palette of a theme, so a test can walk both.
+GerfautTokens tokensOf(Brightness brightness) =>
+    brightness == Brightness.dark ? GerfautTokens.dark : GerfautTokens.light;
+
+Widget broadcastApp(
+  FakeBridge bridge, {
+  Brightness brightness = Brightness.light,
+  Future<XFile?> Function()? filePicker,
+}) {
+  return ProviderScope(
+    retry: noRetry,
+    overrides: [
+      bridgeProvider.overrideWithValue(bridge),
+      disguiseServiceProvider.overrideWithValue(FakeDisguise()),
+    ],
+    child: MaterialApp(
+      theme: themeFrom(tokensOf(brightness), brightness),
+      home: BroadcastScreen(filePicker: filePicker),
+    ),
+  );
+}
+
+/// A surface tall enough to build the whole preview at once.
+void useTallSurface(WidgetTester tester) {
+  tester.view.physicalSize = const Size(800, 3600);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+}
+
+/// Pastes [text] and opens the preview.
+Future<void> preview(WidgetTester tester, [String text = 'cHNidP8B']) async {
+  await tester.enterText(find.byType(TextField), text);
+  await tester.pumpAndSettle();
+  await tester.tap(find.text('Preview'));
+  await tester.pumpAndSettle();
+}
+
+/// The provider container behind the running screen.
+ProviderContainer containerOf(WidgetTester tester) {
+  return ProviderScope.containerOf(
+    tester.element(find.byType(BroadcastScreen)),
+    listen: false,
+  );
+}
+
+/// Decoration of the block carrying [text].
+BoxDecoration blockOf(WidgetTester tester, String text) {
+  return tester
+          .widget<Container>(
+            find
+                .ancestor(of: find.text(text), matching: find.byType(Container))
+                .first,
+          )
+          .decoration!
+      as BoxDecoration;
+}
+
+/// The card a status pill sits on: the second Container up, the pill
+/// itself being the first.
+BoxDecoration cardAround(WidgetTester tester, String pill) {
+  return tester
+          .widget<Container>(
+            find
+                .ancestor(of: find.text(pill), matching: find.byType(Container))
+                .at(1),
+          )
+          .decoration!
+      as BoxDecoration;
+}
+
+FilledButton primaryButton(WidgetTester tester, String label) {
+  return tester.widget<FilledButton>(
+    find.ancestor(of: find.text(label), matching: find.byType(FilledButton)),
+  );
+}
+
+void main() {
+  group('file import', () {
+    test('a binary PSBT goes as hex', () {
+      final bytes = Uint8List.fromList([0x70, 0x73, 0x62, 0x74, 0xff, 0x01]);
+      expect(transactionTextOf(bytes), '70736274ff01');
+    });
+
+    test('a text file goes as its trimmed text', () {
+      final bytes = Uint8List.fromList(utf8.encode('  cHNidP8BAA==\n'));
+      expect(transactionTextOf(bytes), 'cHNidP8BAA==');
+    });
+
+    test('a binary transaction goes as hex', () {
+      // A raw transaction starts with its version: bytes text would
+      // never carry.
+      final bytes = Uint8List.fromList([0x02, 0x00, 0x00, 0x00, 0x01]);
+      expect(transactionTextOf(bytes), '0200000001');
+    });
+  });
+
+  testWidgets('the preview needs something to decode', (tester) async {
+    await tester.pumpWidget(broadcastApp(FakeBridge()));
+    await tester.pumpAndSettle();
+
+    expect(find.text('SIGNED TRANSACTION OR PSBT'), findsOneWidget);
+    expectKeyboardKeepsNothing(tester);
+    expect(primaryButton(tester, 'Preview').onPressed, isNull);
+    expect(find.text('Import a file'), findsOneWidget);
+    expect(find.text('Scan a QR code'), findsOneWidget);
+    // Nothing sent yet: no recent list.
+    expect(find.text('RECENT BROADCASTS'), findsNothing);
+  });
+
+  testWidgets('input the core cannot read is stated under the field', (
+    tester,
+  ) async {
+    await tester.pumpWidget(broadcastApp(FakeBridge()));
+    await tester.pumpAndSettle();
+
+    await preview(tester, 'hello world');
+
+    // What to paste, then the core's own words, smaller.
+    const headline =
+        'This is not a transaction Gerfaut can read. Paste a signed '
+        'transaction in hex, or a PSBT.';
+    expect(find.text(headline), findsOneWidget);
+    expect(find.textContaining('expected a PSBT'), findsOneWidget);
+    // An error, not a hint: the text colour with its glyph, never the
+    // grey of the hint and never red, which belongs to the chain.
+    final light = GerfautTokens.light;
+    expect(tester.widget<Text>(find.text(headline)).style?.color, light.text);
+    expect(find.byIcon(LucideIcons.circleAlert), findsOneWidget);
+    // Said aloud as it appears.
+    final announced = find.ancestor(
+      of: find.text(headline),
+      matching: find.byWidgetPredicate(
+        (w) => w is Semantics && w.properties.liveRegion == true,
+      ),
+    );
+    expect(announced, findsOneWidget);
+    expect(find.text('Preview'), findsOneWidget);
+    expect(find.byType(SnackBar), findsNothing);
+  });
+
+  testWidgets('a pasted qr code with too many parts is unreadable input', (
+    tester,
+  ) async {
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => throw coreFailure(
+        'too_many_parts',
+        'This QR code announces 6000 parts, more than Gerfaut reads.',
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+
+    await preview(tester, 'ur:crypto-psbt/1-6000/aaaa');
+
+    expect(
+      find.text(
+        'This is not a transaction Gerfaut can read. Paste a signed '
+        'transaction in hex, or a PSBT.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('announces 6000 parts'), findsOneWidget);
+  });
+
+  testWidgets('a private key is told apart from a signed transaction', (
+    tester,
+  ) async {
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => throw coreFailure(
+        'private_material',
+        'input contains private key material and was rejected',
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+
+    await preview(tester, 'ur:crypto-output/aaaa');
+
+    expect(
+      find.text(
+        'This holds a private key, not a signed transaction. Gerfaut never '
+        'takes a key: show the transaction your signing device signed '
+        'instead.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.textContaining('descriptor'), findsNothing);
+  });
+
+  testWidgets('the error goes as the text changes, in the slot of the hint', (
+    tester,
+  ) async {
+    await tester.pumpWidget(broadcastApp(FakeBridge()));
+    await tester.pumpAndSettle();
+    final previewAt = tester.getTopLeft(find.text('Preview'));
+    final importBefore = tester.getTopLeft(find.text('Import a file'));
+    await preview(tester, 'hello world');
+
+    const headline =
+        'This is not a transaction Gerfaut can read. Paste a signed '
+        'transaction in hex, or a PSBT.';
+    final hint = find.ancestor(
+      of: find.textContaining('Gerfaut never signs.'),
+      matching: find.byType(Visibility),
+    );
+    expect(find.text(headline), findsOneWidget);
+    // Kept under the error, hidden: it holds the slot's height.
+    expect(tester.widget<Visibility>(hint).visible, isFalse);
+    expect(tester.getTopLeft(find.text('Preview')), previewAt);
+
+    await tester.enterText(find.byType(TextField), 'hello world!');
+    await tester.pump();
+    expect(find.text(headline), findsNothing);
+    expect(tester.widget<Visibility>(hint).visible, isTrue);
+    // Back where everything was before the error.
+    expect(tester.getTopLeft(find.text('Import a file')), importBefore);
+    expect(tester.getTopLeft(find.text('Preview')), previewAt);
+  });
+
+  testWidgets('a ready PSBT previews in full and can be sent', (tester) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()..onPreview = (_, _) => makePreview();
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+
+    await preview(tester);
+
+    expect(bridge.previewInputs, ['cHNidP8B']);
+    // Hero: txid chip, container, readiness.
+    expect(
+      find.text(truncateMiddle(fakeTxid, head: 12, tail: 10)),
+      findsOneWidget,
+    );
+    expect(find.text('PSBT'), findsOneWidget);
+    expect(find.text('Ready to broadcast'), findsOneWidget);
+    expect(
+      tester.widget<Text>(find.text('Ready to broadcast')).style!.color,
+      GerfautTokens.light.confirmed,
+    );
+    // The diagram, the same one the transaction detail draws.
+    expect(find.byType(TxDiagram), findsOneWidget);
+    expect(find.text('TX'), findsOneWidget);
+    // The fee node carries the amount; the rate stays a fact.
+    expect(find.text('7.1 sat/vB'), findsOneWidget);
+    // Inputs and outputs: the wallet pill and the change marker.
+    expect(find.text('INPUTS (1)'), findsOneWidget);
+    expect(find.text('OUTPUTS (2)'), findsOneWidget);
+    // Each side states what it carries in all: the gap between the two
+    // is the fee, which no row says on its own.
+    expect(
+      find.descendant(
+        of: find.byType(IoListHeading),
+        matching: find.text(formatAmount(100000, AmountUnit.btc)),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: find.byType(IoListHeading),
+        matching: find.text(formatAmount(99000, AmountUnit.btc)),
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Cold storage'), findsNWidgets(2));
+    expect(find.text('Change'), findsOneWidget);
+    // Once on the branch of the diagram, once on the output row.
+    expect(find.textContaining('0.00090000'), findsNWidgets(2));
+    // Technical facts.
+    expect(find.text('TECHNICAL'), findsOneWidget);
+    expect(find.text('141 vB'), findsOneWidget);
+    expect(find.text('561 WU'), findsOneWidget);
+    // The chain's own word for it, the same as the transaction detail.
+    expect(find.text('RBF'), findsOneWidget);
+    expect(find.text('signalled (BIP-125)'), findsOneWidget);
+    expect(find.text('none'), findsOneWidget);
+    // And in the same place as on the desktop: after Locktime, before
+    // Fee. One card read on two platforms is not relearned. The first
+    // "Fee" on the page is the diagram's node; the card's is the last.
+    expect(
+      tester.getCenter(find.text('RBF')).dy,
+      greaterThan(tester.getCenter(find.text('Locktime')).dy),
+    );
+    expect(
+      tester.getCenter(find.text('RBF')).dy,
+      lessThan(tester.getCenter(find.text('Fee').last).dy),
+    );
+    // No warning block when the core raised none.
+    expect(find.text('BEFORE YOU SEND'), findsNothing);
+    expect(primaryButton(tester, 'Broadcast').onPressed, isNotNull);
+  });
+
+  testWidgets('a preview line is priced in the unit, never in fiat', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()..onPreview = (_, _) => makePreview();
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+
+    final container = containerOf(tester);
+    container.read(fiatEnabledProvider.notifier).set(true);
+    await tester.pumpAndSettle();
+
+    // Nothing on this page asks for a price any more, so ask here: the
+    // point is that the rows stay in bitcoin even when a quote is on
+    // hand, not that the source failed to answer.
+    expect(await container.read(priceProvider.future), isNotNull);
+    await tester.pumpAndSettle();
+    expect(container.read(priceProvider).value?.rate, 50000);
+    expect(container.read(fiatCurrencyProvider), FiatCurrency('eur'));
+
+    // The preview and the transaction detail are one page with two
+    // entries: a row that carries euros here and only bitcoin there
+    // would be the same list drawn by two rules.
+    expect(find.textContaining('€'), findsNothing);
+    expect(find.text(formatAmount(90000, AmountUnit.btc)), findsWidgets);
+  });
+
+  testWidgets('an input the chain disagrees about is shown in red', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => makePreview(
+        source: TxSource.psbt,
+        // A PSBT that states one amount for an input while the chain
+        // records another: the fee is not what the screen would compute
+        // from the PSBT, and signing it can hand the difference to the
+        // miner. The core calls it, and calls it alert.
+        warnings: const [
+          TxWarning(
+            kind: TxWarningKind.inputMismatch,
+            message:
+                'Input 0 claims 100000 sats; the chain records 10000000 sats.',
+            severity: TxSeverity.alert,
+          ),
+        ],
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+
+    await preview(tester, '0200000001deadbeef');
+
+    expect(find.text('BEFORE YOU SEND'), findsOneWidget);
+    expect(
+      blockOf(
+        tester,
+        'Input 0 claims 100000 sats; the chain records 10000000 sats.',
+      ).color,
+      GerfautTokens.light.alertSurface,
+    );
+    expect(find.byIcon(LucideIcons.equalNot), findsOneWidget);
+  });
+
+  testWidgets('a signature that leaves outputs open is red, with advice', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    const message =
+        'Input 0 is signed with SIGHASH_NONE, which leaves some or all of '
+        'the outputs open: whoever relays or mines this transaction can '
+        'send that money elsewhere. Have it signed again over every output '
+        '(SIGHASH_ALL).';
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => makePreview(
+        warnings: [
+          TxWarning.fromJson(const {
+            'kind': 'uncommitted_outputs',
+            'message': message,
+            'severity': 'alert',
+          }),
+        ],
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+
+    expect(blockOf(tester, message).color, GerfautTokens.light.alertSurface);
+    expect(find.byIcon(LucideIcons.lockOpen), findsOneWidget);
+    expect(find.textContaining('Do not send it as it is.'), findsOneWidget);
+  });
+
+  testWidgets('a long OP_RETURN message is cut in the middle, not the end', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 6000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    const message =
+        'Gerfaut watches the chain and keeps every key offline, end to end';
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => makePreview(
+        outputs: const [
+          TxOutputPreview(
+            index: 0,
+            valueSats: 0,
+            opReturn: OpReturnData(hex: '00', text: message),
+          ),
+        ],
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+
+    // The same line as on a transaction's page: both ends of the
+    // message, its middle given up to fit, nothing lost to an ellipsis.
+    final line = find.descendant(
+      of: find.byType(OpReturnPreview),
+      matching: find.byType(Text),
+    );
+    expect(line, findsOneWidget);
+    final drawn = tester.widget<Text>(line).data!;
+    expect(drawn, startsWith('Gerfaut'));
+    expect(drawn, endsWith('to end'));
+    expect(drawn.length, lessThan(message.length));
+    expect(
+      tester.renderObject<RenderParagraph>(line).didExceedMaxLines,
+      isFalse,
+    );
+  });
+
+  testWidgets('the square of a data output stands out in both themes', (
+    tester,
+  ) async {
+    // Tall enough for every row to be built.
+    tester.view.physicalSize = const Size(800, 6000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    for (final brightness in Brightness.values) {
+      final bridge = FakeBridge()
+        ..onPreview = (_, _) => makePreview(
+          outputs: const [
+            TxOutputPreview(
+              index: 0,
+              valueSats: 0,
+              opReturn: OpReturnData(hex: '00', text: 'hello'),
+            ),
+          ],
+        );
+      await tester.pumpWidget(broadcastApp(bridge, brightness: brightness));
+      await tester.pumpAndSettle();
+      await preview(tester);
+      final tokens = tokensOf(brightness);
+      final chip = tester.widget<IconChip>(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is IconChip && widget.icon == LucideIcons.scrollText,
+        ),
+      );
+      expect(chip.fill, tokens.pendingChip, reason: '$brightness');
+      expect(chip.fill, isNot(tokens.surface), reason: '$brightness');
+      expect(chip.ink, tokens.pending, reason: '$brightness');
+      // A tree of its own for the next theme, the screen started anew.
+      await tester.pumpWidget(const SizedBox());
+    }
+  });
+
+  testWidgets('outputs worth more than the inputs will be refused', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    const message =
+        'The outputs pay more than the inputs bring: the network will refuse '
+        'this transaction.';
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => makePreview(
+        ready: false,
+        readiness: TxReadiness.refused,
+        feeSats: null,
+        feeRate: null,
+        outputs: const [
+          TxOutputPreview(
+            index: 0,
+            valueSats: 150000,
+            address: 'bc1qexternalpayee',
+          ),
+        ],
+        warnings: const [
+          TxWarning(
+            kind: TxWarningKind.feeUnknown,
+            message: message,
+            severity: TxSeverity.info,
+            blocking: true,
+          ),
+        ],
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+    expect(find.text(message), findsOneWidget);
+    // No node takes it: the core blocks the send, and the pill says the
+    // same as the caution.
+    expect(find.text('Will be refused'), findsOneWidget);
+    expect(find.text('Ready to broadcast'), findsNothing);
+    expect(primaryButton(tester, 'Broadcast').onPressed, isNull);
+  });
+
+  // A transaction already mined, pasted again, used to read "Ready to
+  // broadcast" in green beside the red line saying its coin was spent,
+  // with Broadcast on.
+  testWidgets('a coin spent in a block is never called ready', (tester) async {
+    useTallSurface(tester);
+    const message =
+        'Input 0 is already spent by another transaction, which is in a '
+        'block. The network will refuse this one.';
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => makePreview(
+        ready: false,
+        readiness: TxReadiness.refused,
+        source: TxSource.rawTransaction,
+        warnings: const [
+          TxWarning(
+            kind: TxWarningKind.inputSpent,
+            message: message,
+            severity: TxSeverity.alert,
+            blocking: true,
+          ),
+        ],
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+
+    final light = GerfautTokens.light;
+    expect(find.text('Will be refused'), findsOneWidget);
+    expect(find.text('Ready to broadcast'), findsNothing);
+    expect(find.text('Not fully signed'), findsNothing);
+    // A status in amber; the red is the caution, which says why.
+    expect(blockOf(tester, 'Will be refused').color, light.pendingSurface);
+    expect(blockOf(tester, message).color, light.alertSurface);
+    expect(primaryButton(tester, 'Broadcast').onPressed, isNull);
+  });
+
+  // The pill says what the core says, as it says it: the screen works
+  // nothing out of the cautions, which may say more or less.
+  testWidgets('the readiness pill is the core\'s word', (tester) async {
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) =>
+          makePreview(ready: false, readiness: TxReadiness.refused);
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+    expect(find.text('Will be refused'), findsOneWidget);
+    expect(find.text('Not fully signed'), findsNothing);
+    expect(primaryButton(tester, 'Broadcast').onPressed, isNull);
+  });
+
+  // The pill and the Broadcast button read one thing: a wire whose two
+  // fields disagree cannot leave a refused transaction sendable.
+  testWidgets('the pill and the button read one state', (tester) async {
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) =>
+          makePreview(ready: true, readiness: TxReadiness.refused);
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+    expect(find.text('Will be refused'), findsOneWidget);
+    expect(primaryButton(tester, 'Broadcast').onPressed, isNull);
+  });
+
+  // A spend still in the mempool is the node's to judge: this one may
+  // replace it. The caution stays red; the send stays possible.
+  testWidgets('a red caution that blocks nothing leaves the send on', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => makePreview(
+        warnings: const [
+          TxWarning(
+            kind: TxWarningKind.inputSpent,
+            message:
+                'Input 0 is already spent by another transaction waiting in '
+                'the mempool.',
+            severity: TxSeverity.alert,
+          ),
+        ],
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+    expect(find.text('Ready to broadcast'), findsOneWidget);
+    expect(primaryButton(tester, 'Broadcast').onPressed, isNotNull);
+  });
+
+  // This very transaction already waits in the mempool: it used to read
+  // "Ready to broadcast" in green beside a red line saying its coin was
+  // spent by itself. Now the pill says it is waiting, in amber, no red
+  // anywhere, and sending it again stays possible.
+  testWidgets('a transaction already in the mempool is said waiting', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    const message =
+        'This transaction is already waiting in the mempool: it was '
+        'broadcast before. Broadcasting it again does no harm.';
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => makePreview(
+        readiness: TxReadiness.inMempool,
+        warnings: const [
+          TxWarning(
+            kind: TxWarningKind.inMempool,
+            message: message,
+            severity: TxSeverity.info,
+          ),
+        ],
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+
+    final light = GerfautTokens.light;
+    expect(find.text('Already in the mempool'), findsOneWidget);
+    expect(find.text('Ready to broadcast'), findsNothing);
+    expect(
+      blockOf(tester, 'Already in the mempool').color,
+      light.pendingSurface,
+    );
+    expect(blockOf(tester, message).color, light.pendingSurface);
+    expect(find.byIcon(LucideIcons.hourglass), findsNWidgets(2));
+    expect(primaryButton(tester, 'Broadcast').onPressed, isNotNull);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        'It is already waiting in the mempool: broadcasting it again does no '
+        'harm.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  // Before the signatures are in, the rate is the one the transaction
+  // will pay once they are: the core's estimate, said as one, or the most
+  // it can be when nothing tells what the signatures weigh.
+  testWidgets('an unsigned transaction gives its rate once signed', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    for (final (basis, figure) in [
+      (FeeRateBasis.estimated, '≈ 5.0 sat/vB'),
+      (FeeRateBasis.upperBound, '≤ 5.0 sat/vB'),
+    ]) {
+      final bridge = FakeBridge()
+        ..onPreview = (_, _) =>
+            makePreview(ready: false, feeRate: 4.96, feeRateBasis: basis);
+      await tester.pumpWidget(broadcastApp(bridge));
+      await tester.pumpAndSettle();
+      await preview(tester);
+      expect(find.text(figure), findsOneWidget);
+      expect(find.text('once signed'), findsOneWidget);
+      expect(find.text('Not fully signed'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    }
+  });
+
+  // A figure from a watched address's listing nobody backed is the
+  // server's, not the PSBT's: the mark says it is unproven.
+  testWidgets('a listing nobody backed is marked unproven', (tester) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) =>
+          makePreview(amountsDeclared: true, amountsListed: true);
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+    expect(find.text('as the PSBT claims'), findsNothing);
+    expect(find.text('unproven'), findsNWidgets(4));
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        'It pays a fee of 0.00001000 BTC (7.1 sat/vB), unproven: no backend '
+        'confirmed what its inputs are worth.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets("a coin nobody confirmed marks the figures as the file's", (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    // No backend answered about the coin: the core says so, in the tone
+    // it chose, and every figure resting on the PSBT's own declaration
+    // — the inputs total, the fee, its rate — wears the mark.
+    const message =
+        'Input 0 could not be checked: no backend answered about this coin. '
+        'Its value here, and the fee, are what this transaction claims, not '
+        'something confirmed.';
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => makePreview(
+        amountsDeclared: true,
+        warnings: const [
+          TxWarning(
+            kind: TxWarningKind.inputUnknown,
+            message: message,
+            severity: TxSeverity.info,
+          ),
+        ],
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+
+    expect(blockOf(tester, message).color, GerfautTokens.light.pendingSurface);
+    expect(find.byIcon(LucideIcons.circleHelp), findsOneWidget);
+    expect(
+      find.textContaining('Compare them with what your signer shows'),
+      findsOneWidget,
+    );
+    // The fee under the diagram, the inputs total, the fee and its rate
+    // among the facts: four figures, four marks, in the desktop's words
+    // and its tone — amber, a caution, not a muted footnote.
+    expect(find.text('as the PSBT claims'), findsNWidgets(4));
+    for (final element in find.text('as the PSBT claims').evaluate()) {
+      expect(
+        (element.widget as Text).style?.color,
+        GerfautTokens.light.pending,
+      );
+    }
+
+    // The last word before the send says it too.
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text(
+        'It pays a fee of 0.00001000 BTC (7.1 sat/vB), as the PSBT claims: '
+        'no backend confirmed what its inputs are worth.',
+      ),
+      findsOneWidget,
+    );
+  });
+
+  // Outputs over amounts only the file declares stay sendable: the node
+  // goes by the real coins. The last look before the send says what
+  // happens if the declared amounts are right.
+  testWidgets('the confirmation says when declared amounts would be refused', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    const line =
+        'The outputs pay more than the inputs bring, by amounts nothing '
+        'proves: if those amounts are right, the network will refuse this '
+        'transaction.';
+    // The reason is the core's field, read as it comes: the cautions are
+    // not searched for it.
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => makePreview(
+        feeSats: null,
+        feeRate: null,
+        amountsDeclared: true,
+        feeUnknownReason: line,
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+    expect(find.text('Ready to broadcast'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    final dialog = find.byType(AlertDialog);
+    expect(
+      find.descendant(
+        of: dialog,
+        matching: find.text('Its fee could not be established.'),
+      ),
+      findsOneWidget,
+    );
+    final said = find.descendant(of: dialog, matching: find.text(line));
+    expect(said, findsOneWidget);
+    expect(tester.widget<Text>(said).style?.color, GerfautTokens.light.pending);
+  });
+
+  // No backend answered, but the file carries the previous transaction,
+  // which proves the value: the coin is unchecked, its amount is not a
+  // claim, and no figure says it is.
+  testWidgets('a value the previous transaction proves carries no mark', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => makePreview(
+        warnings: const [
+          TxWarning(
+            kind: TxWarningKind.inputUnknown,
+            message:
+                'Input 0 could not be checked: no backend answered about this '
+                'coin. Its value is proven by the previous transaction the PSBT '
+                'carries, the one this input spends; whether the coin is still '
+                'there to spend is not.',
+            severity: TxSeverity.info,
+          ),
+        ],
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+    expect(find.text('as the PSBT claims'), findsNothing);
+    // Nor the advice to compare the amounts: they are proven.
+    expect(
+      find.textContaining('Compare them with what your signer shows'),
+      findsNothing,
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('as the PSBT claims'), findsNothing);
+  });
+
+  testWidgets('figures the chain confirmed carry no such mark', (tester) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()..onPreview = (_, _) => makePreview();
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+
+    expect(find.text('as the PSBT claims'), findsNothing);
+    expect(
+      find.textContaining('Compare them with what your signer shows'),
+      findsNothing,
+    );
+  });
+
+  testWidgets('an unsigned transaction cannot be sent', (tester) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => makePreview(
+        ready: false,
+        source: TxSource.rawTransaction,
+        // The severities are the core's, carried on the wire: the
+        // screen only reads them.
+        warnings: const [
+          TxWarning(
+            kind: TxWarningKind.unsigned,
+            message: '1 of 1 inputs carry no signature.',
+            severity: TxSeverity.alert,
+            blocking: true,
+          ),
+          TxWarning(
+            kind: TxWarningKind.spendsWatched,
+            message: 'Spends coins of Cold storage.',
+            severity: TxSeverity.info,
+          ),
+        ],
+        inputs: const [
+          TxInputPreview(
+            txid: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90',
+            vout: 0,
+            valueSats: 100000,
+            signed: false,
+          ),
+        ],
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+
+    await preview(tester, '0200000001deadbeef');
+
+    expect(find.text('Raw transaction'), findsOneWidget);
+    expect(find.text('Not fully signed'), findsOneWidget);
+    expect(primaryButton(tester, 'Broadcast').onPressed, isNull);
+    expect(find.text('BEFORE YOU SEND'), findsOneWidget);
+
+    // The tone is the core's, read off the caution: this screen has no
+    // table of its own to drift out of step with the desktop's.
+    final light = GerfautTokens.light;
+    expect(
+      blockOf(tester, '1 of 1 inputs carry no signature.').color,
+      light.alertSurface,
+    );
+    expect(
+      blockOf(tester, 'Spends coins of Cold storage.').color,
+      light.pendingSurface,
+    );
+    // The readiness pill, the warning and the input marker all say it.
+    expect(find.byIcon(LucideIcons.penOff), findsNWidgets(3));
+    // The marker is `Unsigned`, the same word as the desktop, and it
+    // stays red: a transaction believed ready that cannot be sent is
+    // exactly what the budget is kept for.
+    expect(find.text('Unsigned'), findsOneWidget);
+    expect(blockOf(tester, 'Unsigned').color, light.alertSurface);
+    expect(
+      tester.widget<Text>(find.text('Unsigned')).style?.color,
+      light.alert,
+    );
+    // An input without an address shows its outpoint.
+    expect(
+      find.text(
+        truncateMiddle(
+          'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90:0',
+          head: 10,
+          tail: 8,
+        ),
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Back'));
+    await tester.pumpAndSettle();
+    // The text stays for correction.
+    expect(find.text('0200000001deadbeef'), findsOneWidget);
+  });
+
+  testWidgets('a send that outlives its screen is still remembered', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final sent = Completer<BroadcastReport>();
+    final bridge = FakeBridge()
+      ..onPreview = ((_, _) => makePreview())
+      ..onBroadcast = ((_, _) => sent.future);
+    // A container of the test's own: it outlives the screen, as the
+    // app's does.
+    final container = ProviderContainer(
+      retry: noRetry,
+      overrides: [
+        bridgeProvider.overrideWithValue(bridge),
+        disguiseServiceProvider.overrideWithValue(FakeDisguise()),
+      ],
+    );
+    addTearDown(container.dispose);
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const BroadcastScreen(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await preview(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Broadcast').last);
+    await tester.pump();
+
+    // The lock takes the screen away while the transaction travels.
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: container,
+        child: const MaterialApp(home: SizedBox()),
+      ),
+    );
+    sent.complete(
+      BroadcastReport(txid: fakeTxid, backend: 'mempool.space', at: 1),
+    );
+    await tester.pumpAndSettle();
+
+    // The vault kept it, and the list the screen opens on next is read
+    // again rather than the one it left with.
+    final recent = await container.read(
+      recentBroadcastsProvider(Network.mainnet).future,
+    );
+    expect(recent.map((b) => b.txid), [fakeTxid]);
+  });
+
+  testWidgets('sending asks first, then follows the transaction', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()..onPreview = (_, _) => makePreview();
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    expect(find.text('Broadcast this transaction?'), findsOneWidget);
+    expect(
+      find.text('It pays a fee of 0.00001000 BTC (7.1 sat/vB).'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(bridge.broadcastHexes, isEmpty);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    // The dialog's own Broadcast button is the last one on screen.
+    await tester.tap(find.text('Broadcast').last);
+    await tester.pumpAndSettle();
+
+    expect(bridge.broadcastHexes, ['0200000001deadbeef']);
+    // A pill, and only what the user is waiting for.
+    expect(find.text('Waiting to be mined'), findsOneWidget);
+    expect(find.byIcon(LucideIcons.hourglass), findsOneWidget);
+    expect(find.textContaining('waiting in the mempool'), findsNothing);
+    expect(find.textContaining('Sent to mempool.space'), findsNothing);
+    // The state is the pill's; the card around it is a card like the
+    // others, not an amber slab.
+    final light = GerfautTokens.light;
+    expect(blockOf(tester, 'Waiting to be mined').color, light.pendingSurface);
+    expect(
+      tester.widget<Text>(find.text('Waiting to be mined')).style!.color,
+      light.pending,
+    );
+    final card = cardAround(tester, 'Waiting to be mined');
+    expect(card.color, light.surface);
+    expect((card.border! as Border).top.color, light.border);
+    expect(bridge.statusCalls, 1);
+    expect(find.text('Done'), findsOneWidget);
+    expect(find.text('Broadcast another'), findsOneWidget);
+    expect(find.text('View on mempool.space'), findsOneWidget);
+
+    // Kept for a later check by the vault, which the core writes: the
+    // app keeps no copy of its own among the preferences.
+    expect(bridge.keptBroadcasts.map((b) => b.hex), ['0200000001deadbeef']);
+    expect(bridge.appPrefs.containsKey('broadcast.recent'), isFalse);
+
+    // Polled every thirty seconds, until it confirms.
+    bridge.onStatus = (_, _) => BroadcastStatus(
+      txid: fakeTxid,
+      standing: BroadcastStanding.confirmed,
+      found: true,
+      confirmed: true,
+      blockHeight: 850000,
+      confirmations: 3,
+      backend: 'mempool.space',
+      at: 1755000100,
+    );
+    await tester.pump(const Duration(seconds: 30));
+    await tester.pumpAndSettle();
+    expect(bridge.statusCalls, 2);
+    expect(
+      find.text('Mined in block ${groupThousands('850000')}'),
+      findsOneWidget,
+    );
+    // The colour moves to the pill; the facts under it read in prose.
+    expect(find.text('Confirmed'), findsOneWidget);
+    expect(
+      blockOf(tester, 'Confirmed').color,
+      GerfautTokens.light.confirmedSurface,
+    );
+    expect(find.text('Waiting to be mined'), findsNothing);
+    expect(
+      tester.widget<Text>(find.textContaining('Mined in block')).style!.color,
+      GerfautTokens.light.textMuted,
+    );
+
+    // A manual check.
+    await tester.tap(find.byTooltip('Check again'));
+    await tester.pumpAndSettle();
+    expect(bridge.statusCalls, 3);
+  });
+
+  testWidgets('a refusal stays on screen, verbatim', (tester) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge();
+    bridge.onPreview = (_, _) => makePreview();
+    bridge.onBroadcast = (_, _) {
+      // The node's own words, as the core relays them.
+      throw const BridgeException(
+        'broadcast',
+        'mempool.space refused the transaction: min relay fee not met, '
+            '1 < 141',
+      );
+    };
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Broadcast').last);
+    await tester.pumpAndSettle();
+
+    // The same sentence as the desktop, period and all.
+    expect(find.text('The network refused this transaction.'), findsOneWidget);
+    expect(
+      find.text(
+        'mempool.space refused the transaction: min relay fee not met, '
+        '1 < 141',
+      ),
+      findsOneWidget,
+    );
+    // Amber, not red: the node said no, nothing moved and nothing
+    // leaked. Red is the budget kept for what costs funds or privacy.
+    expect(
+      blockOf(tester, 'The network refused this transaction.').color,
+      GerfautTokens.light.pendingSurface,
+    );
+    expect(find.byType(SnackBar), findsNothing);
+    // It lands in reaction to the tap that sent the transaction, so it
+    // is announced rather than waiting to be walked into.
+    expect(
+      tester
+          .widget<GerfautNotice>(
+            find.ancestor(
+              of: find.text('The network refused this transaction.'),
+              matching: find.byType(GerfautNotice),
+            ),
+          )
+          .liveRegion,
+      isTrue,
+    );
+    // And the announcement carries the sentence with the node's words,
+    // not the words alone.
+    final handle = tester.ensureSemantics();
+    final region = tester.getSemantics(
+      find.ancestor(
+        of: find.text('The network refused this transaction.'),
+        matching: find.byType(GerfautNotice),
+      ),
+    );
+    expect(region.flagsCollection.isLiveRegion, isTrue);
+    expect(
+      region.label,
+      'Note\nThe network refused this transaction.\n'
+      'mempool.space refused the transaction: min relay fee not met, '
+      '1 < 141',
+    );
+    handle.dispose();
+    // Nothing was recorded, and the transaction can be sent again.
+    expect(bridge.keptBroadcasts, isEmpty);
+    expect(primaryButton(tester, 'Broadcast').onPressed, isNotNull);
+  });
+
+  testWidgets('a side nobody can price totals n/a, not a short sum', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()
+      ..onPreview = (_, _) => makePreview(
+        feeSats: null,
+        feeRate: null,
+        inputs: const [
+          TxInputPreview(
+            txid: 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90',
+            vout: 0,
+            valueSats: 100000,
+            signed: true,
+          ),
+          TxInputPreview(
+            txid: 'b1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90',
+            vout: 12,
+            signed: true,
+          ),
+        ],
+      );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+
+    expect(find.text('INPUTS (2)'), findsOneWidget);
+    // A total short by an input nobody could price is worse than no
+    // total: it would read as the real figure.
+    expect(
+      find.descendant(
+        of: find.byType(IoListHeading),
+        matching: find.text('n/a'),
+      ),
+      findsOneWidget,
+    );
+    // The output side is whole, so it states its sum.
+    expect(
+      find.descendant(
+        of: find.byType(IoListHeading),
+        matching: find.text(formatAmount(99000, AmountUnit.btc)),
+      ),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a transaction the backend lost says so', (tester) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge();
+    bridge.onPreview = (_, _) => makePreview();
+    bridge.onStatus = (_, _) => BroadcastStatus(
+      txid: fakeTxid,
+      standing: BroadcastStanding.notSeen,
+      found: false,
+      confirmed: false,
+      confirmations: 0,
+      backend: 'mempool.space',
+      at: 1755000100,
+    );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Broadcast').last);
+    await tester.pumpAndSettle();
+
+    // The same words as the desktop: what it means, and that sending
+    // it again costs nothing.
+    expect(find.text('Not seen'), findsOneWidget);
+    expect(find.byIcon(LucideIcons.eyeOff), findsOneWidget);
+    expect(
+      find.text(
+        'mempool.space does not have this transaction. It may not have '
+        'been relayed, or it was dropped or replaced. Broadcasting it '
+        'again does no harm.',
+      ),
+      findsOneWidget,
+    );
+    expect(
+      tester.widget<Text>(find.text('Not seen')).style!.color,
+      GerfautTokens.light.pending,
+    );
+  });
+
+  // A check that fails after an answer: the pill says the check failed,
+  // then why, then what the backend last said and when. The old pill
+  // alone read as a transaction still waiting, and the error showed
+  // nowhere.
+  for (final (standing, found, confirmations, lastAnswer) in [
+    (
+      BroadcastStanding.inMempool,
+      true,
+      0,
+      'Last answer just now: waiting to be mined.',
+    ),
+    (
+      BroadcastStanding.confirmed,
+      true,
+      3,
+      'Last answer just now: confirmed, 3 confirmations.',
+    ),
+    (
+      BroadcastStanding.confirmed,
+      true,
+      1,
+      'Last answer just now: confirmed, 1 confirmation.',
+    ),
+    (
+      BroadcastStanding.notSeen,
+      false,
+      0,
+      'Last answer just now: mempool.space did not have this transaction.',
+    ),
+  ]) {
+    testWidgets('a check that fails after a known status says so '
+        '(${standing.id}, $confirmations)', (tester) async {
+      useTallSurface(tester);
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final confirmed = standing == BroadcastStanding.confirmed;
+      final bridge = FakeBridge()
+        ..onPreview = ((_, _) => makePreview())
+        ..onStatus = ((_, _) => BroadcastStatus(
+          txid: fakeTxid,
+          standing: standing,
+          found: found,
+          confirmed: confirmed,
+          blockHeight: confirmed ? 850000 : null,
+          confirmations: confirmations,
+          backend: 'mempool.space',
+          at: now,
+        ));
+      await tester.pumpWidget(broadcastApp(bridge));
+      await tester.pumpAndSettle();
+      await preview(tester);
+      await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Broadcast').last);
+      await tester.pumpAndSettle();
+
+      bridge.onStatus = (_, _) => throw coreFailure(
+        'backend_unavailable',
+        'mempool.space did not answer',
+      );
+      await tester.tap(find.byTooltip('Check again'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Could not check'), findsOneWidget);
+      expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.text('Could not check')).style!.color,
+        GerfautTokens.light.pending,
+      );
+      for (final stale in [
+        'Waiting to be mined',
+        'Confirmed',
+        'Not seen',
+        'Checking…',
+      ]) {
+        expect(find.text(stale), findsNothing);
+      }
+      // The error first, then the last answer, dated.
+      final error = find.text('mempool.space did not answer');
+      final last = find.text(lastAnswer);
+      expect(error, findsOneWidget);
+      expect(last, findsOneWidget);
+      expect(tester.getTopLeft(error).dy, lessThan(tester.getTopLeft(last).dy));
+    });
+  }
+
+  testWidgets('a check under way keeps the failure it follows', (tester) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()..onPreview = (_, _) => makePreview();
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Broadcast').last);
+    await tester.pumpAndSettle();
+    expect(find.text('Waiting to be mined'), findsOneWidget);
+
+    bridge.onStatus = (_, _) => throw coreFailure(
+      'backend_unavailable',
+      'mempool.space did not answer',
+    );
+    await tester.tap(find.byTooltip('Check again'));
+    await tester.pumpAndSettle();
+
+    final answer = Completer<BroadcastStatus>();
+    bridge.onStatus = (_, _) => answer.future;
+    await tester.tap(find.byTooltip('Check again'));
+    await tester.pump();
+
+    // Asking again does not bring back the answer that came before the
+    // failure: the failure stays until a new answer replaces it.
+    expect(find.text('Checking…'), findsOneWidget);
+    expect(find.text('Could not check'), findsOneWidget);
+    expect(find.text('mempool.space did not answer'), findsOneWidget);
+    expect(find.textContaining('Last answer'), findsOneWidget);
+    expect(find.text('Waiting to be mined'), findsNothing);
+
+    answer.complete(
+      BroadcastStatus(
+        txid: fakeTxid,
+        standing: BroadcastStanding.inMempool,
+        found: true,
+        confirmed: false,
+        confirmations: 0,
+        backend: 'mempool.space',
+        at: 1755000100,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Waiting to be mined'), findsOneWidget);
+    expect(find.text('Could not check'), findsNothing);
+    expect(find.textContaining('Last answer'), findsNothing);
+  });
+
+  testWidgets('a first check that fails says why', (tester) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()
+      ..onPreview = ((_, _) => makePreview())
+      ..onStatus = ((_, _) => throw coreFailure(
+        'backend_unavailable',
+        'mempool.space did not answer',
+      ));
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Broadcast').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Could not check'), findsOneWidget);
+    expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
+    expect(find.text('mempool.space did not answer'), findsOneWidget);
+    // Nothing came back before, so there is no last answer to date.
+    expect(find.textContaining('Last answer'), findsNothing);
+    expect(find.text('Not checked yet'), findsOneWidget);
+  });
+
+  testWidgets('a mined transaction states its block apart from its count', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final bridge = FakeBridge();
+    bridge.onPreview = (_, _) => makePreview();
+    bridge.onStatus = (_, _) => BroadcastStatus(
+      txid: fakeTxid,
+      standing: BroadcastStanding.confirmed,
+      found: true,
+      confirmed: true,
+      blockHeight: 4611010,
+      confirmations: 3,
+      backend: 'mempool.space',
+      at: now,
+    );
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Broadcast').last);
+    await tester.pumpAndSettle();
+
+    // Two lines, the same two the desktop prints. On one line the
+    // grouped height swallowed the count: "block 4 611 010 · 3
+    // confirmations" read as one figure whose last group was a 3.
+    expect(
+      find.text('Mined in block ${groupThousands('4611010')}'),
+      findsOneWidget,
+    );
+    expect(find.text('3 confirmations as of just now'), findsOneWidget);
+    expect(find.textContaining('Confirmed ·'), findsNothing);
+
+    // And the count keeps its singular.
+    bridge.onStatus = (_, _) => BroadcastStatus(
+      txid: fakeTxid,
+      standing: BroadcastStanding.confirmed,
+      found: true,
+      confirmed: true,
+      blockHeight: 4611010,
+      confirmations: 1,
+      backend: 'mempool.space',
+      at: now,
+    );
+    await tester.tap(find.byTooltip('Check again'));
+    await tester.pumpAndSettle();
+    expect(find.text('1 confirmation as of just now'), findsOneWidget);
+  });
+
+  testWidgets('forgetting a past broadcast asks first', (tester) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()..onPreview = (_, _) => makePreview();
+    await tester.pumpWidget(broadcastApp(bridge));
+    await tester.pumpAndSettle();
+    await preview(tester);
+    await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Broadcast').last);
+    await tester.pumpAndSettle();
+
+    // Once the screen is left, what was sent is a past broadcast.
+    await tester.tap(find.text('Broadcast another'));
+    await tester.pumpAndSettle();
+    expect(find.text('RECENT BROADCASTS'), findsOneWidget);
+
+    await tester.tap(find.byTooltip('Forget this broadcast'));
+    await tester.pumpAndSettle();
+    // What is lost and what is not, in words rather than in a colour.
+    expect(find.text('Forget this broadcast?'), findsOneWidget);
+    expect(find.text('This record cannot be brought back.'), findsOneWidget);
+    expect(
+      find.textContaining('on the network and is untouched'),
+      findsOneWidget,
+    );
+
+    // Backing out keeps it, and keeps it in the vault.
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.text('RECENT BROADCASTS'), findsOneWidget);
+    expect(bridge.keptBroadcasts, hasLength(1));
+
+    await tester.tap(find.byTooltip('Forget this broadcast'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, 'Forget'));
+    await tester.pumpAndSettle();
+    expect(find.text('RECENT BROADCASTS'), findsNothing);
+    expect(bridge.keptBroadcasts, isEmpty);
+  });
+
+  testWidgets('recent broadcasts come back after a restart', (tester) async {
+    final bridge =
+        FakeBridge(
+            settings: Settings(
+              preferences: kPreferences,
+              activeNetwork: Network.mainnet,
+              backends: const {},
+              appPrefs: const {'onboarding.seen': '1'},
+            ),
+          )
+          ..keptBroadcasts.addAll([
+            RecentBroadcast(
+              txid: fakeTxid,
+              network: Network.mainnet,
+              hex: '0200000001deadbeef',
+              backend: 'mempool.space',
+              at: 1755000000,
+            ),
+            RecentBroadcast(
+              txid: 'e' * 64,
+              network: Network.signet,
+              hex: '0200000001cafe',
+              backend: 'mempool.space',
+              at: 1755000000,
+            ),
+          ]);
+    await tester.pumpWidget(
+      ProviderScope(
+        retry: noRetry,
+        overrides: [
+          bridgeProvider.overrideWithValue(bridge),
+          disguiseServiceProvider.overrideWithValue(FakeDisguise()),
+        ],
+        child: const GerfautApp(),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The home screen opens the broadcast page for the workspace.
+    await pickFromMenu(tester, 'Broadcast');
+
+    expect(find.text('RECENT BROADCASTS'), findsOneWidget);
+    // Only the workspace network's entries, each checked once.
+    expect(
+      find.text(truncateMiddle(fakeTxid, head: 12, tail: 10)),
+      findsOneWidget,
+    );
+    expect(
+      find.text(truncateMiddle('e' * 64, head: 12, tail: 10)),
+      findsNothing,
+    );
+    expect(bridge.statusCalls, 1);
+    expect(find.text('Waiting to be mined'), findsOneWidget);
+    // A past broadcast says when it left, under its identifier.
+    expect(find.textContaining(RegExp(r'^Sent ')), findsOneWidget);
+  });
+
+  for (final brightness in Brightness.values) {
+    testWidgets(
+      'sending the next transaction is a primary action (${brightness.name})',
+      (tester) async {
+        final tokens = tokensOf(brightness);
+        useTallSurface(tester);
+        final bridge = FakeBridge()..onPreview = (_, _) => makePreview();
+        await tester.pumpWidget(broadcastApp(bridge, brightness: brightness));
+        await tester.pumpAndSettle();
+        await preview(tester);
+        await tester.tap(find.widgetWithText(FilledButton, 'Broadcast'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Broadcast').last);
+        await tester.pumpAndSettle();
+
+        // The app's own primary component, not a quieter cousin.
+        expect(
+          find.widgetWithText(PrimaryButton, 'Broadcast another'),
+          findsOneWidget,
+        );
+        final another = primaryButton(tester, 'Broadcast another').style!;
+        const resting = <WidgetState>{};
+        expect(another.backgroundColor!.resolve(resting), tokens.primary);
+        expect(another.foregroundColor!.resolve(resting), tokens.onPrimary);
+        // Drawn a control's height, answering over a full target.
+        expect(
+          tester
+              .getSize(find.widgetWithText(FilledButton, 'Broadcast another'))
+              .height,
+          GerfautTouch.control,
+        );
+        expect(
+          tester
+              .getSize(find.widgetWithText(PrimaryButton, 'Broadcast another'))
+              .height,
+          GerfautTouch.target,
+        );
+        // And it is the only one: leaving is the way out beside it, so
+        // Done is secondary rather than competing with it.
+        expect(find.byType(PrimaryButton), findsOneWidget);
+        expect(find.widgetWithText(SecondaryButton, 'Done'), findsOneWidget);
+      },
+    );
+  }
+
+  testWidgets('a file picked here survives the way back', (tester) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()..onPreview = (_, _) => makePreview();
+    await tester.pumpWidget(
+      broadcastApp(
+        bridge,
+        filePicker: () async => XFile.fromData(
+          Uint8List.fromList(utf8.encode('cHNidP8B')),
+          path: 'signed.psbt',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final lock = containerOf(tester).read(lockProvider.notifier);
+    lock
+      ..syncFromSettings(null)
+      ..syncFromSettings(const AppLock(kind: LockKind.pin, biometric: false));
+
+    await tester.tap(find.text('Import a file'));
+    await tester.pumpAndSettle();
+    // Android pauses Gerfaut behind the picker and resumes it after.
+    // Without the trip being announced the lock lands here and takes
+    // the file that was just chosen with it.
+    lock
+      ..noteHidden()
+      ..noteResumed();
+    expect(lock.state.locked, isFalse);
+    // What the picker handed over was decoded rather than dropped.
+    expect(find.text('Ready to broadcast'), findsOneWidget);
+    expect(bridge.previewInputs, ['cHNidP8B']);
+  });
+
+  testWidgets('a file far too large is refused before it is read', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    final bridge = FakeBridge()..onPreview = (_, _) => makePreview();
+    await tester.pumpWidget(
+      broadcastApp(
+        bridge,
+        filePicker: () async =>
+            XFile.fromData(Uint8List(4000001), path: 'holiday.mp4'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Import a file'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('This file is too large to be a transaction.'),
+      findsOneWidget,
+    );
+    expect(bridge.previewInputs, isEmpty);
+  });
+
+  testWidgets('a picker that never opened does not cover a later trip', (
+    tester,
+  ) async {
+    useTallSurface(tester);
+    await tester.pumpWidget(
+      broadcastApp(
+        FakeBridge(),
+        filePicker: () async =>
+            throw PlatformException(code: 'ActivityNotFoundException'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    final lock = containerOf(tester).read(lockProvider.notifier);
+    lock
+      ..syncFromSettings(null)
+      ..syncFromSettings(const AppLock(kind: LockKind.pin, biometric: false));
+    lockOnEveryTrip(containerOf(tester));
+
+    await tester.tap(find.text('Import a file'));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('No app on this phone can open a file to read.'),
+      findsOneWidget,
+    );
+
+    lock
+      ..noteHidden()
+      ..noteHidden()
+      ..noteResumed();
+    expect(lock.state.locked, isTrue);
+  });
+}

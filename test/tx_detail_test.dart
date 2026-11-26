@@ -1,0 +1,450 @@
+// The transaction detail as a phone shows it: what the page dropped
+// after the owner read it on a real device, and what now holds the
+// five sections apart.
+
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:gerfaut/app.dart';
+import 'package:gerfaut/screens/tx_detail.dart';
+import 'package:gerfaut/src/format.dart';
+import 'package:gerfaut/src/models.dart';
+import 'package:gerfaut/src/state.dart';
+import 'package:gerfaut/theme/tokens.dart';
+import 'package:gerfaut/widgets/address_chip.dart';
+import 'package:gerfaut/widgets/icon_chip.dart';
+import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+import 'fakes.dart';
+
+final String _txid = 'f' * 64;
+
+/// A transaction that puts every wallet role on the page at once — an
+/// input spent, an output received, an output that came back as change
+/// — plus the raw bytes, so all five sections exist.
+TxDetail _detail({List<TxIo>? inputs, List<TxIo>? outputs}) {
+  return TxDetail(
+    summary: TxSummary(
+      txid: _txid,
+      netSats: 5000,
+      feeSats: 141,
+      status: const TxStatus.confirmed(height: 100, timestamp: 1755000000),
+      confirmations: 10,
+    ),
+    inputs:
+        inputs ??
+        const [
+          TxIo(address: 'bc1qinputaddress', valueSats: 10000, isMine: true),
+        ],
+    outputs:
+        outputs ??
+        const [
+          TxIo(address: 'bc1qoutputaddress', valueSats: 5000, isMine: true),
+          TxIo(
+            address: 'bc1qchangeaddress',
+            valueSats: 4859,
+            isMine: true,
+            change: true,
+          ),
+        ],
+    vsize: 141,
+    feeRateSatVb: 1.0,
+    extras: const TxExtras(
+      sizeBytes: 226,
+      vsize: 141,
+      weightWu: 564,
+      version: 2,
+      locktime: 0,
+      rbfSignaled: false,
+      segwit: true,
+      taproot: false,
+      isCoinbase: false,
+      coinbasePool: null,
+      sigops: 8,
+      rawHex: '0200000001abcdef',
+    ),
+  );
+}
+
+GerfautTokens _tokensOf(Brightness brightness) =>
+    brightness == Brightness.dark ? GerfautTokens.dark : GerfautTokens.light;
+
+Widget _app(
+  FakeBridge bridge, {
+  TextScaler textScaler = TextScaler.noScaling,
+  Network network = Network.mainnet,
+  Brightness brightness = Brightness.light,
+}) {
+  return ProviderScope(
+    retry: noRetry,
+    overrides: [bridgeProvider.overrideWithValue(bridge)],
+    child: creditedApp(
+      theme: themeFrom(_tokensOf(brightness), brightness),
+      home: Builder(
+        builder: (context) => MediaQuery(
+          data: MediaQuery.of(context).copyWith(textScaler: textScaler),
+          child: TxDetailScreen(walletId: 'w1', txid: _txid, network: network),
+        ),
+      ),
+    ),
+  );
+}
+
+/// A phone-width surface, tall enough that the whole page lays out in
+/// one pass — a section that never builds never overflows either.
+void _usePhone(WidgetTester tester, {double height = 6000}) {
+  tester.view.physicalSize = Size(411, height);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+}
+
+/// The rules between sections, told apart from the hairlines inside the
+/// facts card by the one thing that differs: their colour.
+Finder _sectionRules() {
+  final hairline = GerfautTokens.light.border.withValues(alpha: 0.6);
+  return find.byWidgetPredicate(
+    (widget) => widget is Divider && widget.color == hairline,
+  );
+}
+
+ProviderContainer _containerOf(WidgetTester tester) {
+  return ProviderScope.containerOf(
+    tester.element(find.byType(TxDetailScreen)),
+    listen: false,
+  );
+}
+
+void main() {
+  testWidgets('a transaction that cannot be read is asked for again', (
+    tester,
+  ) async {
+    _usePhone(tester);
+    final bridge = FakeBridge();
+    await tester.pumpWidget(_app(bridge));
+    await tester.pumpAndSettle();
+    expect(find.text('This transaction could not be loaded.'), findsOneWidget);
+
+    bridge.txDetails['w1:$_txid'] = _detail();
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+    expect(find.text('This transaction could not be loaded.'), findsNothing);
+    expect(find.text('TRANSACTION ID'), findsOneWidget);
+  });
+
+  testWidgets('the quick facts keep the id and the date, and drop the rate', (
+    tester,
+  ) async {
+    _usePhone(tester);
+    final bridge = FakeBridge(txDetails: {'w1:$_txid': _detail()});
+    await tester.pumpWidget(_app(bridge));
+    await tester.pumpAndSettle();
+
+    // With fiat on there would be a price to state; the page states
+    // none, because the only rate it knows is today's.
+    _containerOf(tester).read(fiatEnabledProvider.notifier).set(true);
+    await tester.pumpAndSettle();
+
+    expect(find.text('TRANSACTION ID'), findsOneWidget);
+    expect(find.text('DATE'), findsOneWidget);
+    expect(find.text('RATE'), findsNothing);
+    expect(find.text('Rate'), findsNothing);
+  });
+
+  testWidgets('a row states its amount in the unit, never in fiat', (
+    tester,
+  ) async {
+    _usePhone(tester);
+    final bridge = FakeBridge(txDetails: {'w1:$_txid': _detail()});
+    await tester.pumpWidget(_app(bridge));
+    await tester.pumpAndSettle();
+
+    _containerOf(tester).read(fiatEnabledProvider.notifier).set(true);
+    await tester.pumpAndSettle();
+
+    // The hero says what the transaction was worth, once. Three rows
+    // and the rate fact used to say it four more times.
+    expect(find.textContaining('€'), findsOneWidget);
+    expect(find.text(formatAmount(10000, AmountUnit.btc)), findsWidgets);
+  });
+
+  testWidgets('a test transaction is worth zero in the currency', (
+    tester,
+  ) async {
+    _usePhone(tester);
+    final bridge = FakeBridge(txDetails: {'w1:$_txid': _detail()});
+    await tester.pumpWidget(_app(bridge, network: Network.signet));
+    await tester.pumpAndSettle();
+
+    _containerOf(tester).read(fiatEnabledProvider.notifier).set(true);
+    await tester.pumpAndSettle();
+
+    // 5 000 sats at 50 000 a coin would be €2.50 on mainnet.
+    expect(find.text('€0.00'), findsOneWidget);
+    expect(find.text('€2.50'), findsNothing);
+  });
+
+  testWidgets('a mainnet transaction is worth its amount at the price', (
+    tester,
+  ) async {
+    _usePhone(tester);
+    final bridge = FakeBridge(txDetails: {'w1:$_txid': _detail()});
+    await tester.pumpWidget(_app(bridge));
+    await tester.pumpAndSettle();
+
+    _containerOf(tester).read(fiatEnabledProvider.notifier).set(true);
+    await tester.pumpAndSettle();
+
+    expect(find.text('€2.50'), findsOneWidget);
+  });
+
+  testWidgets('CoinGecko is credited once, under the screen', (tester) async {
+    _usePhone(tester);
+    final bridge = FakeBridge(txDetails: {'w1:$_txid': _detail()});
+    bridge.preferences = bridge.preferences.copyWith(
+      priceSource: PriceSource.coingecko,
+    );
+    await tester.pumpWidget(_app(bridge));
+    await tester.pumpAndSettle();
+    expect(find.text('Powered by CoinGecko'), findsNothing);
+
+    _containerOf(tester).read(fiatEnabledProvider.notifier).set(true);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Powered by CoinGecko'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('Powered by CoinGecko')).dy,
+      greaterThan(tester.getTopLeft(find.text('€2.50')).dy),
+    );
+  });
+
+  testWidgets('an amount nobody could price reads n/a', (tester) async {
+    _usePhone(tester);
+    final bridge = FakeBridge(
+      txDetails: {
+        'w1:$_txid': _detail(
+          inputs: const [TxIo(address: null, valueSats: null, isMine: false)],
+        ),
+      },
+    );
+    await tester.pumpWidget(_app(bridge));
+    await tester.pumpAndSettle();
+
+    // The branch of the diagram, the row, and the side total the one
+    // unknown value makes a guess of.
+    expect(find.text('n/a'), findsNWidgets(3));
+  });
+
+  testWidgets('masking covers the amount of a row', (tester) async {
+    _usePhone(tester);
+    final bridge = FakeBridge(txDetails: {'w1:$_txid': _detail()});
+    await tester.pumpWidget(_app(bridge));
+    await tester.pumpAndSettle();
+
+    _containerOf(tester).read(maskedProvider.notifier).toggle();
+    await tester.pumpAndSettle();
+
+    expect(find.text(formatAmount(10000, AmountUnit.btc)), findsNothing);
+    expect(find.text(maskedValue), findsWidgets);
+  });
+
+  testWidgets('no row spells its role out under the address', (tester) async {
+    _usePhone(tester);
+    final bridge = FakeBridge(txDetails: {'w1:$_txid': _detail()});
+    await tester.pumpWidget(_app(bridge));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Spent from this wallet'), findsNothing);
+    expect(find.text('Change back to this wallet'), findsNothing);
+    expect(find.text('Received by this wallet'), findsNothing);
+    // What is left still reads as a row: three addresses on the lists,
+    // and the transaction id above them.
+    expect(find.byType(AddressChip), findsNWidgets(4));
+  });
+
+  testWidgets('on a narrow phone the amount goes under the address', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 6000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    const address = 'bc1qcdepm6f0a9k3l2m7n8p4q5r6s7t8u9v2wy2r4xh';
+    final bridge = FakeBridge(
+      txDetails: {
+        'w1:$_txid': _detail(
+          inputs: const [
+            TxIo(address: address, valueSats: 10000, isMine: true),
+          ],
+        ),
+      },
+    );
+    await tester.pumpWidget(_app(bridge));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    final chip = find.byWidgetPredicate(
+      (widget) => widget is AddressChip && widget.value == address,
+    );
+    // Beside the address, the figure left it too little room to show
+    // both of its ends; under it, the row is the address's own.
+    final amount = find.text(formatAmount(10000, AmountUnit.btc)).last;
+    expect(
+      tester.getTopLeft(amount).dy,
+      greaterThan(tester.getCenter(chip).dy),
+    );
+    final drawn = tester
+        .widget<Text>(
+          find.descendant(of: chip, matching: find.byType(Text)).first,
+        )
+        .data!;
+    expect(drawn, startsWith('bc1q'));
+    expect(drawn, endsWith('r4xh'));
+  });
+
+  testWidgets('a long OP_RETURN message is cut in the middle, not the end', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 6000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    const message =
+        'Gerfaut watches the chain and keeps every key offline, end to end';
+    final bridge = FakeBridge(
+      txDetails: {
+        'w1:$_txid': _detail(
+          outputs: const [
+            TxIo(address: 'bc1qoutputaddress', valueSats: 5000, isMine: true),
+            TxIo(
+              address: null,
+              valueSats: 0,
+              isMine: false,
+              opReturn: OpReturnData(hex: '00', text: message),
+            ),
+          ],
+        ),
+      },
+    );
+    await tester.pumpWidget(_app(bridge));
+    await tester.pumpAndSettle();
+
+    final preview = find.textContaining('to end');
+    expect(preview, findsOneWidget);
+    final drawn = tester.widget<Text>(preview).data!;
+    // Both ends of the message, the middle given up to fit the row.
+    expect(drawn, startsWith('Gerfaut'));
+    expect(drawn, endsWith('to end'));
+    expect(drawn.length, lessThan(message.length));
+    // Drawn whole: no ellipsis eating the end of the line.
+    expect(
+      tester.renderObject<RenderParagraph>(preview).didExceedMaxLines,
+      isFalse,
+    );
+  });
+
+  testWidgets('the square of a data output stands out in both themes', (
+    tester,
+  ) async {
+    // Tall enough for every row to be built.
+    tester.view.physicalSize = const Size(800, 6000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    for (final brightness in Brightness.values) {
+      final bridge = FakeBridge(
+        txDetails: {
+          'w1:$_txid': _detail(
+            outputs: const [
+              TxIo(address: 'bc1qoutputaddress', valueSats: 5000, isMine: true),
+              TxIo(
+                address: null,
+                valueSats: 0,
+                isMine: false,
+                opReturn: OpReturnData(hex: '00', text: 'hello'),
+              ),
+            ],
+          ),
+        },
+      );
+      await tester.pumpWidget(_app(bridge, brightness: brightness));
+      await tester.pumpAndSettle();
+      final tokens = _tokensOf(brightness);
+      final chip = tester.widget<IconChip>(
+        find.byWidgetPredicate(
+          (widget) =>
+              widget is IconChip && widget.icon == LucideIcons.scrollText,
+        ),
+      );
+      expect(chip.fill, tokens.pendingChip, reason: '$brightness');
+      expect(chip.fill, isNot(tokens.surface), reason: '$brightness');
+      expect(chip.ink, tokens.pending, reason: '$brightness');
+      // A tree of its own for the next theme, the screen started anew.
+      await tester.pumpWidget(const SizedBox());
+    }
+  });
+
+  testWidgets('an emoji where the OP_RETURN message is cut stays whole', (
+    tester,
+  ) async {
+    _usePhone(tester);
+    // The 22nd character, where the head of the cut ends, is an emoji;
+    // at half the text size the row has room for the whole cut.
+    final message = '${'a' * 21}\u{1F600}${'b' * 30}cccccc';
+    final bridge = FakeBridge(
+      txDetails: {
+        'w1:$_txid': _detail(
+          outputs: [
+            const TxIo(
+              address: 'bc1qoutputaddress',
+              valueSats: 5000,
+              isMine: true,
+            ),
+            TxIo(
+              address: null,
+              valueSats: 0,
+              isMine: false,
+              opReturn: OpReturnData(hex: '00', text: message),
+            ),
+          ],
+        ),
+      },
+    );
+    await tester.pumpWidget(
+      _app(bridge, textScaler: const TextScaler.linear(0.5)),
+    );
+    await tester.pumpAndSettle();
+
+    final drawn = tester.widget<Text>(find.textContaining('cccccc')).data!;
+    expect(drawn, '${'a' * 21}\u{1F600}...cccccc');
+    // No half of a surrogate pair left to draw as a replacement glyph.
+    expect(utf8.decode(utf8.encode(drawn)), isNot(contains('\uFFFD')));
+  });
+
+  testWidgets('four hairlines hold the five sections apart', (tester) async {
+    _usePhone(tester);
+    final bridge = FakeBridge(txDetails: {'w1:$_txid': _detail()});
+    await tester.pumpWidget(_app(bridge));
+    await tester.pumpAndSettle();
+
+    // Header, diagram, the two lists, the facts, the raw bytes.
+    expect(_sectionRules(), findsNWidgets(4));
+    for (final rule in tester.widgetList<Divider>(_sectionRules())) {
+      expect(rule.height, 1);
+      expect(rule.thickness, 1);
+    }
+  });
+
+  testWidgets('the page still fits at twice the text size', (tester) async {
+    _usePhone(tester, height: 12000);
+    final bridge = FakeBridge(txDetails: {'w1:$_txid': _detail()});
+    await tester.pumpWidget(
+      _app(bridge, textScaler: const TextScaler.linear(2)),
+    );
+    await tester.pumpAndSettle();
+
+    // A RenderFlex that overflowed lands here: at this size a row that
+    // cannot hold its figure is the first thing to go.
+    expect(tester.takeException(), isNull);
+    expect(_sectionRules(), findsNWidgets(4));
+  });
+}
