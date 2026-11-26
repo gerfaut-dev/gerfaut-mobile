@@ -3124,7 +3124,8 @@ void main() {
   group('the TLS switch follows the typed port', () {
     const offFor50001 = 'TLS turned off: port 50001 usually runs without it.';
     const offForOnion =
-        'TLS turned off: Tor already encrypts an onion connection.';
+        'TLS turned off: Tor already encrypts the connection to an onion '
+        'server.';
 
     /// What the core makes of `host:port` with no scheme in front: the
     /// Electrum port conventions, and an onion on any other port in the
@@ -3211,17 +3212,22 @@ void main() {
       // The core read the address as a scan would hand it over.
       expect(bridge.parsedBackends, contains('gerfautexample123.onion:50001'));
       expect(tlsOn(tester), isFalse);
-      expect(find.text(offFor50001), findsOneWidget);
+      expect(find.text(offForOnion), findsOneWidget);
       // It lands while the eyes are on the port field: announced.
       final handle = tester.ensureSemantics();
       expect(
         tester
-            .getSemantics(find.text(offFor50001))
+            .getSemantics(find.text(offForOnion))
             .flagsCollection
             .isLiveRegion,
         isTrue,
       );
       handle.dispose();
+
+      // An ordinary host on the same port: the port is the reason.
+      await typeHost(tester, 'node.example.org');
+      expect(tlsOn(tester), isFalse);
+      expect(find.text(offFor50001), findsOneWidget);
 
       // Back to where it started: nothing left to explain.
       await typePort(tester, '50002');

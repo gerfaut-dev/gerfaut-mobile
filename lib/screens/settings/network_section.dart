@@ -275,16 +275,8 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
     if (!_tlsFollowsPort || address == null) return;
     final bridge = ref.read(bridgeProvider);
     final ScannedBackend backend;
-    bool? portWantsTls;
     try {
       backend = await bridge.parseBackend(address);
-      // An onion turned off: asked again on a host that is not one, the
-      // core says whether the port did it or Tor did.
-      if (backend.onion && !backend.tls && backend.port != null) {
-        portWantsTls = (await bridge.parseBackend(
-          'electrum.invalid:${backend.port}',
-        )).tls;
-      }
     } catch (_) {
       // Half an address, read on every keystroke: the switch waits for
       // the rest rather than saying anything.
@@ -309,14 +301,14 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
         return;
       }
       _tlsBeforeFollowed = before;
-      _tlsNote = switch ((_tls, portWantsTls)) {
-        (true, _) =>
-          'TLS turned on: port ${backend.port} usually runs with it.',
-        (false, true) =>
-          'TLS turned off: Tor already encrypts an onion connection.',
-        (false, _) =>
-          'TLS turned off: port ${backend.port} usually runs without it.',
-      };
+      // The same words as the desktop: an onion is said for what it is,
+      // whatever its port.
+      _tlsNote = _tls
+          ? 'TLS turned on: port ${backend.port} usually runs with it.'
+          : backend.onion
+          ? 'TLS turned off: Tor already encrypts the connection to an '
+                'onion server.'
+          : 'TLS turned off: port ${backend.port} usually runs without it.';
     });
   }
 
