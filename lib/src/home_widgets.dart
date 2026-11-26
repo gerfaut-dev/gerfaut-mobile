@@ -477,7 +477,9 @@ class WidgetPriceNotifier extends AsyncNotifier<PriceQuote?> {
     // what this one returns is dropped.
     if (build != _builds) return state.value;
     if (!installed.contains(HomeWidgets.price)) return null;
-    if (fiatOn) return appQuote.value;
+    // The quote of the reading, fresh or kept: none leaves the last one
+    // the widget shows standing, with its time.
+    if (fiatOn) return appQuote.value?.quote;
     // Out of sight the widget is the periodic task's to refresh: no
     // minute clock runs behind the launcher.
     if (!inFront) return state.value;
@@ -487,7 +489,7 @@ class WidgetPriceNotifier extends AsyncNotifier<PriceQuote?> {
     // Scheduled before the fetch so failures retry on the same cadence
     // as the app's own quote.
     _timer = Timer(every, () => ref.invalidateSelf());
-    return ref.read(bridgeProvider).fetchPrice();
+    return (await ref.read(bridgeProvider).fetchPrice()).quote;
   }
 }
 
@@ -758,7 +760,9 @@ Future<bool> refreshWidgets({
     if (installed.contains(HomeWidgets.price)) {
       try {
         if (await priceWithoutStartingTor(bridge)) {
-          quote = await bridge.fetchPrice();
+          // Fresh or kept; a reading without one leaves the last
+          // quote standing, as a failure does.
+          quote = (await bridge.fetchPrice()).quote;
         }
       } catch (_) {
         // The last quote stays up, with the time it carries.

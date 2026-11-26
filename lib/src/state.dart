@@ -520,15 +520,35 @@ final relativeClockProvider = NotifierProvider.autoDispose<RelativeClock, int>(
 
 /// Current BTC price, in the currency and from the source of the
 /// preferences, asked again at the core's cadence while fiat display is
-/// on and the app is on screen. Failures surface as an error state:
-/// amounts degrade to no fiat and the settings screen shows a quiet
-/// hint.
-class PriceNotifier extends AsyncNotifier<PriceQuote?> {
+/// on and the app is on screen. A source that fails is in the reading,
+/// which keeps the last quote for a while: the core decides how long,
+/// and how often the source is really asked, so asking it every minute
+/// costs nothing. Only an internal failure is an error state, and
+/// amounts show no fiat then: nothing vouches for the quote in hand.
+class PriceNotifier extends AsyncNotifier<PriceReading?> {
   Timer? _timer;
   int _builds = 0;
 
+  /// The "Try again" of the settings: the reading it brings takes the
+  /// place of the one in hand, and the minute clock runs on untouched.
+  /// A failure leaves the reading in hand, which still says what is
+  /// wrong.
+  Future<void> retry() async {
+    final build = _builds;
+    final PriceReading reading;
+    try {
+      reading = await ref.read(bridgeProvider).retryPrice();
+    } on BridgeException {
+      return;
+    }
+    // A build began meanwhile, for a new pair or on the clock: its
+    // reading is the one that holds.
+    if (build != _builds) return;
+    state = AsyncData(reading);
+  }
+
   @override
-  Future<PriceQuote?> build() async {
+  Future<PriceReading?> build() async {
     _timer?.cancel();
     final build = ++_builds;
     final enabled = ref.watch(fiatEnabledProvider);
@@ -538,8 +558,8 @@ class PriceNotifier extends AsyncNotifier<PriceQuote?> {
     ref.watch(fiatSourceProvider);
     final inFront = ref.watch(appInFrontProvider);
     if (!enabled) return null;
-    // Out of sight nothing is asked, and no clock runs: the quote in
-    // hand stays, and a fresh one is asked the moment the app is back.
+    // Out of sight nothing is asked, and no clock runs: the reading in
+    // hand stays, and a new one is asked the moment the app is back.
     // A failure stands too: returned as a value, the quote it had
     // hidden would come back on every amount as if it were fresh.
     if (!inFront) {
@@ -563,7 +583,7 @@ class PriceNotifier extends AsyncNotifier<PriceQuote?> {
   }
 }
 
-final priceProvider = AsyncNotifierProvider<PriceNotifier, PriceQuote?>(
+final priceProvider = AsyncNotifierProvider<PriceNotifier, PriceReading?>(
   PriceNotifier.new,
 );
 

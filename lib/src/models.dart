@@ -2395,6 +2395,7 @@ class PriceTable {
     required this.currencies,
     required this.sources,
     required this.refresh,
+    required this.keep,
   });
 
   factory PriceTable.fromJson(Map<String, dynamic> json) {
@@ -2419,6 +2420,7 @@ class PriceTable {
             ),
       ],
       refresh: Duration(seconds: json['refresh_secs'] as int),
+      keep: Duration(seconds: json['keep_secs'] as int),
     );
   }
 
@@ -2431,6 +2433,11 @@ class PriceTable {
   /// From one price to the next while it is shown, and from a failure
   /// to the next try.
   final Duration refresh;
+
+  /// How long the core keeps the last quote of a pair while its source
+  /// fails. The core applies it to every reading: the screens only
+  /// read it for what they keep themselves.
+  final Duration keep;
 
   /// The entry of a currency, if the table lists it.
   CurrencyEntry? entryOf(FiatCurrency currency) {
@@ -2617,6 +2624,128 @@ class PriceQuote {
 
   /// Unix timestamp, seconds, when the quote was fetched.
   final int at;
+}
+
+/// Why the price source gave no fresh quote.
+enum TroubleKind {
+  /// It asked to be left alone for a while (a rate limit): asking again
+  /// sooner would only prolong it.
+  rateLimited('rate_limited'),
+
+  /// It did not answer, or not in time.
+  unreachable('unreachable'),
+
+  /// It answered with a refusal.
+  refused('refused'),
+
+  /// The request goes through Tor, which cannot be had: nothing was
+  /// sent.
+  tor('tor');
+
+  const TroubleKind(this.id);
+
+  final String id;
+
+  static TroubleKind? fromId(String? id) {
+    for (final kind in TroubleKind.values) {
+      if (kind.id == id) return kind;
+    }
+    return null;
+  }
+}
+
+/// What keeps the price source from giving a fresh quote, as the core
+/// tracks it.
+class PriceTrouble {
+  const PriceTrouble({
+    required this.kind,
+    required this.since,
+    required this.nextTry,
+    required this.lasting,
+  });
+
+  factory PriceTrouble.fromJson(Map<String, dynamic> json) {
+    return PriceTrouble(
+      // A kind this build does not know still is a source that gave
+      // nothing: said as one that did not answer, not as a crash.
+      kind:
+          TroubleKind.fromId(json['kind'] as String) ?? TroubleKind.unreachable,
+      since: json['since'] as int,
+      nextTry: json['next_try'] as int,
+      lasting: json['lasting'] as bool,
+    );
+  }
+
+  final TroubleKind kind;
+
+  /// Unix seconds of the first failure in the row.
+  final int since;
+
+  /// Unix seconds before which the core will not ask the source again.
+  final int nextTry;
+
+  /// Whether the screens say it: false after a single failure, which
+  /// the next ask usually mends; true once it repeats, or for Tor.
+  final bool lasting;
+}
+
+/// The price as the core reads it: a quote, fresh or kept from before
+/// while the source fails, or none, with the trouble when there is one.
+sealed class PriceReading {
+  const PriceReading();
+
+  factory PriceReading.fromJson(Map<String, dynamic> json) {
+    PriceQuote quote() =>
+        PriceQuote.fromJson(json['quote'] as Map<String, dynamic>);
+    PriceTrouble trouble() =>
+        PriceTrouble.fromJson(json['trouble'] as Map<String, dynamic>);
+    return switch (json['state'] as String) {
+      'fresh' => PriceFresh(quote()),
+      'kept' => PriceKept(quote(), trouble()),
+      'missing' => PriceMissing(trouble()),
+      final other => throw FormatException('unknown price state `$other`'),
+    };
+  }
+
+  /// The quote amounts are priced with, or null when there is none.
+  PriceQuote? get quote;
+
+  /// Why the quote is not fresh, or null when it is.
+  PriceTrouble? get trouble;
+}
+
+/// A quote the source just gave.
+class PriceFresh extends PriceReading {
+  const PriceFresh(this.quote);
+
+  @override
+  final PriceQuote quote;
+
+  @override
+  PriceTrouble? get trouble => null;
+}
+
+/// The last quote, kept while the source fails: the core drops it once
+/// it is older than [PriceTable.keep].
+class PriceKept extends PriceReading {
+  const PriceKept(this.quote, this.trouble);
+
+  @override
+  final PriceQuote quote;
+
+  @override
+  final PriceTrouble trouble;
+}
+
+/// No quote at all: the source fails and none is kept.
+class PriceMissing extends PriceReading {
+  const PriceMissing(this.trouble);
+
+  @override
+  PriceQuote? get quote => null;
+
+  @override
+  final PriceTrouble trouble;
 }
 
 /// What to say about releases: all of it decided by the core, which

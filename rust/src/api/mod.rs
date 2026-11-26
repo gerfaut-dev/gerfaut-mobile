@@ -1104,16 +1104,30 @@ pub async fn price_table() -> String {
     to_json(&gerfaut_core::price::price_table())
 }
 
-/// Fetches the current BTC price, in the currency and from the source
-/// of the preferences. Returns a `PriceQuote`.
+/// Reads the current BTC price, in the currency and from the source of
+/// the preferences. Returns a `PriceReading`: the quote, fresh or kept
+/// while the source fails, and the trouble when there is one.
 ///
 /// Through the manager, so the request takes the route the syncs take:
 /// with a .onion node on any network it goes through Tor, and with Tor
-/// out of reach it does not go at all and comes back as `tor`.
+/// out of reach it does not go at all and the reading says `tor`. A
+/// source that fails is in the reading too, never an error: only an
+/// internal failure or a pair the core refuses come back as one.
 pub async fn fetch_price() -> String {
     let manager = try_json!(manager());
     match manager.fetch_price().await {
-        Ok(quote) => to_json(&quote),
+        Ok(reading) => to_json(&reading),
+        Err(e) => core_error_json(&e),
+    }
+}
+
+/// [`fetch_price`] at a person's request, the "Try again" of the
+/// settings: the source is asked now, unless it asked for the wait
+/// itself. Returns a `PriceReading`.
+pub async fn retry_price() -> String {
+    let manager = try_json!(manager());
+    match manager.retry_price().await {
+        Ok(reading) => to_json(&reading),
         Err(e) => core_error_json(&e),
     }
 }

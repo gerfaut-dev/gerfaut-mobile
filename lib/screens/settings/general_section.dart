@@ -2,14 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-import '../../src/bridge.dart';
 import '../../src/format.dart';
 import '../../src/models.dart';
 import '../../src/state.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/price_credit.dart';
+import '../../widgets/buttons.dart';
 import '../../widgets/choice_group.dart';
 import '../../widgets/facts.dart';
+import '../../widgets/notice.dart';
 import '../../widgets/section_card.dart';
 import '../../widgets/select_field.dart';
 import '../../widgets/setting_switch.dart';
@@ -185,45 +186,140 @@ class _CurrencyField extends StatelessWidget {
   }
 }
 
-class _RatePreview extends ConsumerWidget {
+/// The price under the source picker: the rate and its age, and, once
+/// the source keeps failing, a note that says why and what happens to
+/// the amounts meanwhile.
+class _RatePreview extends ConsumerStatefulWidget {
   const _RatePreview({required this.tokens});
 
   final GerfautTokens tokens;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_RatePreview> createState() => _RatePreviewState();
+}
+
+class _RatePreviewState extends ConsumerState<_RatePreview> {
+  bool _trying = false;
+
+  Future<void> _retry() async {
+    setState(() => _trying = true);
+    try {
+      await ref.read(priceProvider.notifier).retry();
+    } finally {
+      if (mounted) setState(() => _trying = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = widget.tokens;
     final price = ref.watch(priceProvider);
+    // The age of a kept quote and the wait of a rate limit both move
+    // with the clock.
     ref.watch(relativeClockProvider);
-    if (price.hasError) {
-      // With a .onion node the core sends the price through Tor, and
-      // nothing at all while Tor is out of reach: that is not the
-      // source failing to answer.
-      final error = price.error;
-      final torDown = error is BridgeException && error.kind == 'tor';
-      return Text(
-        torDown
-            ? 'Tor is not available, so no price was asked. Amounts show '
-                  'without fiat until it is.'
-            : 'The price source did not answer. Amounts show without fiat '
-                  'until it does.',
-        style: tokens.bodySmall.copyWith(color: tokens.pending),
-      );
+    // A failure of the bridge itself vouches for no reading: said as
+    // the wait for one, which the next minute asks again.
+    final reading = price.hasError ? null : price.value;
+    final quote = reading?.quote;
+    final trouble = reading?.trouble;
+    final Widget? rate = quote == null
+        // The rate on screen is the source's: the screen credits it.
+        ? null
+        : CreditMark(
+            source: quote.source,
+            child: Text(
+              '1 BTC = ${formatFiatPrice(quote.rate, quote.currency)} · '
+              'updated ${relativeTime(quote.at)}',
+              style: tokens.figureOf(color: tokens.textMuted),
+            ),
+          );
+    // A single failure is not said: the next ask usually mends it.
+    if (trouble == null || !trouble.lasting) {
+      return rate ??
+          Text(
+            'Fetching the current price…',
+            style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+          );
     }
-    final quote = price.value;
-    if (quote == null) {
-      return Text(
-        'Fetching the current price…',
-        style: tokens.bodySmall.copyWith(color: tokens.textMuted),
-      );
-    }
-    // The rate on screen is the source's: the screen credits it.
-    return CreditMark(
-      source: quote.source,
-      child: Text(
-        '1 BTC = ${formatFiatPrice(quote.rate, quote.currency)} · '
-        'updated ${relativeTime(quote.at)}',
-        style: tokens.figureOf(color: tokens.textMuted),
+    final note = GerfautNotice(
+      tone: NoticeTone.info,
+      message: _troubleText(
+        trouble,
+        kept: quote != null,
+        table: ref.watch(priceTableProvider).value,
+        source: ref.watch(fiatSourceProvider),
+        currency: ref.watch(fiatCurrencyProvider),
       ),
+      // A rate limit is the source's own wait: asking sooner only
+      // prolongs it, so there is nothing to try.
+      action: trouble.kind == TroubleKind.rateLimited
+          ? null
+          : SecondaryButton(
+              label: _trying ? 'Trying…' : 'Try again',
+              onPressed: _trying ? null : _retry,
+            ),
+      actionsBelow: true,
+    );
+    if (rate == null) return note;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Align(alignment: AlignmentDirectional.centerStart, child: rate),
+        const SizedBox(height: GerfautSpacing.sm),
+        note,
+      ],
     );
   }
+}
+
+/// What the note says of a lasting [trouble]: what is wrong, what the
+/// amounts do meanwhile, and what comes next.
+String _troubleText(
+  PriceTrouble trouble, {
+  required bool kept,
+  required PriceTable? table,
+  required PriceSource source,
+  required FiatCurrency currency,
+}) {
+  String labelOf(PriceSource of) {
+    for (final entry in table?.sources ?? const <SourceEntry>[]) {
+      if (entry.source == of) return entry.label;
+    }
+    return 'The price source';
+  }
+
+  final name = labelOf(source);
+  final what = switch (trouble.kind) {
+    TroubleKind.rateLimited =>
+      '$name is limiting requests from this '
+          'connection.',
+    TroubleKind.unreachable => '$name is not answering.',
+    TroubleKind.refused => '$name refused the request.',
+    TroubleKind.tor => 'Tor is not available, so no price was asked.',
+  };
+  final until = trouble.kind == TroubleKind.tor
+      ? 'until Tor is back.'
+      : 'until it answers.';
+  final meanwhile = kept
+      ? 'Amounts use the last price $until'
+      : 'Amounts show without fiat $until';
+  final String? next;
+  if (trouble.kind == TroubleKind.rateLimited) {
+    final nowSecs = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final wait = trouble.nextTry - nowSecs;
+    next = wait < 60
+        ? 'Gerfaut asks again in a minute.'
+        : 'Gerfaut asks again in ${(wait + 59) ~/ 60} min.';
+  } else if (trouble.kind != TroubleKind.tor) {
+    final other = table
+        ?.entryOf(currency)
+        ?.sources
+        .where((s) => s != source)
+        .firstOrNull;
+    next = other == null ? null : 'You can also switch to ${labelOf(other)}.';
+  } else {
+    next = null;
+  }
+  return [what, meanwhile, ?next].join(' ');
 }

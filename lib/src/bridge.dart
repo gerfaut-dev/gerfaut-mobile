@@ -317,8 +317,15 @@ abstract class GerfautBridge {
   Future<PriceTable> priceTable();
 
   /// The current BTC price, in the currency and from the source of the
-  /// preferences.
-  Future<PriceQuote> fetchPrice();
+  /// preferences: fresh, kept while the source fails, or missing. A
+  /// source that fails is in the reading; only an internal failure
+  /// throws.
+  Future<PriceReading> fetchPrice();
+
+  /// [fetchPrice] at a person's request: the source is asked now,
+  /// unless it asked to be left alone, and the reading in hand comes
+  /// back then.
+  Future<PriceReading> retryPrice();
 
   /// What to say about releases to someone running [currentVersion].
   /// Reads only.
@@ -728,8 +735,13 @@ class RustBridge implements GerfautBridge {
   }
 
   @override
-  Future<PriceQuote> fetchPrice() async {
-    return PriceQuote.fromJson(_object(await rust.fetchPrice()));
+  Future<PriceReading> fetchPrice() async {
+    return PriceReading.fromJson(_object(await rust.fetchPrice()));
+  }
+
+  @override
+  Future<PriceReading> retryPrice() async {
+    return PriceReading.fromJson(_object(await rust.retryPrice()));
   }
 
   @override

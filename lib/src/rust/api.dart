@@ -490,13 +490,21 @@ Future<String> usesTor() => RustLib.instance.api.crateApiUsesTor();
 /// table, which only changes with the core.
 Future<String> priceTable() => RustLib.instance.api.crateApiPriceTable();
 
-/// Fetches the current BTC price, in the currency and from the source
-/// of the preferences. Returns a `PriceQuote`.
+/// Reads the current BTC price, in the currency and from the source of
+/// the preferences. Returns a `PriceReading`: the quote, fresh or kept
+/// while the source fails, and the trouble when there is one.
 ///
 /// Through the manager, so the request takes the route the syncs take:
 /// with a .onion node on any network it goes through Tor, and with Tor
-/// out of reach it does not go at all and comes back as `tor`.
+/// out of reach it does not go at all and the reading says `tor`. A
+/// source that fails is in the reading too, never an error: only an
+/// internal failure or a pair the core refuses come back as one.
 Future<String> fetchPrice() => RustLib.instance.api.crateApiFetchPrice();
+
+/// [`fetch_price`] at a person's request, the "Try again" of the
+/// settings: the source is asked now, unless it asked for the wait
+/// itself. Returns a `PriceReading`.
+Future<String> retryPrice() => RustLib.instance.api.crateApiRetryPrice();
 
 /// What to say about releases to someone running `current_version`, as
 /// the core decides it from what the vault keeps. Reads only. Returns a
