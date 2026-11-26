@@ -53,6 +53,36 @@ Widget settingsApp(
   );
 }
 
+/// A lasting trouble of [kind], unless said otherwise.
+PriceTrouble _trouble(
+  TroubleKind kind, {
+  bool lasting = true,
+  int nextTry = 1750000900,
+}) => PriceTrouble(
+  kind: kind,
+  since: 1750000060,
+  nextTry: nextTry,
+  lasting: lasting,
+);
+
+/// The General section with fiat on, its price read from [bridge].
+Future<ProviderContainer> _showRate(
+  WidgetTester tester,
+  FakeBridge bridge,
+) async {
+  useTallSurface(tester);
+  await tester.pumpWidget(
+    settingsApp(bridge, section: SettingsSection.general),
+  );
+  await tester.pumpAndSettle();
+  final container = ProviderScope.containerOf(
+    tester.element(find.byType(SettingsScreen)),
+  );
+  container.read(fiatEnabledProvider.notifier).set(true);
+  await tester.pumpAndSettle();
+  return container;
+}
+
 /// A surface tall enough to build every settings section at once.
 void useTallSurface(WidgetTester tester) {
   tester.view.physicalSize = const Size(800, 3600);
@@ -130,30 +160,201 @@ void main() {
   testWidgets('with Tor out of reach, the price line says so', (tester) async {
     // With a .onion node the core sends the price through Tor, and
     // nothing at all while Tor cannot be had: not a source that failed
-    // to answer.
-    useTallSurface(tester);
+    // to answer, and no other source to switch to would help.
     final bridge = FakeBridge()
-      ..onFetchPrice = (_, _) => throw coreFailure(
-        'tor',
-        'tor: no Tor proxy answers at 127.0.0.1:9050',
-      );
-    await tester.pumpWidget(
-      settingsApp(bridge, section: SettingsSection.general),
-    );
-    await tester.pumpAndSettle();
-    ProviderScope.containerOf(tester.element(find.byType(SettingsScreen)))
-        .read(fiatEnabledProvider.notifier)
-        .set(true);
-    await tester.pumpAndSettle();
+      ..onReadPrice = (_, _) => PriceMissing(_trouble(TroubleKind.tor));
+    await _showRate(tester, bridge);
 
     expect(
       find.text(
         'Tor is not available, so no price was asked. Amounts show '
-        'without fiat until it is.',
+        'without fiat until Tor is back.',
       ),
       findsOneWidget,
     );
-    expect(find.textContaining('did not answer'), findsNothing);
+    expect(find.text('Try again'), findsOneWidget);
+    expect(find.textContaining('not answering'), findsNothing);
+  });
+
+  group('the price under the source', () {
+    final readings = coreCases('PriceReading');
+    PriceReading reading(String name) =>
+        PriceReading.fromJson(readings[name] as Map<String, dynamic>);
+    final kept = reading('kept') as PriceKept;
+    final quote = kept.quote;
+
+    testWidgets('a source that fails once and then again keeps the price, '
+        'then says why', (tester) async {
+      // The report this answers: the price went missing on a single
+      // failed request, and an amber line came up at once.
+      var now = reading('fresh');
+      final bridge = FakeBridge()..onReadPrice = (_, _) => now;
+      final container = await _showRate(tester, bridge);
+      expect(
+        find.textContaining('1 BTC = €92\u00A0034 · updated'),
+        findsOneWidget,
+      );
+
+      // One failure: the core keeps the quote and the screen stays quiet.
+      now = kept;
+      container.invalidate(priceProvider);
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('1 BTC = €92\u00A0034 · updated'),
+        findsOneWidget,
+      );
+      expect(find.byType(GerfautNotice), findsNothing);
+
+      // It goes on failing: the price stays, and the note says so.
+      now = PriceKept(quote, _trouble(TroubleKind.unreachable));
+      container.invalidate(priceProvider);
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('1 BTC = €92\u00A0034 · updated'),
+        findsOneWidget,
+      );
+      final note = tester.widget<GerfautNotice>(find.byType(GerfautNotice));
+      expect(note.tone, NoticeTone.info);
+      expect(
+        note.message,
+        'mempool.space is not answering. Amounts use the last price until '
+        'it answers. You can also switch to CoinGecko.',
+      );
+      expect(find.text('Try again'), findsOneWidget);
+    });
+
+    testWidgets('with no quote yet, a first failure reads as the wait', (
+      tester,
+    ) async {
+      final bridge = FakeBridge()
+        ..onReadPrice = (_, _) =>
+            PriceMissing(_trouble(TroubleKind.unreachable, lasting: false));
+      await _showRate(tester, bridge);
+      expect(find.text('Fetching the current price…'), findsOneWidget);
+      expect(find.byType(GerfautNotice), findsNothing);
+    });
+
+    testWidgets('with no quote, a lasting failure says amounts go without '
+        'fiat', (tester) async {
+      final bridge = FakeBridge()..onReadPrice = (_, _) => reading('missing');
+      await _showRate(tester, bridge);
+      expect(find.textContaining('1 BTC'), findsNothing);
+      expect(
+        find.text(
+          'mempool.space is not answering. Amounts show without fiat until '
+          'it answers. You can also switch to CoinGecko.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a refusal says so, and a currency one source quotes '
+        'offers no other', (tester) async {
+      final bridge = FakeBridge()
+        ..onReadPrice = (_, _) => PriceMissing(_trouble(TroubleKind.refused));
+      final container = await _showRate(tester, bridge);
+      // The pair the vault stored, as hydration puts it on the screens.
+      holdPreferences(
+        container,
+        const PreferencesChange(
+          fiatCurrency: FiatCurrency('inr'),
+          priceSource: PriceSource.coingecko,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(
+        find.text(
+          'CoinGecko refused the request. Amounts show without fiat until it '
+          'answers.',
+        ),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('a rate limit says when Gerfaut asks again, with nothing '
+        'to try', (tester) async {
+      final soon = DateTime.now().millisecondsSinceEpoch ~/ 1000 + 5 * 60;
+      final bridge = FakeBridge()
+        ..onReadPrice = (_, _) =>
+            PriceKept(quote, _trouble(TroubleKind.rateLimited, nextTry: soon));
+      await _showRate(tester, bridge);
+      expect(
+        find.text(
+          'mempool.space is limiting requests from this connection. Amounts '
+          'use the last price until it answers. Gerfaut asks again in 5 min.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Try again'), findsNothing);
+    });
+
+    testWidgets('a rate limit about to end says a minute', (tester) async {
+      final bridge = FakeBridge()
+        ..onReadPrice = (_, _) =>
+            PriceMissing(_trouble(TroubleKind.rateLimited, nextTry: 0));
+      await _showRate(tester, bridge);
+      expect(
+        find.textContaining('Gerfaut asks again in a minute.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('try again asks now, says so meanwhile, and shows what it '
+        'brings', (tester) async {
+      final answer = Completer<PriceReading>();
+      final bridge = FakeBridge()
+        ..onReadPrice = ((_, _) => reading('missing'))
+        ..onRetryPrice = (() => answer.future);
+      await _showRate(tester, bridge);
+
+      await tester.tap(find.text('Try again'));
+      await tester.pump();
+      expect(bridge.retryPriceCalls, 1);
+      expect(find.text('Trying…'), findsOneWidget);
+      // Pressed again while it runs, it asks nothing more.
+      await tester.tap(find.text('Trying…'));
+      await tester.pump();
+      expect(bridge.retryPriceCalls, 1);
+
+      answer.complete(reading('fresh'));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('1 BTC = €92\u00A0034 · updated'),
+        findsOneWidget,
+      );
+      expect(find.byType(GerfautNotice), findsNothing);
+    });
+
+    testWidgets('a try that fails leaves the note as it was', (tester) async {
+      final bridge = FakeBridge()
+        ..onReadPrice = ((_, _) => reading('missing'))
+        ..onRetryPrice = (() async => throw coreFailure('internal', 'boom'));
+      await _showRate(tester, bridge);
+
+      await tester.tap(find.text('Try again'));
+      await tester.pumpAndSettle();
+      expect(bridge.retryPriceCalls, 1);
+      expect(find.textContaining('is not answering'), findsOneWidget);
+      expect(find.text('Try again'), findsOneWidget);
+    });
+
+    testWidgets('a try leaves the minute clock running', (tester) async {
+      var asked = 0;
+      final bridge = FakeBridge()
+        ..onReadPrice = (_, _) {
+          asked++;
+          return reading('missing');
+        }
+        ..onRetryPrice = () async => reading('fresh');
+      await _showRate(tester, bridge);
+      final before = asked;
+
+      await tester.tap(find.text('Try again'));
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 61));
+      await tester.pumpAndSettle();
+      expect(asked, before + 1);
+    });
   });
 
   testWidgets('the theme options carry a glyph each', (tester) async {

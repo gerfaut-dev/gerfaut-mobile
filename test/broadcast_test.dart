@@ -360,7 +360,7 @@ void main() {
     // hand, not that the source failed to answer.
     expect(await container.read(priceProvider.future), isNotNull);
     await tester.pumpAndSettle();
-    expect(container.read(priceProvider).value?.rate, 50000);
+    expect(container.read(priceProvider).value?.quote?.rate, 50000);
     expect(container.read(fiatCurrencyProvider), FiatCurrency('eur'));
 
     // The preview and the transaction detail are one page with two

@@ -76,6 +76,7 @@ final kPriceTable = PriceTable(
     ),
   ],
   refresh: const Duration(seconds: 60),
+  keep: const Duration(hours: 6),
 );
 
 /// What GerfautApp puts around every screen for the credit of the
@@ -1449,18 +1450,39 @@ class FakeBridge implements GerfautBridge {
   /// rate keeps fiat lines deterministic in tests.
   PriceQuote Function(PriceSource source, FiatCurrency currency)? onFetchPrice;
 
+  /// Reading hook, for a source in trouble: takes the place of
+  /// [onFetchPrice], whose quote reads as fresh.
+  PriceReading Function(PriceSource source, FiatCurrency currency)? onReadPrice;
+
+  /// The "Try again" hook; without it, a retry reads as [fetchPrice].
+  /// Throw a [BridgeException] to simulate an internal failure.
+  Future<PriceReading> Function()? onRetryPrice;
+  int retryPriceCalls = 0;
+
   @override
-  Future<PriceQuote> fetchPrice() async {
+  Future<PriceReading> fetchPrice() async {
     final source = settings.preferences.priceSource;
     final currency = settings.preferences.fiatCurrency;
+    final read = onReadPrice;
+    if (read != null) return read(source, currency);
     final fetch = onFetchPrice;
-    if (fetch != null) return fetch(source, currency);
-    return PriceQuote(
-      rate: 50000,
-      currency: currency,
-      source: source,
-      at: 1755000000,
+    if (fetch != null) return PriceFresh(fetch(source, currency));
+    return PriceFresh(
+      PriceQuote(
+        rate: 50000,
+        currency: currency,
+        source: source,
+        at: 1755000000,
+      ),
     );
+  }
+
+  @override
+  Future<PriceReading> retryPrice() async {
+    retryPriceCalls++;
+    final retry = onRetryPrice;
+    if (retry != null) return retry();
+    return fetchPrice();
   }
 
   // --- live watch ------------------------------------------------------

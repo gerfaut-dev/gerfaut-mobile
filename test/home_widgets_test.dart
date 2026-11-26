@@ -992,6 +992,38 @@ void main() {
       expect(board.data[WidgetKeys.balanceSynced], 'Synced 2 h ago');
     });
 
+    test('the run shows the quote the core keeps, and with none kept '
+        'leaves the last one up', () async {
+      const lasting = PriceTrouble(
+        kind: TroubleKind.unreachable,
+        since: _syncedAt,
+        nextTry: _syncedAt,
+        lasting: true,
+      );
+      Future<String?> run(PriceReading reading) async {
+        final bridge = _bridge()..onReadPrice = (_, _) => reading;
+        final board = FakeWidgetBoard(installed: {HomeWidgets.price});
+        board.data[WidgetKeys.priceFigure] = 'before';
+        await refreshWidgets(
+          bridge: bridge,
+          board: board,
+          bootstrap: () async {},
+          now: _now,
+        );
+        return board.data[WidgetKeys.priceFigure];
+      }
+
+      expect(
+        await run(const PriceKept(_quote, lasting)),
+        PricePayload.of(
+          _quote,
+          kPriceTable,
+          now: _now,
+        ).toData()[WidgetKeys.priceFigure],
+      );
+      expect(await run(const PriceMissing(lasting)), 'before');
+    });
+
     test('a quote kept from another day is dated, at the time of the '
         'run', () async {
       final bridge = _bridge();

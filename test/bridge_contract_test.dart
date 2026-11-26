@@ -397,9 +397,11 @@ final Map<String, _Entry> _contract = {
   'PriceHistory': const _Away(_noChart),
   'PricePoint': const _Away(_noChart),
   'PriceQuote': _reads(PriceQuote.fromJson),
+  'PriceReading': _reads(PriceReading.fromJson),
   'PriceRange': const _Away(_noChart),
   'PriceSource': _enum(PriceSource.values, (v) => v.id, PriceSource.fromId),
   'PriceTable': _reads(PriceTable.fromJson),
+  'PriceTrouble': _reads(PriceTrouble.fromJson),
   'PublicServer': _reads(PublicServer.fromJson),
   'QrFormat': _enum(QrFormat.values, (v) => v.id, QrFormat.fromId),
   'QrProgress': _reads(QrProgress.fromJson),
@@ -446,6 +448,7 @@ final Map<String, _Entry> _contract = {
   ),
   'TorStatus': _reads(TorStatus.fromJson),
   'TorVia': _enum(TorVia.values, (v) => v.id, TorVia.fromId),
+  'TroubleKind': _enum(TroubleKind.values, (v) => v.id, TroubleKind.fromId),
   'TxDetail': _reads(TxDetail.fromJson),
   'TxExtras': _reads(TxExtras.fromJson),
   'TxInputPreview': _reads(TxInputPreview.fromJson),
@@ -980,7 +983,6 @@ void main() {
       ('lib/screens/broadcast.dart', {'invalid_input', 'too_many_parts'}),
       ('lib/screens/scan.dart', {'too_many_parts'}),
       ('lib/screens/settings/about_section.dart', {'tor'}),
-      ('lib/screens/settings/general_section.dart', {'tor'}),
       (
         'lib/src/bridge.dart',
         {'private_material', 'descriptor', 'false_proof'},
@@ -1029,6 +1031,7 @@ void main() {
       [for (final s in table.sources) (s.source, s.label)],
     );
     expect(kPriceTable.refresh, table.refresh);
+    expect(kPriceTable.keep, table.keep);
   });
 
   test('finds the reference files of the core', () {
