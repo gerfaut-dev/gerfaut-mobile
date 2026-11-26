@@ -13,11 +13,12 @@ import 'price_credit.dart';
 /// enabled and a quote is available. Degrades to null, never to an
 /// error.
 ///
-/// Only a quote that stands: after a failed fetch the provider still
-/// holds the last one, hours old maybe, and the settings say amounts
-/// show without fiat until the source answers. Nor one in a currency
-/// other than the one chosen, which a quote fetched before the change
-/// is until the next one lands.
+/// Only the quote of the reading: fresh, or the last one the core keeps
+/// while the source fails, for as long as it keeps it, so no age is
+/// reckoned here; none when the reading has none, or when the bridge
+/// itself failed and the provider holds a reading nothing vouches for.
+/// Nor one in a currency other than the one chosen, which a quote
+/// fetched before the change is until the next one lands.
 ///
 /// A test coin is worth nothing. Off mainnet the value is zero in the
 /// chosen currency, written like any other fiat figure, never the
@@ -30,7 +31,7 @@ String? _fiatValueOf(WidgetRef ref, int sats, {required Network network}) {
     return null;
   }
   final price = ref.watch(priceProvider);
-  final quote = price.value;
+  final quote = price.value?.quote;
   if (quote == null || price.hasError) return null;
   if (quote.currency != ref.watch(fiatCurrencyProvider)) return null;
   final priced = network == Network.mainnet ? sats : 0;
@@ -69,7 +70,7 @@ class FiatText extends ConsumerWidget {
     if (fiat == null) return const SizedBox.shrink();
     return CreditMark(
       source: network == Network.mainnet
-          ? ref.watch(priceProvider).value?.source
+          ? ref.watch(priceProvider).value?.quote?.source
           : null,
       child: Padding(
         padding: EdgeInsets.only(top: top),

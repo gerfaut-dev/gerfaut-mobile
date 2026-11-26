@@ -9,6 +9,7 @@ import 'package:gerfaut/src/state.dart';
 import 'package:gerfaut/src/disguise.dart';
 import 'package:url_launcher_platform_interface/url_launcher_platform_interface.dart';
 
+import 'core_fixtures.dart';
 import 'fakes.dart';
 
 Widget app(FakeBridge bridge) {
@@ -93,6 +94,56 @@ void main() {
     expect(spokenIfMasked('0.001 BTC'), isNull);
   });
 
+  testWidgets('amounts keep their fiat value while the core keeps the '
+      'quote, and lose it with the quote', (tester) async {
+    final readings = coreCases('PriceReading');
+    PriceReading reading(String name) =>
+        PriceReading.fromJson(readings[name] as Map<String, dynamic>);
+    final kept = reading('kept') as PriceKept;
+    var now = reading('fresh');
+    final bridge = FakeBridge(
+      wallets: [makeMeta(totalSats: 100000000)],
+      settings: Settings(
+        preferences: kPreferences.copyWith(fiat: true),
+        activeNetwork: Network.mainnet,
+        backends: const {},
+        appPrefs: const {},
+      ),
+    )..onReadPrice = (_, _) => now;
+    await tester.pumpWidget(app(bridge));
+    await tester.pumpAndSettle();
+    final container = ProviderScope.containerOf(
+      tester.element(find.byType(GerfautApp)),
+    );
+    expect(find.textContaining('€92\u00A0034'), findsWidgets);
+
+    Future<void> read(PriceReading next) async {
+      now = next;
+      container.invalidate(priceProvider);
+      await tester.pumpAndSettle();
+    }
+
+    // A source that failed once, then went on failing: the value stays.
+    await read(kept);
+    expect(find.textContaining('€92\u00A0034'), findsWidgets);
+    await read(
+      PriceKept(
+        kept.quote,
+        const PriceTrouble(
+          kind: TroubleKind.unreachable,
+          since: 1750000060,
+          nextTry: 1750000900,
+          lasting: true,
+        ),
+      ),
+    );
+    expect(find.textContaining('€92\u00A0034'), findsWidgets);
+
+    // The core no longer keeps it: no value, rather than an old one.
+    await read(reading('missing'));
+    expect(find.textContaining('€'), findsNothing);
+  });
+
   testWidgets('out of sight the price is not asked, and is asked on return', (
     tester,
   ) async {
@@ -125,7 +176,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(minutes: 10));
     expect(asked, 2);
-    expect(container.read(priceProvider).value?.rate, 50000);
+    expect(container.read(priceProvider).value?.quote?.rate, 50000);
 
     container.read(appInFrontProvider.notifier).put(true);
     await tester.pump(const Duration(milliseconds: 1));

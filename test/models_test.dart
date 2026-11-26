@@ -332,8 +332,10 @@ void main() {
           },
         ],
         'refresh_secs': 60,
+        'keep_secs': 21600,
       });
       expect(table.refresh, const Duration(seconds: 60));
+      expect(table.keep, const Duration(hours: 6));
       expect(table.currencies.map((entry) => entry.currency.code), [
         'EUR',
         'NGN',
