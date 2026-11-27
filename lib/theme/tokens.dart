@@ -80,10 +80,67 @@ abstract final class GerfautMotion {
   /// long settle, no overshoot. Nothing bounces.
   static const Curve ease = Cubic(0.2, 0, 0, 1);
 
+  /// One turn of the icon of an action under way: the only loop of the
+  /// app, on [linear]. Slow enough to read as steady work.
+  static const Duration turn = Duration(milliseconds: 1200);
+
+  /// How long an acknowledgement stays in place ("Copied" on the button)
+  /// before the control comes back to what it was.
+  static const Duration hold = Duration(milliseconds: 1500);
+
+  /// The curve of the loop, and of nothing else.
+  static const Curve linear = Curves.linear;
+
+  /// The scale of a filled button under the finger. Never less.
+  static const double press = 0.96;
+
+  /// How far a dialog, a menu anchored from the top or a toast rises as
+  /// it arrives, in logical pixels.
+  static const double rise = 8;
+
+  /// How far a page travels as it arrives on Android, in logical
+  /// pixels. The page it covers gives half of it.
+  static const double travel = 24;
+
+  /// The share of a page transition the fade takes: the page is opaque
+  /// by the middle of the way in and gone by the middle of the way out.
+  static const double pageFade = 0.5;
+
   /// [parent] on [ease], whichever way it runs: what leaves starts as
   /// briskly as what arrives. The caller disposes of it.
   static CurvedAnimation eased(Animation<double> parent) =>
       CurvedAnimation(parent: parent, curve: ease, reverseCurve: ease.flipped);
+
+  /// The one place that reads whether the device asks for less motion
+  /// (Android's "Remove animations", iOS's "Reduce motion"). Then nothing
+  /// travels, nothing loops and a sequence jumps to its end; fades,
+  /// colour changes and the press stay.
+  static bool reduced(BuildContext context) =>
+      MediaQuery.disableAnimationsOf(context);
+
+  /// A surface that arrives in [slow] and leaves in [base] on [ease];
+  /// none at all with animations reduced, where the framework cannot
+  /// fade a bottom sheet and it has to appear and leave at once.
+  static AnimationStyle sheet(BuildContext context) => reduced(context)
+      ? AnimationStyle.noAnimation
+      : AnimationStyle(
+          curve: ease,
+          duration: slow,
+          reverseCurve: ease.flipped,
+          reverseDuration: base,
+        );
+
+  /// A toast arrives in [slow] and leaves in [base].
+  static const AnimationStyle toast = AnimationStyle(
+    duration: slow,
+    reverseDuration: base,
+  );
+
+  /// The colours of one theme turn into the other's in [base].
+  static const AnimationStyle theme = AnimationStyle(
+    curve: ease,
+    duration: base,
+  );
 }
 
 /// QR codes stay dark-on-light in every theme: scanners expect it, and
