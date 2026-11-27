@@ -125,8 +125,8 @@ class _ToastLayerState extends State<_ToastLayer>
   // starts as briskly as what arrives.
   late final AnimationController _controller = AnimationController(
     vsync: this,
-    duration: GerfautMotion.toast.duration,
-    reverseDuration: GerfautMotion.toast.reverseDuration,
+    duration: GerfautMotion.slow,
+    reverseDuration: GerfautMotion.base,
   )..addStatusListener(_onStatus);
   late final CurvedAnimation _eased = GerfautMotion.eased(_controller);
 

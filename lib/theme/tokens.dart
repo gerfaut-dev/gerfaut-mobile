@@ -130,13 +130,6 @@ abstract final class GerfautMotion {
           reverseDuration: base,
         );
 
-  /// A toast arrives in [slow] and leaves in [base], on [ease], rising
-  /// by [rise] (lib/widgets/toast.dart).
-  static const AnimationStyle toast = AnimationStyle(
-    duration: slow,
-    reverseDuration: base,
-  );
-
   /// The colours of one theme turn into the other's in [base].
   static const AnimationStyle theme = AnimationStyle(
     curve: ease,
