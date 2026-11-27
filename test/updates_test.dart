@@ -400,6 +400,8 @@ void main() {
       await tester.tap(find.text('Check for updates'));
       await tester.pumpAndSettle();
       expect(bridge.updates.checks, 1);
+      expect(find.text('Gerfaut 0.2.0 is available.'), findsOneWidget);
+      expect(find.text('You are up to date.'), findsNothing);
       await tester.tap(find.text('Get 0.2.0'));
       await tester.pumpAndSettle();
       expect(launcher.launched, [_releases]);

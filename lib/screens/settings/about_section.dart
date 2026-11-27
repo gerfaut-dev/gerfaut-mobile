@@ -186,11 +186,14 @@ class _AboutSectionState extends ConsumerState<AboutSection> {
             style: tokens.bodySmall.copyWith(color: tokens.textMuted),
           ),
         ),
-      if (result != null && newer == null)
+      // Worded as on the desktop; the version is the one the site names.
+      if (result != null)
         Padding(
           padding: const EdgeInsets.only(bottom: GerfautSpacing.sm),
           child: Text(
-            'You are up to date.',
+            newer == null
+                ? 'You are up to date.'
+                : 'Gerfaut $newer is available.',
             style: tokens.bodySmall.copyWith(color: tokens.textMuted),
           ),
         ),
