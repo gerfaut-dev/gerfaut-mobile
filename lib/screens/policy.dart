@@ -677,7 +677,7 @@ class _CodeBoxState extends ConsumerState<_CodeBox> {
     if (!mounted) return;
     setState(() => _copied = true);
     ScaffoldMessenger.of(context)
-        .showSnackBar(Toast(copiedWords('Copied', timed: timed)));
+        .showToast(copiedWords('Copied', timed: timed));
     await Future<void>.delayed(GerfautMotion.hold);
     if (mounted) setState(() => _copied = false);
   }

@@ -187,7 +187,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
   }
 
   void _toast(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(Toast(message));
+    ScaffoldMessenger.of(context).showToast(message);
   }
 
   /// Switches the workspace network. A refusal is said under the
@@ -474,7 +474,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
       if (mounted && config is CustomElectrum) {
         setState(_stopFollowingPort);
       }
-      messenger.showSnackBar(Toast('Setting saved'));
+      messenger.showToast('Setting saved');
       // Stored: whether it answers is the test's to say, wherever the
       // person is by then.
       unawaited(

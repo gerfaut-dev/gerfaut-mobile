@@ -278,7 +278,7 @@ class _BackupRestoreScreenState extends ConsumerState<BackupRestoreScreen> {
       );
       if (!mounted) return;
       navigator.pop();
-      messenger.showSnackBar(Toast(_restoredMessage(report)));
+      messenger.showToast(_restoredMessage(report));
     } on BridgeException catch (error) {
       if (mounted) setState(() => _error = _restoreMessageOf(error));
     } finally {

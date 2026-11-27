@@ -142,7 +142,7 @@ Future<void> changeWalletIcon(
     container.invalidate(walletsProvider);
     container.invalidate(snapshotProvider(wallet.id));
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(Toast('Setting saved'));
+      ScaffoldMessenger.of(context).showToast('Setting saved');
     }
   } catch (error) {
     if (context.mounted) onFailure('$error');

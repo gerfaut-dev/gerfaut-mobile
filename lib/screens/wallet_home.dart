@@ -86,7 +86,7 @@ class _WalletHomeScreenState extends ConsumerState<WalletHomeScreen> {
       ),
     );
     if (renamed != true || !mounted) return;
-    messenger.showSnackBar(Toast('Wallet renamed'));
+    messenger.showToast('Wallet renamed');
   }
 
   @override
@@ -723,13 +723,11 @@ class _TxList extends ConsumerWidget {
     try {
       final added = await ref.read(historyProvider.notifier).loadMore(walletId);
       if (added == null) return;
-      messenger.showSnackBar(
-        Toast(switch (added) {
-          0 => 'History is complete',
-          1 => '1 older transaction',
-          _ => '$added older transactions',
-        }),
-      );
+      messenger.showToast(switch (added) {
+        0 => 'History is complete',
+        1 => '1 older transaction',
+        _ => '$added older transactions',
+      });
     } on BridgeException catch (error) {
       // The page may have gone meanwhile, and its note with it.
       if (context.mounted) failure.put(error.message);

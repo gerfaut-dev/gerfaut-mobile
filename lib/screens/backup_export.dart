@@ -190,7 +190,7 @@ class _BackupExportScreenState extends ConsumerState<BackupExportScreen> {
       );
       // A dialog waved away says nothing: the backup is still here.
       if (saved) {
-        messenger.showSnackBar(Toast('Saved'));
+        messenger.showToast('Saved');
       }
     } on DocumentSaveException catch (error) {
       _fail('The file could not be saved.', detail: error.message);

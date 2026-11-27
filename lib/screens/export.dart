@@ -152,7 +152,7 @@ class _ExportScreenState extends ConsumerState<ExportScreen> {
           );
           // A dialog waved away says nothing: the filters are still here.
           if (saved) {
-            messenger.showSnackBar(Toast('$rows saved'));
+            messenger.showToast('$rows saved');
           }
         case _Destination.share:
           final sharer = ref.read(csvSharerProvider);

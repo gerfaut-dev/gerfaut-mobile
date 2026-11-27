@@ -133,14 +133,10 @@ class HomeScreen extends ConsumerWidget {
             // per-wallet failures stay on the freshness lines.
             final synced = report.reports.length;
             final failed = report.failures.length;
-            ScaffoldMessenger.of(context).showSnackBar(
-              Toast(
-                failed == 0
-                    ? (synced == 1
-                          ? '1 wallet synced'
-                          : '$synced wallets synced')
-                    : '$synced synced, $failed failed',
-              ),
+            ScaffoldMessenger.of(context).showToast(
+              failed == 0
+                  ? (synced == 1 ? '1 wallet synced' : '$synced wallets synced')
+                  : '$synced synced, $failed failed',
             );
           },
         ),

@@ -180,7 +180,7 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
     await Clipboard.setData(ClipboardData(text: address));
     if (!mounted) return;
     setState(() => _copied = true);
-    ScaffoldMessenger.of(context).showSnackBar(Toast('Copied'));
+    ScaffoldMessenger.of(context).showToast('Copied');
     await Future<void>.delayed(GerfautMotion.hold);
     if (mounted) setState(() => _copied = false);
   }
