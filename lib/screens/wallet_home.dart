@@ -66,7 +66,7 @@ class _WalletHomeScreenState extends ConsumerState<WalletHomeScreen> {
   /// The full path stays Settings -> the wallet -> Rename, and both go
   /// through the one call that writes a name.
   Future<void> _rename(String current) async {
-    final messenger = ScaffoldMessenger.of(context);
+    final toast = Toast.of(context);
     // Held before the dialog: the name is written even if the page goes
     // meanwhile, and refreshing the lists must not touch a dead `ref`.
     final container = ProviderScope.containerOf(context, listen: false);
@@ -86,7 +86,7 @@ class _WalletHomeScreenState extends ConsumerState<WalletHomeScreen> {
       ),
     );
     if (renamed != true || !mounted) return;
-    messenger.showToast('Wallet renamed');
+    toast.show('Wallet renamed');
   }
 
   @override
@@ -717,13 +717,13 @@ class _TxList extends ConsumerWidget {
 
   /// Fetches one more round and states what it brought back.
   Future<void> _loadOlder(BuildContext context, WidgetRef ref) async {
-    final messenger = ScaffoldMessenger.of(context);
+    final toast = Toast.of(context);
     final failure = ref.read(_olderFailureProvider(walletId).notifier);
     failure.put(null);
     try {
       final added = await ref.read(historyProvider.notifier).loadMore(walletId);
       if (added == null) return;
-      messenger.showToast(switch (added) {
+      toast.show(switch (added) {
         0 => 'History is complete',
         1 => '1 older transaction',
         _ => '$added older transactions',

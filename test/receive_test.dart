@@ -15,6 +15,7 @@ import 'package:gerfaut/theme/tokens.dart';
 import 'package:gerfaut/widgets/address_chip.dart';
 import 'package:gerfaut/widgets/buttons.dart';
 import 'package:gerfaut/widgets/status_pill.dart';
+import 'package:gerfaut/widgets/toast.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
@@ -497,7 +498,7 @@ void main() {
 
       // As on the desktop app: night ground and foam text in either
       // theme, never the light block the dark theme's text colour made.
-      final toast = find.byType(SnackBar);
+      final toast = find.byType(ToastView);
       expect(toast, findsOneWidget);
       final ground = tester.widget<Material>(
         find.descendant(of: toast, matching: find.byType(Material)).first,
@@ -519,20 +520,39 @@ void main() {
       await tester.pumpAndSettle(const Duration(seconds: 4));
     });
 
-    test('the toast has an edge only where the page shares its ground', () {
+    testWidgets('the toast has an edge only where the page shares its ground', (
+      tester,
+    ) async {
+      Future<Material> toastIn(GerfautTokens tokens, Brightness b) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: themeFrom(tokens, b),
+            home: const Scaffold(body: ToastView('Copied')),
+          ),
+        );
+        // Past the change of theme, which eases from one to the other.
+        await tester.pumpAndSettle();
+        return tester.widget<Material>(
+          find
+              .descendant(
+                of: find.byType(ToastView),
+                matching: find.byType(Material),
+              )
+              .first,
+        );
+      }
+
       // Dark ground on a light page: it stands out by itself.
-      final light = themeFrom(GerfautTokens.light, Brightness.light);
-      final lightShape = light.snackBarTheme.shape! as RoundedRectangleBorder;
-      expect(
-        light.snackBarTheme.backgroundColor,
-        GerfautTokens.dark.background,
-      );
-      expect(lightShape.side, BorderSide.none);
+      final light = await toastIn(GerfautTokens.light, Brightness.light);
+      expect(light.color, GerfautTokens.dark.background);
+      expect((light.shape! as RoundedRectangleBorder).side, BorderSide.none);
       // Dark ground on a dark page of the same colour: the hairline.
-      final dark = themeFrom(GerfautTokens.dark, Brightness.dark);
-      final darkShape = dark.snackBarTheme.shape! as RoundedRectangleBorder;
-      expect(dark.snackBarTheme.backgroundColor, GerfautTokens.dark.background);
-      expect(darkShape.side.color, GerfautTokens.dark.border);
+      final dark = await toastIn(GerfautTokens.dark, Brightness.dark);
+      expect(dark.color, GerfautTokens.dark.background);
+      expect(
+        (dark.shape! as RoundedRectangleBorder).side.color,
+        GerfautTokens.dark.border,
+      );
     });
 
     testWidgets('the small QR code opens large and closes on a tap', (

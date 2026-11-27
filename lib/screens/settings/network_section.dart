@@ -187,7 +187,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
   }
 
   void _toast(String message) {
-    ScaffoldMessenger.of(context).showToast(message);
+    Toast.of(context).show(message);
   }
 
   /// Switches the workspace network. A refusal is said under the
@@ -426,7 +426,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
     // it still shows on the page that comes back, and so is the test.
     final container = ProviderScope.containerOf(context, listen: false);
     final bridge = ref.read(bridgeProvider);
-    final messenger = ScaffoldMessenger.of(context);
+    final toast = Toast.of(context);
     final config = switch (_backendKind) {
       'custom_esplora' => CustomEsplora(
         url: _esploraController.text.trim(),
@@ -474,7 +474,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
       if (mounted && config is CustomElectrum) {
         setState(_stopFollowingPort);
       }
-      messenger.showToast('Setting saved');
+      toast.show('Setting saved');
       // Stored: whether it answers is the test's to say, wherever the
       // person is by then.
       unawaited(

@@ -239,7 +239,7 @@ class _BackupRestoreScreenState extends ConsumerState<BackupRestoreScreen> {
       _restoring = true;
       _error = null;
     });
-    final messenger = ScaffoldMessenger.of(context);
+    final toast = Toast.of(context);
     final navigator = Navigator.of(context);
     // Held before the first await: `ref` belongs to this widget and
     // throws once it is gone, but the container it points at does not.
@@ -278,7 +278,7 @@ class _BackupRestoreScreenState extends ConsumerState<BackupRestoreScreen> {
       );
       if (!mounted) return;
       navigator.pop();
-      messenger.showToast(_restoredMessage(report));
+      toast.show(_restoredMessage(report));
     } on BridgeException catch (error) {
       if (mounted) setState(() => _error = _restoreMessageOf(error));
     } finally {

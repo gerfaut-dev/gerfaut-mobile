@@ -116,7 +116,7 @@ class _WalletsSectionState extends ConsumerState<WalletsSection> {
   }
 
   void _toast(String message) {
-    ScaffoldMessenger.of(context).showToast(message);
+    Toast.of(context).show(message);
   }
 
   Future<void> _rename(String id) async {
@@ -454,7 +454,7 @@ class _LivePinsState extends ConsumerState<_LivePins> {
     // Held before the await: the list is read again even if the page
     // was left meanwhile.
     final container = ProviderScope.containerOf(context, listen: false);
-    final messenger = ScaffoldMessenger.of(context);
+    final toast = Toast.of(context);
     setState(() {
       _savingId = wallet.id;
       _failure = null;
@@ -462,7 +462,7 @@ class _LivePinsState extends ConsumerState<_LivePins> {
     try {
       await ref.read(bridgeProvider).setWalletLivePinned(wallet.id, pinned);
       container.invalidate(walletsProvider);
-      messenger.showToast('Setting saved');
+      toast.show('Setting saved');
     } on BridgeException catch (error) {
       if (mounted) {
         setState(() => _failure = (id: wallet.id, message: error.message));

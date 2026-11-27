@@ -124,7 +124,7 @@ class _ExportScreenState extends ConsumerState<ExportScreen> {
       _exporting = true;
       _failure = null;
     });
-    final messenger = ScaffoldMessenger.of(context);
+    final toast = Toast.of(context);
     final lock = ref.read(lockProvider.notifier);
     try {
       final result = await ref
@@ -153,7 +153,7 @@ class _ExportScreenState extends ConsumerState<ExportScreen> {
           );
           // A dialog waved away says nothing: the filters are still here.
           if (saved) {
-            messenger.showToast('$rows saved');
+            toast.show('$rows saved');
           }
         case _Destination.share:
           final sharer = ref.read(csvSharerProvider);

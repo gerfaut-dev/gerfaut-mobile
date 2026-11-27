@@ -168,7 +168,7 @@ class _BackupExportScreenState extends ConsumerState<BackupExportScreen> {
   /// app, and the lock popped this screen with the backup on it.
   Future<void> _saveFile(BackupBundle bundle) async {
     if (_trip != null) return;
-    final messenger = ScaffoldMessenger.of(context);
+    final toast = Toast.of(context);
     final lock = ref.read(lockProvider.notifier);
     final bytes = base64Decode(bundle.data);
     setState(() {
@@ -191,7 +191,7 @@ class _BackupExportScreenState extends ConsumerState<BackupExportScreen> {
       );
       // A dialog waved away says nothing: the backup is still here.
       if (saved) {
-        messenger.showToast('Saved');
+        toast.show('Saved');
       }
     } on DocumentSaveException catch (error) {
       _fail('The file could not be saved.', detail: error.message);

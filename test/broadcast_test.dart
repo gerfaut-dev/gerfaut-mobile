@@ -24,6 +24,7 @@ import 'package:gerfaut/widgets/buttons.dart';
 import 'package:gerfaut/widgets/icon_chip.dart';
 import 'package:gerfaut/widgets/notice.dart';
 import 'package:gerfaut/widgets/op_return_preview.dart';
+import 'package:gerfaut/widgets/toast.dart';
 import 'package:gerfaut/widgets/tx_diagram.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -190,7 +191,7 @@ void main() {
     );
     expect(announced, findsOneWidget);
     expect(find.text('Preview'), findsOneWidget);
-    expect(find.byType(SnackBar), findsNothing);
+    expect(find.byType(ToastView), findsNothing);
   });
 
   testWidgets('a pasted qr code with too many parts is unreadable input', (
@@ -1142,7 +1143,7 @@ void main() {
       blockOf(tester, 'The network refused this transaction.').color,
       GerfautTokens.light.pendingSurface,
     );
-    expect(find.byType(SnackBar), findsNothing);
+    expect(find.byType(ToastView), findsNothing);
     // It lands in reaction to the tap that sent the transaction, so it
     // is announced rather than waiting to be walked into.
     expect(

@@ -14,10 +14,7 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   // A literal that is legitimately outside the tokens, keyed by
   // `path:pattern`, with the reason it stays.
-  const allowed = <String, String>{
-    'lib/widgets/toast.dart:snack bar off the toast motion':
-        'showToast itself, which hands the toast its motion',
-  };
+  const allowed = <String, String>{};
 
   final patterns = <String, RegExp>{
     'literal curve': RegExp(r'\bCurves\.'),
@@ -25,9 +22,9 @@ void main() {
     'literal animation duration': RegExp(
       r'\b(duration|reverseDuration|transitionDuration|reverseTransitionDuration|animationDuration)\s*:\s*(const\s+)?Duration\(',
     ),
-    // A snack bar shown directly arrives at the platform's pace; every
-    // toast goes through showToast, which hands it the surface motion.
-    'snack bar off the toast motion': RegExp(r'\.showSnackBar\('),
+    // A snack bar arrives at the platform's pace and ignores reduced
+    // motion; every toast is the app's Toast, which moves on the tokens.
+    'snack bar instead of the toast': RegExp(r'\.showSnackBar\('),
   };
 
   test('no animation writes its own duration or curve', () {

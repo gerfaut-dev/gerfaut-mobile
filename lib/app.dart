@@ -31,6 +31,7 @@ import 'src/prefs.dart';
 import 'src/share.dart';
 import 'widgets/readable_width.dart';
 import 'widgets/motion.dart';
+import 'widgets/toast.dart';
 
 /// Root widget: both Toundra themes, light by default, and the startup
 /// bootstrap (Rust bridge + encrypted vault) before the home screen.
@@ -132,8 +133,10 @@ class _GerfautAppState extends ConsumerState<GerfautApp> {
       navigatorKey: _navigator,
       navigatorObservers: [_credits],
       // One slot for the credit a price source asks for, under every
-      // screen: see widgets/price_credit.dart.
-      builder: (context, child) => CreditFrame(child: child!),
+      // screen: see widgets/price_credit.dart. The toasts of every
+      // screen show over the navigator, never over the lock.
+      builder: (context, child) =>
+          CreditFrame(child: _ToastsOffTheLock(child: child!)),
       theme: themeFrom(GerfautTokens.light, Brightness.light),
       darkTheme: themeFrom(GerfautTokens.dark, Brightness.dark),
       themeMode: themeMode,
@@ -148,6 +151,19 @@ class _GerfautAppState extends ConsumerState<GerfautApp> {
             ),
     );
   }
+}
+
+/// Closes the toasts while the lock, or the calculator standing for it,
+/// is the screen: a "Copied" made a moment before the lock came down is
+/// never drawn over it, nor one an unfinished save says behind it.
+class _ToastsOffTheLock extends ConsumerWidget {
+  const _ToastsOffTheLock({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) =>
+      ToastGate(open: !ref.watch(lockProvider).locked, child: child);
 }
 
 /// Hydrates the UI preferences from the vault as soon as the settings
@@ -625,22 +641,6 @@ ThemeData themeFrom(GerfautTokens tokens, Brightness brightness) {
       ),
       titleTextStyle: tokens.h2,
       contentTextStyle: tokens.bodySmall,
-    ),
-    // The toast is an island of the dark theme in either theme, as on
-    // the desktop app: night ground, foam text. On a light page it
-    // stands out by itself. In the dark theme its ground is the page's
-    // own, so there, and only there, the theme's hairline gives it an
-    // edge.
-    snackBarTheme: SnackBarThemeData(
-      backgroundColor: GerfautTokens.dark.background,
-      contentTextStyle: GerfautTokens.dark.bodySmall,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(GerfautRadius.md),
-        side: brightness == Brightness.dark
-            ? BorderSide(color: tokens.border)
-            : BorderSide.none,
-      ),
     ),
     tabBarTheme: TabBarThemeData(
       labelColor: tokens.text,

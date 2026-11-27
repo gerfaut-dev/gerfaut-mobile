@@ -23,6 +23,7 @@ import 'package:gerfaut/src/window.dart';
 import 'package:gerfaut/theme/tokens.dart';
 import 'package:gerfaut/widgets/pin_pad.dart';
 import 'package:gerfaut/widgets/setting_switch.dart';
+import 'package:gerfaut/widgets/toast.dart';
 
 import 'fakes.dart';
 import 'menu.dart';
@@ -191,6 +192,18 @@ void main() {
       expect(find.text('Locked'), findsOneWidget);
       // Not a wallet in the tree: the lock replaces the app.
       expect(find.text('Cold storage'), findsNothing);
+    });
+
+    testWidgets('no toast is ever drawn over the lock', (tester) async {
+      await tester.pumpWidget(app(locked(wallets: [makeMeta()])));
+      await tester.pumpAndSettle();
+
+      // A save that finishes behind the lock still says so.
+      Toast.of(tester.element(find.byType(LockScreen))).show('Setting saved');
+      await tester.pump();
+      await tester.pump(GerfautMotion.slow);
+      expect(find.text('Setting saved'), findsNothing);
+      expect(find.byType(ToastView), findsNothing);
     });
 
     testWidgets('a wrong PIN is said plainly and the screen stays', (
