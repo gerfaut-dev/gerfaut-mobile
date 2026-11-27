@@ -11,12 +11,13 @@ import '../../src/state.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/buttons.dart';
 import '../../widgets/notice.dart';
+import '../../widgets/motion.dart';
 
 /// Opens the sheet that explains Live watch and, on a yes, turns it on
 /// and walks through what Android has to be asked. Answers whether Live
 /// is on when the sheet closes.
 Future<bool> showLiveSheet(BuildContext context) async {
-  final turnedOn = await showModalBottomSheet<bool>(
+  final turnedOn = await showGerfautSheet<bool>(
     context: context,
     isScrollControlled: true,
     builder: (_) => const LiveSheet(),

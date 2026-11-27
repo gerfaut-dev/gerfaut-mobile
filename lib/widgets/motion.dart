@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../theme/tokens.dart';
@@ -33,10 +34,8 @@ class FadeInPlace extends StatelessWidget {
       duration: GerfautMotion.base,
       switchInCurve: GerfautMotion.ease,
       switchOutCurve: GerfautMotion.ease.flipped,
-      layoutBuilder: (current, previous) => Stack(
-        alignment: alignment,
-        children: [...previous, ?current],
-      ),
+      layoutBuilder: (current, previous) =>
+          Stack(alignment: alignment, children: [...previous, ?current]),
       child: KeyedSubtree(key: ValueKey<Object?>(state), child: child),
     );
   }
@@ -221,6 +220,75 @@ Future<T?> showGerfautSheet<T>({
     shape: shape,
     sheetAnimationStyle: GerfautMotion.sheet(context),
   );
+}
+
+/// The tab controller of every set of tabs: a change of tab slides the
+/// indicator and the pages in [GerfautMotion.base] (the platform takes
+/// 300 ms on its own curve), jumps with animations reduced, and gives a
+/// click when the tab changes, by a tap or a swipe.
+class GerfautTabController extends StatelessWidget {
+  const GerfautTabController({
+    super.key,
+    required this.length,
+    this.initialIndex = 0,
+    required this.child,
+  });
+
+  final int length;
+  final int initialIndex;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: length,
+      initialIndex: initialIndex,
+      animationDuration: GerfautMotion.reduced(context)
+          ? Duration.zero
+          : GerfautMotion.base,
+      child: _TabClick(child: child),
+    );
+  }
+}
+
+class _TabClick extends StatefulWidget {
+  const _TabClick({required this.child});
+
+  final Widget child;
+
+  @override
+  State<_TabClick> createState() => _TabClickState();
+}
+
+class _TabClickState extends State<_TabClick> {
+  TabController? _controller;
+  int _index = 0;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final controller = DefaultTabController.of(context);
+    if (controller == _controller) return;
+    _controller?.removeListener(_changed);
+    _controller = controller..addListener(_changed);
+    _index = controller.index;
+  }
+
+  @override
+  void dispose() {
+    _controller?.removeListener(_changed);
+    super.dispose();
+  }
+
+  void _changed() {
+    final index = _controller!.index;
+    if (index == _index) return;
+    _index = index;
+    HapticFeedback.selectionClick();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
 }
 
 /// One screen standing in for another at the root of the app: the lock,

@@ -76,13 +76,13 @@ class _WelcomeScreenState extends ConsumerState<WelcomeScreen> {
 
   void _goTo(BuildContext context, int target) {
     // A device asking for less motion gets the page, not the slide.
-    if (MediaQuery.disableAnimationsOf(context)) {
+    if (GerfautMotion.reduced(context)) {
       _pages.jumpToPage(target);
     } else {
       _pages.animateToPage(
         target,
         duration: GerfautMotion.slow,
-        curve: Curves.easeOut,
+        curve: GerfautMotion.ease,
       );
     }
   }

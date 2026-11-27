@@ -132,7 +132,11 @@ class _OverflowMenuRoute extends PopupRoute<OverflowMenuItem> {
     // A panel anchored under its own button already says where it came
     // from; travel would only be the second answer to a settled question.
     return FadeTransition(
-      opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
+      opacity: CurvedAnimation(
+        parent: animation,
+        curve: GerfautMotion.ease,
+        reverseCurve: GerfautMotion.ease.flipped,
+      ),
       child: child,
     );
   }

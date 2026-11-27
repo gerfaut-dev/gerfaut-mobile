@@ -111,7 +111,7 @@ class _ChoiceGroupState<T> extends State<ChoiceGroup<T>>
     // The fill travels to the option picked. It appears in place under
     // a first choice, for whoever asked for less motion, and between
     // stacked rows, where it would have to cross the gap.
-    if (wasEmpty || !_inline || MediaQuery.disableAnimationsOf(context)) {
+    if (wasEmpty || !_inline || GerfautMotion.reduced(context)) {
       _fill.value = current.toDouble();
     } else {
       _fill.animateTo(
