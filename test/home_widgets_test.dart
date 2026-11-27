@@ -1151,14 +1151,17 @@ void main() {
         find.textContaining('To add one, hold an empty spot'),
         findsOneWidget,
       );
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+      expect(
+        tester.widget<GerfautSwitch>(find.byType(GerfautSwitch)).value,
+        isFalse,
+      );
 
-      await tester.tap(find.byType(Switch));
+      await tester.tap(find.byType(GerfautSwitch));
       await tester.pumpAndSettle();
       expect(bridge.appPrefs['widgets.balances'], '1');
       expect(board.data[WidgetKeys.balanceTotal], '1.00050000 BTC');
 
-      await tester.tap(find.byType(Switch));
+      await tester.tap(find.byType(GerfautSwitch));
       await tester.pumpAndSettle();
       expect(bridge.appPrefs['widgets.balances'], '0');
       expect(board.data[WidgetKeys.balanceTotal], maskedValue);
@@ -1202,7 +1205,10 @@ void main() {
         isNull,
       );
       // Drawn off, as the line under it says, the choice kept for later.
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+      expect(
+        tester.widget<GerfautSwitch>(find.byType(GerfautSwitch)).value,
+        isFalse,
+      );
       expect(container.read(widgetBalancesProvider), isTrue);
       expect(board.data[WidgetKeys.balanceTotal], maskedValue);
       expect(board.data[WidgetKeys.balanceRowName(1)], isNull);

@@ -7,6 +7,7 @@ import '../src/disguise.dart';
 import '../src/updates.dart';
 import '../theme/tokens.dart';
 import 'buttons.dart';
+import 'motion.dart';
 import 'notice.dart';
 
 /// The line at the head of the home screen when a newer release is
@@ -24,9 +25,13 @@ class UpdateNotice extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final version = ref.watch(updateProvider).notice;
     final disguise = ref.watch(disguiseProvider);
-    if (version == null || !disguise.loaded || disguise.disguised) {
-      return const SizedBox.shrink();
-    }
+    final shown = version != null && disguise.loaded && !disguise.disguised;
+    // It opens its place at the head of the screen, and closes it with
+    // its words still on it rather than blanking first.
+    return OpeningPlace(child: shown ? _notice(context, ref, version) : null);
+  }
+
+  Widget _notice(BuildContext context, WidgetRef ref, String version) {
     final tokens = Theme.of(context).extension<GerfautTokens>()!;
     final updates = ref.read(updateProvider.notifier);
     final style = tokens.bodySmall.copyWith(

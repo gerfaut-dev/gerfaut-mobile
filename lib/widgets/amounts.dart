@@ -44,7 +44,13 @@ String? _fiatValueOf(WidgetRef ref, int sats, {required Network network}) {
 /// is no value to show; [top] is the gap above it, there only with it.
 /// Off mainnet the value is zero, which no source priced, and it marks
 /// nothing.
-class FiatText extends ConsumerWidget {
+///
+/// A value that arrives after the line had none (the price lands after
+/// the figure) fades in; one already there when the line is built does
+/// not, so a row never has an entrance. A value that goes, or changes,
+/// is replaced in the same frame: a figure in the old currency never
+/// lingers once another is chosen.
+class FiatText extends ConsumerStatefulWidget {
   const FiatText({
     super.key,
     required this.sats,
@@ -53,6 +59,7 @@ class FiatText extends ConsumerWidget {
     this.top = 0,
     this.textAlign,
     this.oneLine = false,
+    this.opens = false,
   });
 
   final int sats;
@@ -64,22 +71,81 @@ class FiatText extends ConsumerWidget {
   /// Never wrapped: for a cell whose figure must stay whole.
   final bool oneLine;
 
+  /// The line opens its own height as it arrives, and what follows
+  /// moves down with it: for a figure that stands alone, such as a
+  /// balance. Otherwise it only fades in, and the row it sits in takes
+  /// its height at once, as a row of a list must not move on its own.
+  final bool opens;
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final fiat = _fiatValueOf(ref, sats, network: network);
-    if (fiat == null) return const SizedBox.shrink();
+  ConsumerState<FiatText> createState() => _FiatTextState();
+}
+
+class _FiatTextState extends ConsumerState<FiatText> {
+  /// The line stood empty while it could have shown a value: the next
+  /// value is an arrival.
+  bool _awaited = false;
+
+  /// How many values have arrived: each arrival is a new line, which
+  /// fades in from nothing.
+  int _arrivals = 0;
+
+  @override
+  Widget build(BuildContext context) {
+    // Turning the display off or hiding balances is the reader's own
+    // gesture and takes the line away at once; showing it again is not
+    // an arrival either.
+    if (!ref.watch(fiatEnabledProvider) || ref.watch(maskedProvider)) {
+      _awaited = false;
+      return const SizedBox.shrink();
+    }
+    final fiat = _fiatValueOf(ref, widget.sats, network: widget.network);
+    if (fiat == null) {
+      _awaited = true;
+      return const SizedBox.shrink();
+    }
+    if (_awaited) {
+      _awaited = false;
+      _arrivals++;
+    }
+    final opens = widget.opens && !GerfautMotion.reduced(context);
+    // Keyed on the arrival, never on the value: a figure that changes
+    // keeps its line and is replaced in the same frame.
+    return TweenAnimationBuilder<double>(
+      key: ValueKey(_arrivals),
+      tween: Tween(begin: _arrivals == 0 ? 1 : 0, end: 1),
+      duration: GerfautMotion.base,
+      curve: GerfautMotion.ease,
+      builder: (context, shown, line) => Opacity(
+        opacity: shown,
+        child: opens
+            ? ClipRect(
+                child: Align(
+                  alignment: AlignmentDirectional.topStart,
+                  widthFactor: 1,
+                  heightFactor: shown,
+                  child: line,
+                ),
+              )
+            : line,
+      ),
+      child: _line(fiat),
+    );
+  }
+
+  Widget _line(String fiat) {
     return CreditMark(
-      source: network == Network.mainnet
+      source: widget.network == Network.mainnet
           ? ref.watch(priceProvider).value?.quote?.source
           : null,
       child: Padding(
-        padding: EdgeInsets.only(top: top),
+        padding: EdgeInsets.only(top: widget.top),
         child: Text(
           fiat,
-          style: style,
-          textAlign: textAlign,
-          maxLines: oneLine ? 1 : null,
-          softWrap: oneLine ? false : null,
+          style: widget.style,
+          textAlign: widget.textAlign,
+          maxLines: widget.oneLine ? 1 : null,
+          softWrap: widget.oneLine ? false : null,
         ),
       ),
     );
@@ -87,8 +153,10 @@ class FiatText extends ConsumerWidget {
 }
 
 /// Large balance figure: UI face, tabular, masked-aware, never
-/// animated. The primary line follows the unit setting; the second line
-/// carries only the fiat value, when that display is on.
+/// animated: a new balance replaces the old one in the same frame. The
+/// primary line follows the unit setting; the second line carries only
+/// the fiat value, when that display is on, and opens its place when
+/// the price arrives after the figure.
 class BalanceAmount extends ConsumerWidget {
   const BalanceAmount({
     super.key,
@@ -176,6 +244,7 @@ class BalanceAmount extends ConsumerWidget {
           network: network,
           style: tokens.figureOf(color: tokens.textMuted),
           top: GerfautSpacing.xs,
+          opens: true,
         ),
       ],
     );

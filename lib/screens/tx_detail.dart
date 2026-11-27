@@ -17,6 +17,7 @@ import '../widgets/facts.dart';
 import '../widgets/icon_chip.dart';
 import '../widgets/io_row.dart';
 import '../widgets/load_failure.dart';
+import '../widgets/motion.dart';
 import '../widgets/op_return_preview.dart';
 import '../widgets/status_pill.dart';
 import '../widgets/toast.dart';
@@ -51,19 +52,28 @@ class TxDetailScreen extends ConsumerWidget {
       appBar: GerfautAppBar.text('Transaction'),
       body: SafeArea(
         child: ReadableWidth(
+          // The detail is a whole scrolling page and stays out of any
+          // fade; only the bounded line standing in for it fades between
+          // loading and failure.
           child: switch (detail) {
             AsyncData(:final value) => _Detail(detail: value, network: network),
-            AsyncError(:final error) => LoadFailure(
-              what: 'This transaction',
-              error: error,
-              onRetry: () => ref.invalidate(
-                txDetailProvider((walletId: walletId, txid: txid)),
+            AsyncError(:final error) => FadeInPlace(
+              state: 'error',
+              child: LoadFailure(
+                what: 'This transaction',
+                error: error,
+                onRetry: () => ref.invalidate(
+                  txDetailProvider((walletId: walletId, txid: txid)),
+                ),
               ),
             ),
-            _ => Center(
-              child: Text(
-                'Loading…',
-                style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+            _ => FadeInPlace(
+              state: 'loading',
+              child: Center(
+                child: Text(
+                  'Loading…',
+                  style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+                ),
               ),
             ),
           },
@@ -713,8 +723,8 @@ class _RawTransactionState extends State<_RawTransaction> {
     await Clipboard.setData(ClipboardData(text: widget.hex));
     if (!mounted) return;
     setState(() => _copied = true);
-    ScaffoldMessenger.of(context).showSnackBar(Toast('Copied'));
-    await Future<void>.delayed(const Duration(milliseconds: 1500));
+    Toast.of(context).show('Copied');
+    await Future<void>.delayed(GerfautMotion.hold);
     if (mounted) setState(() => _copied = false);
   }
 
@@ -759,47 +769,54 @@ class _RawTransactionState extends State<_RawTransaction> {
             ),
           ),
         ),
-        if (_open) ...[
-          const SizedBox(height: GerfautSpacing.xs),
-          Stack(
-            children: [
-              Container(
-                width: double.infinity,
-                constraints: const BoxConstraints(maxHeight: 180),
-                decoration: BoxDecoration(
-                  color: tokens.surfaceSunken,
-                  borderRadius: BorderRadius.circular(GerfautRadius.md),
+        // The bytes open their place rather than pushing the page down
+        // in one jump.
+        OpeningPlace(child: _open ? _bytes(tokens) : null),
+      ],
+    );
+  }
+
+  Widget _bytes(GerfautTokens tokens) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const SizedBox(height: GerfautSpacing.xs),
+        Stack(
+          children: [
+            Container(
+              width: double.infinity,
+              constraints: const BoxConstraints(maxHeight: 180),
+              decoration: BoxDecoration(
+                color: tokens.surfaceSunken,
+                borderRadius: BorderRadius.circular(GerfautRadius.md),
+              ),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(
+                  GerfautSpacing.md,
+                  GerfautSpacing.md,
+                  GerfautSpacing.xxl,
+                  GerfautSpacing.md,
                 ),
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(
-                    GerfautSpacing.md,
-                    GerfautSpacing.md,
-                    GerfautSpacing.xxl,
-                    GerfautSpacing.md,
-                  ),
-                  child: Text(
-                    widget.hex,
-                    style: tokens.data.copyWith(color: tokens.textMuted),
-                  ),
+                child: Text(
+                  widget.hex,
+                  style: tokens.data.copyWith(color: tokens.textMuted),
                 ),
               ),
-              Positioned(
-                top: GerfautSpacing.xs,
-                right: GerfautSpacing.xs,
-                child: IconButton(
-                  onPressed: _copy,
-                  tooltip: 'Copy raw transaction',
-                  iconSize: 16,
-                  icon: Icon(
-                    _copied ? LucideIcons.check : LucideIcons.copy,
-                    color: tokens.textMuted,
-                  ),
-                ),
+            ),
+            Positioned(
+              top: GerfautSpacing.xs,
+              right: GerfautSpacing.xs,
+              child: IconButton(
+                onPressed: _copy,
+                tooltip: 'Copy raw transaction',
+                iconSize: 16,
+                icon: CopyGlyph(copied: _copied, color: tokens.textMuted),
               ),
-            ],
-          ),
-          const SizedBox(height: GerfautSpacing.sm),
-        ],
+            ),
+          ],
+        ),
+        const SizedBox(height: GerfautSpacing.sm),
       ],
     );
   }

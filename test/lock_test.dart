@@ -23,6 +23,7 @@ import 'package:gerfaut/src/window.dart';
 import 'package:gerfaut/theme/tokens.dart';
 import 'package:gerfaut/widgets/pin_pad.dart';
 import 'package:gerfaut/widgets/setting_switch.dart';
+import 'package:gerfaut/widgets/toast.dart';
 
 import 'fakes.dart';
 import 'menu.dart';
@@ -193,6 +194,18 @@ void main() {
       expect(find.text('Cold storage'), findsNothing);
     });
 
+    testWidgets('no toast is ever drawn over the lock', (tester) async {
+      await tester.pumpWidget(app(locked(wallets: [makeMeta()])));
+      await tester.pumpAndSettle();
+
+      // A save that finishes behind the lock still says so.
+      Toast.of(tester.element(find.byType(LockScreen))).show('Setting saved');
+      await tester.pump();
+      await tester.pump(GerfautMotion.slow);
+      expect(find.text('Setting saved'), findsNothing);
+      expect(find.byType(ToastView), findsNothing);
+    });
+
     testWidgets('a wrong PIN is said plainly and the screen stays', (
       tester,
     ) async {
@@ -206,7 +219,10 @@ void main() {
       await unlockWithPin(tester, '9999');
 
       expect(find.text('Wrong PIN'), findsOneWidget);
-      expect(find.text('Enter your PIN'), findsOneWidget);
+      // The refused digits stay as dots in the alert colour until the
+      // next key, with no shake.
+      final dots = tester.widget<PinDots>(find.byType(PinDots));
+      expect((dots.count, dots.refused), (4, true));
       expect(find.byType(LockScreen), findsOneWidget);
     });
 
@@ -236,7 +252,8 @@ void main() {
         await tester.tap(find.byKey(Key('pin.$digit')), warnIfMissed: false);
       }
       await tester.pump();
-      expect(find.text('Enter your PIN'), findsOneWidget);
+      // No digit went in: the refused dots are still the ones shown.
+      expect(tester.widget<PinDots>(find.byType(PinDots)).refused, isTrue);
 
       await tester.pump(const Duration(seconds: 1));
       expect(find.text('Too many attempts. Try again in 4 s'), findsOneWidget);
@@ -488,7 +505,7 @@ void main() {
         find
             .descendant(
               of: find.byType(SecuritySection),
-              matching: find.byType(Switch),
+              matching: find.byType(GerfautSwitch),
             )
             // The app lock is the first switch of the card; the disguise
             // switch sits below it once a lock stands.
@@ -518,7 +535,7 @@ void main() {
         find
             .descendant(
               of: find.byType(SecuritySection),
-              matching: find.byType(Switch),
+              matching: find.byType(GerfautSwitch),
             )
             // The app lock is the first switch of the card; the disguise
             // switch sits below it once a lock stands.
@@ -547,7 +564,7 @@ void main() {
         find
             .descendant(
               of: find.byType(SecuritySection),
-              matching: find.byType(Switch),
+              matching: find.byType(GerfautSwitch),
             )
             // The app lock is the first switch of the card; the disguise
             // switch sits below it once a lock stands.
@@ -574,7 +591,7 @@ void main() {
         find
             .descendant(
               of: find.byType(SecuritySection),
-              matching: find.byType(Switch),
+              matching: find.byType(GerfautSwitch),
             )
             .first,
       );
@@ -603,7 +620,7 @@ void main() {
         find
             .descendant(
               of: find.byType(SecuritySection),
-              matching: find.byType(Switch),
+              matching: find.byType(GerfautSwitch),
             )
             // The app lock is the first switch of the card; the disguise
             // switch sits below it once a lock stands.
@@ -631,7 +648,7 @@ void main() {
         find
             .descendant(
               of: find.byType(SecuritySection),
-              matching: find.byType(Switch),
+              matching: find.byType(GerfautSwitch),
             )
             // The app lock is the first switch of the card; the disguise
             // switch sits below it once a lock stands.
@@ -741,7 +758,9 @@ void main() {
         ),
         findsOneWidget,
       );
-      await tester.tap(find.descendant(of: row, matching: find.byType(Switch)));
+      await tester.tap(
+        find.descendant(of: row, matching: find.byType(GerfautSwitch)),
+      );
       await tester.pumpAndSettle();
       expect(bridge.appPrefs[Pref.lockShuffle], '0');
       expect(tester.widget<SettingSwitch>(row).value, isFalse);
@@ -840,7 +859,7 @@ void main() {
             of: find.text('Unlock with biometrics'),
             matching: find.byType(SettingSwitch),
           ),
-          matching: find.byType(Switch),
+          matching: find.byType(GerfautSwitch),
         ),
       );
       await tester.pumpAndSettle();
@@ -859,7 +878,7 @@ void main() {
             of: find.text('Unlock with biometrics'),
             matching: find.byType(SettingSwitch),
           ),
-          matching: find.byType(Switch),
+          matching: find.byType(GerfautSwitch),
         ),
       );
       await tester.pumpAndSettle();
@@ -886,7 +905,7 @@ void main() {
             of: find.text('Unlock with biometrics'),
             matching: find.byType(SettingSwitch),
           ),
-          matching: find.byType(Switch),
+          matching: find.byType(GerfautSwitch),
         ),
       );
       await tester.pumpAndSettle();

@@ -11,6 +11,7 @@ import '../../theme/tokens.dart';
 import '../../widgets/buttons.dart';
 import '../../widgets/icon_chip.dart';
 import '../../widgets/load_failure.dart';
+import '../../widgets/motion.dart';
 import '../../widgets/notice.dart';
 import '../../widgets/reorder.dart';
 import '../../widgets/section_card.dart';
@@ -115,7 +116,7 @@ class _WalletsSectionState extends ConsumerState<WalletsSection> {
   }
 
   void _toast(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(Toast(message));
+    Toast.of(context).show(message);
   }
 
   Future<void> _rename(String id) async {
@@ -263,26 +264,10 @@ class _WalletsSectionState extends ConsumerState<WalletsSection> {
             slivers: [
               SliverToBoxAdapter(child: _gapLimit(tokens)),
               if (shown.isEmpty)
-                SliverToBoxAdapter(
-                  // A list that failed to load is not an empty one.
-                  child: walletsAsync.hasError && !walletsAsync.isLoading
-                      ? LoadFailure(
-                          what: 'The wallets',
-                          error: walletsAsync.error,
-                          onRetry: () => ref.invalidate(walletsProvider),
-                          centered: false,
-                        )
-                      : Text(
-                          walletsAsync.hasValue
-                              ? 'No wallets on this network yet.'
-                              : 'Loading…',
-                          style: tokens.bodySmall.copyWith(
-                            color: tokens.textMuted,
-                          ),
-                        ),
-                )
+                SliverToBoxAdapter(child: _noRows(tokens, walletsAsync))
               else
-                // The order here is the order of the home screen.
+                // The order here is the order of the home screen; the
+                // rows arrive as they are, with no entrance of their own.
                 SliverReorderableList(
                   proxyDecorator: liftedProxy,
                   itemCount: shown.length,
@@ -311,6 +296,29 @@ class _WalletsSectionState extends ConsumerState<WalletsSection> {
           ),
         ),
       ],
+    );
+  }
+
+  /// What stands where the rows go while there are none: loading, a
+  /// failure, or an empty network. One block in three states, each
+  /// fading into the next in place.
+  Widget _noRows(GerfautTokens tokens, AsyncValue<List<WalletMeta>> wallets) {
+    // A list that failed to load is not an empty one.
+    final failed = wallets.hasError && !wallets.isLoading;
+    final empty = !failed && wallets.hasValue;
+    return FadeInPlace(
+      state: failed ? #failed : (empty ? #empty : #loading),
+      child: failed
+          ? LoadFailure(
+              what: 'The wallets',
+              error: wallets.error,
+              onRetry: () => ref.invalidate(walletsProvider),
+              centered: false,
+            )
+          : Text(
+              empty ? 'No wallets on this network yet.' : 'Loading…',
+              style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+            ),
     );
   }
 
@@ -446,7 +454,7 @@ class _LivePinsState extends ConsumerState<_LivePins> {
     // Held before the await: the list is read again even if the page
     // was left meanwhile.
     final container = ProviderScope.containerOf(context, listen: false);
-    final messenger = ScaffoldMessenger.of(context);
+    final toast = Toast.of(context);
     setState(() {
       _savingId = wallet.id;
       _failure = null;
@@ -454,7 +462,7 @@ class _LivePinsState extends ConsumerState<_LivePins> {
     try {
       await ref.read(bridgeProvider).setWalletLivePinned(wallet.id, pinned);
       container.invalidate(walletsProvider);
-      messenger.showSnackBar(Toast('Setting saved'));
+      toast.show('Setting saved');
     } on BridgeException catch (error) {
       if (mounted) {
         setState(() => _failure = (id: wallet.id, message: error.message));
@@ -488,40 +496,55 @@ class _LivePinsState extends ConsumerState<_LivePins> {
             open: _open,
             onPressed: () => setState(() => _open = !_open),
           ),
-          if (_open) ...[
-            const SizedBox(height: GerfautSpacing.xs),
-            Text(
-              'Always watch live first',
-              style: tokens.bodySmall.copyWith(
-                fontWeight: FontWeight.w500,
-                fontVariations: const [FontVariation('wght', 500)],
-              ),
-            ),
-            Text(
-              'When Live cannot follow every address, the wallets turned '
-              'on here are followed first.',
-              style: tokens.bodySmall.copyWith(color: tokens.textMuted),
-            ),
-            for (final wallet in widget.wallets) ...[
-              const SizedBox(height: GerfautSpacing.sm),
-              SettingSwitch(
-                title: wallet.name,
-                semanticLabel: 'Always watch ${wallet.name} live first',
-                value: wallet.livePinned,
-                onChanged: _savingId != null
-                    ? null
-                    : (pinned) => _pin(wallet, pinned),
-              ),
-              if (_failure?.id == wallet.id)
-                Semantics(
-                  liveRegion: true,
-                  child: Text(
-                    _failure!.message,
-                    style: tokens.bodySmall.copyWith(color: tokens.textMuted),
-                  ),
-                ),
-            ],
-          ],
+          // The panel opens and closes in place: what follows moves with
+          // it rather than in one jump.
+          OpeningPlace(
+            child: _open
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const SizedBox(height: GerfautSpacing.xs),
+                      Text(
+                        'Always watch live first',
+                        style: tokens.bodySmall.copyWith(
+                          fontWeight: FontWeight.w500,
+                          fontVariations: const [FontVariation('wght', 500)],
+                        ),
+                      ),
+                      Text(
+                        'When Live cannot follow every address, the wallets '
+                        'turned on here are followed first.',
+                        style: tokens.bodySmall.copyWith(
+                          color: tokens.textMuted,
+                        ),
+                      ),
+                      for (final wallet in widget.wallets) ...[
+                        const SizedBox(height: GerfautSpacing.sm),
+                        SettingSwitch(
+                          title: wallet.name,
+                          semanticLabel:
+                              'Always watch ${wallet.name} live first',
+                          value: wallet.livePinned,
+                          onChanged: _savingId != null
+                              ? null
+                              : (pinned) => _pin(wallet, pinned),
+                        ),
+                        if (_failure?.id == wallet.id)
+                          Semantics(
+                            liveRegion: true,
+                            child: Text(
+                              _failure!.message,
+                              style: tokens.bodySmall.copyWith(
+                                color: tokens.textMuted,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ],
+                  )
+                : null,
+          ),
         ],
       ),
     );
@@ -587,241 +610,252 @@ class _WalletRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final single = wallet.isSingleAddress;
     // Under the finger, the row is the one thing that really floats:
-    // its own surface, the overlay shadow. At rest it has neither.
-    final lifted = LiftedItem.of(context);
+    // its own surface, the overlay shadow. At rest it has neither. Both
+    // follow the rise of the drag, in as it lifts and out as it lands.
+    final lift = LiftedItem.liftOf(context);
+    final content = _content(context, single);
     // A row of the card's list, not a card inside the card: a hairline
     // above each one tells them apart, and the row keeps the card's
     // whole width for its name and its actions.
-    final row = Container(
+    // Lifted, the hairline goes clear as the surface comes in, and keeps
+    // its pixel: what lands is what was lifted, to the pixel.
+    Widget row(double rise) => Container(
       padding: const EdgeInsets.symmetric(vertical: GerfautSpacing.md),
-      // Lifted, the hairline goes clear and keeps its pixel: what lands
-      // is what was lifted, to the pixel.
       decoration: BoxDecoration(
         border: Border(
-          top: BorderSide(color: lifted ? Colors.transparent : tokens.border),
+          top: BorderSide(
+            color: Color.lerp(tokens.border, Colors.transparent, rise)!,
+          ),
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: content,
+    );
+    if (lift == null) return row(0);
+    // Held, its surface reaches a little past the row on each side, so
+    // the name does not sit against the edge of what floats. Only the
+    // surface, the shadow and the hairline are built again as it rises.
+    return AnimatedBuilder(
+      animation: lift,
+      builder: (context, _) => Stack(
+        clipBehavior: Clip.none,
         children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // The chip that opens the wallet's card on the home screen,
-              // centred on what it stands beside: the field while
-              // renaming, the name over its kind otherwise, two lines
-              // a hair taller than the chip.
-              Padding(
-                padding: EdgeInsets.only(
-                  top: renaming ? (GerfautTouch.target - IconChip.side) / 2 : 2,
+          Positioned(
+            left: -GerfautSpacing.sm,
+            right: -GerfautSpacing.sm,
+            top: 0,
+            bottom: 0,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                color: tokens.surface.withValues(
+                  alpha: tokens.surface.a * lift.value,
                 ),
-                child: IconChip.glyph(
-                  glyph: WalletGlyph(wallet.icon),
-                  ink: tokens.textMuted,
-                  fill: tokens.surfaceSunken,
-                ),
+                borderRadius: BorderRadius.circular(GerfautRadius.md),
+                boxShadow: LiftedItem.shadowOf(lift, tokens.shadowOverlay),
               ),
-              const SizedBox(width: GerfautSpacing.gutter),
-              Expanded(
-                child: renaming
-                    ? Row(
-                        children: [
-                          Expanded(
-                            child: Semantics(
-                              label: 'Wallet name',
-                              child: TextField(
-                                controller: renameController,
-                                autofocus: true,
-                                autocorrect: false,
-                                enableSuggestions: false,
-                                enableIMEPersonalizedLearning: false,
-                                style: tokens.body,
-                                onSubmitted: (_) => onRenameSubmit(),
-                                decoration: InputDecoration(
-                                  filled: true,
-                                  fillColor: tokens.surfaceSunken,
-                                  // The height of every other field: a
-                                  // box the thumb lands in.
-                                  constraints: const BoxConstraints(
-                                    minHeight: GerfautTouch.target,
+            ),
+          ),
+          row(lift.value),
+        ],
+      ),
+    );
+  }
+
+  /// What the row says and offers, the same at rest and lifted.
+  Widget _content(BuildContext context, bool single) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // The chip that opens the wallet's card on the home screen,
+            // centred on what it stands beside: the field while
+            // renaming, the name over its kind otherwise, two lines
+            // a hair taller than the chip.
+            Padding(
+              padding: EdgeInsets.only(
+                top: renaming ? (GerfautTouch.target - IconChip.side) / 2 : 2,
+              ),
+              child: IconChip.glyph(
+                glyph: WalletGlyph(wallet.icon),
+                ink: tokens.textMuted,
+                fill: tokens.surfaceSunken,
+              ),
+            ),
+            const SizedBox(width: GerfautSpacing.gutter),
+            Expanded(
+              child: renaming
+                  ? Row(
+                      children: [
+                        Expanded(
+                          child: Semantics(
+                            label: 'Wallet name',
+                            child: TextField(
+                              controller: renameController,
+                              autofocus: true,
+                              autocorrect: false,
+                              enableSuggestions: false,
+                              enableIMEPersonalizedLearning: false,
+                              style: tokens.body,
+                              onSubmitted: (_) => onRenameSubmit(),
+                              decoration: InputDecoration(
+                                filled: true,
+                                fillColor: tokens.surfaceSunken,
+                                // The height of every other field: a
+                                // box the thumb lands in.
+                                constraints: const BoxConstraints(
+                                  minHeight: GerfautTouch.target,
+                                ),
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: GerfautSpacing.sm,
+                                  vertical: GerfautSpacing.sm,
+                                ),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(
+                                    GerfautRadius.sm,
                                   ),
-                                  contentPadding: const EdgeInsets.symmetric(
-                                    horizontal: GerfautSpacing.sm,
-                                    vertical: GerfautSpacing.sm,
-                                  ),
-                                  border: OutlineInputBorder(
-                                    borderRadius: BorderRadius.circular(
-                                      GerfautRadius.sm,
-                                    ),
-                                    borderSide: BorderSide.none,
-                                  ),
+                                  borderSide: BorderSide.none,
                                 ),
                               ),
                             ),
                           ),
-                          IconButton(
-                            tooltip: 'Save name',
-                            onPressed: onRenameSubmit,
-                            icon: Icon(
-                              LucideIcons.check,
-                              size: 20,
-                              color: tokens.primary,
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: 'Cancel renaming',
-                            onPressed: onCancel,
-                            icon: Icon(
-                              LucideIcons.x,
-                              size: 20,
-                              color: tokens.textMuted,
-                            ),
-                          ),
-                        ],
-                      )
-                    : Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            wallet.name,
-                            style: tokens.bodySmall.copyWith(
-                              fontWeight: FontWeight.w500,
-                              fontVariations: const [
-                                FontVariation('wght', 500),
-                              ],
-                            ),
-                          ),
-                          Text(
-                            single ? 'Single address' : 'Descriptor wallet',
-                            style: tokens.label.copyWith(
-                              color: tokens.textMuted,
-                            ),
-                          ),
-                          if (coverage != null) ...[
-                            const SizedBox(height: GerfautSpacing.xs),
-                            LiveCoveragePill(coverage: coverage!),
-                          ],
-                        ],
-                      ),
-              ),
-              if (movable && !renaming) ...[
-                const SizedBox(width: GerfautSpacing.sm),
-                // The handle starts a drag at once; the row itself is
-                // full of buttons a long press would fight with. The
-                // list already announces "move up" and "move down" on
-                // the row, so the glyph has nothing to add out loud.
-                ReorderableDragStartListener(
-                  index: index,
-                  child: ExcludeSemantics(
-                    child: SizedBox.square(
-                      dimension: GerfautTouch.target,
-                      child: Center(
-                        child: Icon(
-                          LucideIcons.gripVertical,
-                          size: 20,
-                          color: tokens.textMuted,
                         ),
+                        IconButton(
+                          tooltip: 'Save name',
+                          onPressed: onRenameSubmit,
+                          icon: Icon(
+                            LucideIcons.check,
+                            size: 20,
+                            color: tokens.primary,
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Cancel renaming',
+                          onPressed: onCancel,
+                          icon: Icon(
+                            LucideIcons.x,
+                            size: 20,
+                            color: tokens.textMuted,
+                          ),
+                        ),
+                      ],
+                    )
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          wallet.name,
+                          style: tokens.bodySmall.copyWith(
+                            fontWeight: FontWeight.w500,
+                            fontVariations: const [FontVariation('wght', 500)],
+                          ),
+                        ),
+                        Text(
+                          single ? 'Single address' : 'Descriptor wallet',
+                          style: tokens.label.copyWith(color: tokens.textMuted),
+                        ),
+                        if (coverage != null) ...[
+                          const SizedBox(height: GerfautSpacing.xs),
+                          LiveCoveragePill(coverage: coverage!),
+                        ],
+                      ],
+                    ),
+            ),
+            if (movable && !renaming) ...[
+              const SizedBox(width: GerfautSpacing.sm),
+              // The handle starts a drag at once; the row itself is
+              // full of buttons a long press would fight with. The
+              // list already announces "move up" and "move down" on
+              // the row, so the glyph has nothing to add out loud.
+              ReorderableDragStartListener(
+                index: index,
+                child: ExcludeSemantics(
+                  child: SizedBox.square(
+                    dimension: GerfautTouch.target,
+                    child: Center(
+                      child: Icon(
+                        LucideIcons.gripVertical,
+                        size: 20,
+                        color: tokens.textMuted,
                       ),
                     ),
                   ),
                 ),
-              ],
+              ),
             ],
-          ),
-          if (confirmingRemove) ...[
-            const SizedBox(height: GerfautSpacing.sm),
-            // Amber, and its own copy says why: this only stops
-            // watching, nothing moves on chain. Nothing is at stake but
-            // a row in a list, and the coins are exactly where they
-            // were — red belongs to what costs funds or privacy.
-            GerfautNotice(
-              tone: NoticeTone.info,
-              message:
-                  'You are removing "${wallet.name}" from Gerfaut. '
-                  'This only stops watching. Nothing moves on chain.',
-              // The sentence gets the whole width, the buttons a row of
-              // their own under it: beside the text they left it a
-              // column eight characters across on a phone.
-              actionsBelow: true,
-              // The destructive one is never alone: the panel is the
-              // confirmation, and the way out sits beside it — or
-              // above it, once the text is too large for one line.
-              action: ConfirmActions(
-                cancel: SecondaryButton(
-                  label: 'Cancel',
-                  onPressed: removing ? null : onCancel,
-                ),
-                confirm: DangerButton(
-                  label: 'Remove wallet',
-                  busy: removing,
-                  onPressed: onRemoveConfirm,
-                ),
+          ],
+        ),
+        if (confirmingRemove) ...[
+          const SizedBox(height: GerfautSpacing.sm),
+          // Amber, and its own copy says why: this only stops
+          // watching, nothing moves on chain. Nothing is at stake but
+          // a row in a list, and the coins are exactly where they
+          // were — red belongs to what costs funds or privacy.
+          GerfautNotice(
+            tone: NoticeTone.info,
+            message:
+                'You are removing "${wallet.name}" from Gerfaut. '
+                'This only stops watching. Nothing moves on chain.',
+            // The sentence gets the whole width, the buttons a row of
+            // their own under it: beside the text they left it a
+            // column eight characters across on a phone.
+            actionsBelow: true,
+            // The destructive one is never alone: the panel is the
+            // confirmation, and the way out sits beside it — or
+            // above it, once the text is too large for one line.
+            action: ConfirmActions(
+              cancel: SecondaryButton(
+                label: 'Cancel',
+                onPressed: removing ? null : onCancel,
+              ),
+              confirm: DangerButton(
+                label: 'Remove wallet',
+                busy: removing,
+                onPressed: onRemoveConfirm,
               ),
             ),
-          ] else if (!renaming) ...[
-            const SizedBox(height: GerfautSpacing.xs),
-            // Two to a line, each at least half the row: four words of
-            // four lengths left to flow made a ragged block with the
-            // last one alone under the others. A label that needs more
-            // than its half takes it, and the next one goes under.
-            // Secondary, all four: the list repeats them on every row,
-            // and in blue it would become a wall of buttons.
-            _ActionGrid(
-              children: [
-                SecondaryButton(
-                  label: 'Rename',
-                  icon: LucideIcons.pencil,
-                  onPressed: busy ? null : onRenameStart,
-                ),
-                SecondaryButton(
-                  label: 'Icon',
-                  icon: LucideIcons.shapes,
-                  onPressed: busy ? null : onPickIcon,
-                ),
-                // An incremental sync only looks at the addresses already
-                // revealed. Funds past them — a gap limit raised too late,
-                // or a descriptor also used by another wallet that went
-                // further — only turn up by scanning again from the first
-                // address.
-                SecondaryButton(
-                  label: rescanning ? 'Rescanning…' : 'Rescan',
-                  icon: LucideIcons.scanSearch,
-                  busy: rescanning,
-                  onPressed: busy ? null : onRescan,
-                ),
-                // It only opens the confirmation: neutral, the red
-                // waits for the yes.
-                SecondaryButton(
-                  label: 'Remove',
-                  icon: LucideIcons.trash2,
-                  onPressed: busy ? null : onRemoveStart,
-                ),
-              ],
-            ),
-          ],
-        ],
-      ),
-    );
-    if (!lifted) return row;
-    // Held, its surface reaches a little past the row on each side, so
-    // the name does not sit against the edge of what floats.
-    return Stack(
-      clipBehavior: Clip.none,
-      children: [
-        Positioned(
-          left: -GerfautSpacing.sm,
-          right: -GerfautSpacing.sm,
-          top: 0,
-          bottom: 0,
-          child: DecoratedBox(
-            decoration: BoxDecoration(
-              color: tokens.surface,
-              borderRadius: BorderRadius.circular(GerfautRadius.md),
-              boxShadow: [tokens.shadowOverlay],
-            ),
           ),
-        ),
-        row,
+        ] else if (!renaming) ...[
+          const SizedBox(height: GerfautSpacing.xs),
+          // Two to a line, each at least half the row: four words of
+          // four lengths left to flow made a ragged block with the
+          // last one alone under the others. A label that needs more
+          // than its half takes it, and the next one goes under.
+          // Secondary, all four: the list repeats them on every row,
+          // and in blue it would become a wall of buttons.
+          _ActionGrid(
+            children: [
+              SecondaryButton(
+                label: 'Rename',
+                icon: LucideIcons.pencil,
+                onPressed: busy ? null : onRenameStart,
+              ),
+              SecondaryButton(
+                label: 'Icon',
+                icon: LucideIcons.shapes,
+                onPressed: busy ? null : onPickIcon,
+              ),
+              // An incremental sync only looks at the addresses already
+              // revealed. Funds past them — a gap limit raised too late,
+              // or a descriptor also used by another wallet that went
+              // further — only turn up by scanning again from the first
+              // address.
+              SecondaryButton(
+                label: rescanning ? 'Rescanning…' : 'Rescan',
+                icon: LucideIcons.scanSearch,
+                busy: rescanning,
+                onPressed: busy ? null : onRescan,
+              ),
+              // It only opens the confirmation: neutral, the red
+              // waits for the yes.
+              SecondaryButton(
+                label: 'Remove',
+                icon: LucideIcons.trash2,
+                onPressed: busy ? null : onRemoveStart,
+              ),
+            ],
+          ),
+        ],
       ],
     );
   }

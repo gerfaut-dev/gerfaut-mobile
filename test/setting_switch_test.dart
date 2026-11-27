@@ -41,14 +41,14 @@ void main() {
 
     // One node per setting: the switch carries the words beside it, so
     // two switches in a card are never two anonymous "off, switch".
-    final lock = tester.getSemantics(find.byType(Switch).first);
+    final lock = tester.getSemantics(find.byType(GerfautSwitch).first);
     expect(lock.label, 'App lock\nAsked when Gerfaut opens.');
     expect(lock.flagsCollection.isToggled, Tristate.isFalse);
-    final disguise = tester.getSemantics(find.byType(Switch).last);
+    final disguise = tester.getSemantics(find.byType(GerfautSwitch).last);
     expect(disguise.label, 'Disguise the app');
     expect(disguise.flagsCollection.isToggled, Tristate.isTrue);
 
-    await tester.tap(find.byType(Switch).first);
+    await tester.tap(find.byType(GerfautSwitch).first);
     expect(flips, [true]);
     handle.dispose();
   });
@@ -68,7 +68,7 @@ void main() {
       ),
     );
 
-    final node = tester.getSemantics(find.byType(Switch));
+    final node = tester.getSemantics(find.byType(GerfautSwitch));
     expect(node.label, 'New transactions\nOff while the app is disguised.');
     expect(node.flagsCollection.isEnabled, Tristate.isFalse);
     handle.dispose();

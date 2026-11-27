@@ -24,6 +24,8 @@ import 'package:gerfaut/theme/tokens.dart';
 import 'package:gerfaut/widgets/buttons.dart';
 import 'package:gerfaut/widgets/notice.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:gerfaut/widgets/setting_switch.dart';
+import 'package:gerfaut/widgets/toast.dart';
 
 import 'core_fixtures.dart';
 import 'fakes.dart';
@@ -143,7 +145,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await tester.tap(find.byType(Switch));
+      await tester.tap(find.byType(GerfautSwitch));
       await tester.pumpAndSettle();
       await typePasswords(tester, 'correct horse', 'correct horse');
       await tester.tap(find.text('Create backup'));
@@ -282,7 +284,7 @@ void main() {
       expect(sharer.shared, isEmpty);
       expect(find.text('Saved'), findsOneWidget);
 
-      // Flush the snackbar timer.
+      // Flush the toast timer.
       await tester.pump(const Duration(seconds: 5));
       await tester.pumpAndSettle();
     });
@@ -334,7 +336,7 @@ void main() {
       expect(note.message, 'The file could not be saved.');
       expect(note.detail, 'The drive is full.');
       expect(find.text('The drive is full.'), findsOneWidget);
-      expect(find.byType(SnackBar), findsNothing);
+      expect(find.byType(ToastView), findsNothing);
       expect(find.text('Saved'), findsNothing);
       // The backup is still here for another try, and the note goes
       // with the next one.
@@ -1419,7 +1421,7 @@ void main() {
       expect(find.text('Restore 1 wallet'), findsOneWidget);
 
       // Node settings travel only when the box is ticked.
-      await tester.tap(find.byType(Switch));
+      await tester.tap(find.byType(GerfautSwitch));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Restore 1 wallet'));
       await tester.pumpAndSettle();

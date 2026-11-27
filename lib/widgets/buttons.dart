@@ -4,6 +4,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../theme/tokens.dart';
 import 'focus_ring.dart';
 import 'tap_target.dart';
+import 'motion.dart';
 
 // Every labelled button is filled: a word alone, with no fill and no
 // edge, does not read as something to press. A button switched off
@@ -320,54 +321,16 @@ class _FilledAction extends StatefulWidget {
   State<_FilledAction> createState() => _FilledActionState();
 }
 
-class _FilledActionState extends State<_FilledAction>
-    with SingleTickerProviderStateMixin {
+class _FilledActionState extends State<_FilledAction> {
   /// A finger is down on it: the button gives a little.
   bool _pressed = false;
 
   /// Focused from a keyboard: the ring shows.
   bool _focused = false;
 
-  /// One turn of the spinner a second, while busy.
-  late final AnimationController _spin = AnimationController(
-    vsync: this,
-    duration: const Duration(seconds: 1),
-  );
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    _turn();
-  }
-
-  @override
-  void didUpdateWidget(_FilledAction old) {
-    super.didUpdateWidget(old);
-    if (old.busy != widget.busy) _turn();
-  }
-
-  @override
-  void dispose() {
-    _spin.dispose();
-    super.dispose();
-  }
-
-  /// The spinner turns while busy, unless the phone asks for less
-  /// motion: then it stands still and the label carries the state.
-  void _turn() {
-    if (widget.busy && !MediaQuery.disableAnimationsOf(context)) {
-      if (!_spin.isAnimating) _spin.repeat();
-    } else {
-      _spin
-        ..stop()
-        ..value = 0;
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     final tokens = Theme.of(context).extension<GerfautTokens>()!;
-    final still = MediaQuery.disableAnimationsOf(context);
     final busy = widget.busy;
     final off = widget.onPressed == null && !busy;
     final radius = BorderRadius.circular(GerfautRadius.md);
@@ -403,14 +366,20 @@ class _FilledActionState extends State<_FilledAction>
           ),
         );
 
-    final Widget? leading = busy
-        ? RotationTransition(
-            turns: _spin,
-            child: const Icon(LucideIcons.loaderCircle, size: _glyph),
-          )
-        : widget.icon == null
+    final icon = widget.icon;
+    // A glyph that changes (copy then copied, the spinner of a busy
+    // button) fades into the next in place, as every copy icon does.
+    final Widget? leading = !busy && icon == null
         ? null
-        : Icon(widget.icon, size: _glyph);
+        : FadeInPlace(
+            state: busy ? null : icon,
+            alignment: Alignment.center,
+            child: busy
+                // Still with animations reduced: the label carries the
+                // state.
+                ? const TurningIcon(turning: true, size: _glyph)
+                : Icon(icon, size: _glyph),
+          );
 
     final live = !busy && widget.onPressed != null;
     void press(bool down) {
@@ -434,9 +403,11 @@ class _FilledActionState extends State<_FilledAction>
         onPointerUp: (_) => press(false),
         onPointerCancel: (_) => press(false),
         child: AnimatedScale(
-          scale: _pressed && live && !still ? 0.96 : 1,
-          duration: const Duration(milliseconds: 120),
-          curve: Curves.easeOut,
+          // The press moves nothing around the button, so it stays
+          // with animations reduced.
+          scale: _pressed && live ? GerfautMotion.press : 1,
+          duration: GerfautMotion.fast,
+          curve: GerfautMotion.ease,
           child: FilledButton(
             style: style,
             focusNode: widget.focusNode,

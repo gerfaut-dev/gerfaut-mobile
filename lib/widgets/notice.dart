@@ -37,6 +37,10 @@ enum NoticeTone { alert, info }
 /// colour at 25%, radius 8, a 16px icon on the first line of text, the
 /// message in `bodySmall` in the tone's colour. The tone is never the
 /// only carrier: the text always says what is at stake on its own.
+///
+/// The panel itself never moves. A note that comes and goes on a page
+/// that stays opens its place in an `OpeningPlace` around it, so what
+/// follows moves down with it rather than in one jump.
 class GerfautNotice extends StatelessWidget {
   const GerfautNotice({
     super.key,

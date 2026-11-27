@@ -116,9 +116,7 @@ Widget txDetailApp(FakeBridge bridge) {
 
 void main() {
   test('a toast stays three seconds, as on the desktop app', () {
-    final toast = Toast('Setting saved');
-    expect(toast.duration, const Duration(seconds: 3));
-    expect((toast.content as Text).data, 'Setting saved');
+    expect(toastDuration, const Duration(seconds: 3));
   });
 
   testWidgets('switching the unit changes every rendered amount', (

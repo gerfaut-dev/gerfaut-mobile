@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -238,7 +239,7 @@ class _BackupRestoreScreenState extends ConsumerState<BackupRestoreScreen> {
       _restoring = true;
       _error = null;
     });
-    final messenger = ScaffoldMessenger.of(context);
+    final toast = Toast.of(context);
     final navigator = Navigator.of(context);
     // Held before the first await: `ref` belongs to this widget and
     // throws once it is gone, but the container it points at does not.
@@ -277,7 +278,7 @@ class _BackupRestoreScreenState extends ConsumerState<BackupRestoreScreen> {
       );
       if (!mounted) return;
       navigator.pop();
-      messenger.showSnackBar(Toast(_restoredMessage(report)));
+      toast.show(_restoredMessage(report));
     } on BridgeException catch (error) {
       if (mounted) setState(() => _error = _restoreMessageOf(error));
     } finally {
@@ -680,7 +681,11 @@ class _WalletRow extends StatelessWidget {
                   borderRadius: BorderRadius.circular(GerfautRadius.sm),
                 ),
                 onChanged: enabled
-                    ? (value) => onChanged!(value ?? false)
+                    ? (value) {
+                        // The click of a box ticked or cleared.
+                        HapticFeedback.selectionClick();
+                        onChanged!(value ?? false);
+                      }
                     : null,
               ),
               const SizedBox(width: GerfautSpacing.xs),

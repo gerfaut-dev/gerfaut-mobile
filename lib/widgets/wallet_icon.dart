@@ -10,6 +10,7 @@ import 'facts.dart';
 import 'focus_ring.dart';
 import 'stroke_glyph.dart';
 import 'toast.dart';
+import 'motion.dart';
 
 /// Where a wallet icon's drawing comes from: Lucide for the symbols,
 /// a stroked path of this app for the signing devices Lucide has none
@@ -141,7 +142,7 @@ Future<void> changeWalletIcon(
     container.invalidate(walletsProvider);
     container.invalidate(snapshotProvider(wallet.id));
     if (context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(Toast('Setting saved'));
+      Toast.of(context).show('Setting saved');
     }
   } catch (error) {
     if (context.mounted) onFailure('$error');
@@ -160,7 +161,7 @@ class WalletIconPicker extends StatelessWidget {
     BuildContext context, {
     required WalletIcon current,
   }) {
-    return showModalBottomSheet<WalletIcon>(
+    return showGerfautSheet<WalletIcon>(
       context: context,
       // Free of the default cap at nine sixteenths of the screen: the
       // sheet sets its own, [maxHeightFactor].

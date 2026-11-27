@@ -259,6 +259,22 @@ class _Slot extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    // The words fade in as the slot arrives; its room is taken at once.
+    // Opening that room by degrees would resize the page above it on
+    // every frame, the page being the other child of the frame. It
+    // leaves in the same frame as the lock or the keyboard that takes
+    // its place, never over them, so there is no fade out.
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: 0, end: 1),
+      duration: GerfautMotion.base,
+      curve: GerfautMotion.ease,
+      builder: (context, opacity, child) =>
+          Opacity(opacity: opacity, child: child),
+      child: _bar(tokens),
+    );
+  }
+
+  Widget _bar(GerfautTokens tokens) {
     return Material(
       color: tokens.background,
       child: SafeArea(

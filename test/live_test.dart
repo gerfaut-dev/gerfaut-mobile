@@ -1856,10 +1856,10 @@ void main() {
           disguise: FakeDisguise(disguised: true),
         ),
       );
-      Switch drawn() => tester.widget<Switch>(
+      GerfautSwitch drawn() => tester.widget<GerfautSwitch>(
         find.descendant(
           of: find.widgetWithText(SettingSwitch, 'New transactions'),
-          matching: find.byType(Switch),
+          matching: find.byType(GerfautSwitch),
         ),
       );
       expect(drawn().value, isFalse);

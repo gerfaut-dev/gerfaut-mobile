@@ -105,7 +105,7 @@ SyncReport report(List<NewTx> txs, {String id = 'w1'}) => SyncReport(
 /// The switch of the new-transaction notice, the card's first.
 final Finder newTransactionsSwitch = find.descendant(
   of: find.widgetWithText(SettingSwitch, 'New transactions'),
-  matching: find.byType(Switch),
+  matching: find.byType(GerfautSwitch),
 );
 
 /// The switch that says whether a notification names the wallet and
@@ -797,7 +797,10 @@ void main() {
       expect(
         tester
             .getSemantics(
-              find.descendant(of: detailsSwitch, matching: find.byType(Switch)),
+              find.descendant(
+                of: detailsSwitch,
+                matching: find.byType(GerfautSwitch),
+              ),
             )
             .label,
         'Show wallet and amount\nEven while Gerfaut is locked. Off, a '
@@ -809,7 +812,10 @@ void main() {
       expect(details().onChanged, isNotNull);
 
       await tester.tap(
-        find.descendant(of: detailsSwitch, matching: find.byType(Switch)),
+        find.descendant(
+          of: detailsSwitch,
+          matching: find.byType(GerfautSwitch),
+        ),
       );
       await tester.pumpAndSettle();
       expect(details().value, isFalse);

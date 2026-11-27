@@ -14,6 +14,8 @@ import 'package:gerfaut/src/state.dart';
 import 'package:gerfaut/theme/tokens.dart';
 import 'package:gerfaut/widgets/choice_group.dart';
 import 'package:gerfaut/widgets/notice.dart';
+import 'package:gerfaut/widgets/setting_switch.dart';
+import 'package:gerfaut/widgets/toast.dart';
 
 import 'fakes.dart';
 
@@ -102,7 +104,7 @@ void main() {
     expect(find.text('3 of 3 transactions selected'), findsOneWidget);
 
     // Dropping pending keeps only the confirmed rows.
-    final pendingSwitch = find.byType(Switch).first;
+    final pendingSwitch = find.byType(GerfautSwitch).first;
     await tester.tap(pendingSwitch);
     await tester.pumpAndSettle();
     expect(find.text('2 of 3 transactions selected'), findsOneWidget);
@@ -197,7 +199,7 @@ void main() {
     expect(sharer.shared, isEmpty);
     expect(find.text('3 transactions saved'), findsOneWidget);
 
-    // Flush the snackbar timer.
+    // Flush the toast timer.
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
   });
@@ -256,7 +258,7 @@ void main() {
     expect(note.tone, NoticeTone.info);
     expect(note.message, 'The file could not be saved.');
     expect(note.detail, 'The drive is full.');
-    expect(find.byType(SnackBar), findsNothing);
+    expect(find.byType(ToastView), findsNothing);
     // The filters are still there, and the note leaves with the next try.
     expect(find.text('3 of 3 transactions selected'), findsOneWidget);
     saver.failure = null;
@@ -285,7 +287,7 @@ void main() {
     final note = tester.widget<GerfautNotice>(find.byType(GerfautNotice));
     expect(note.message, 'The file could not be built.');
     expect(note.detail, 'the history could not be read');
-    expect(find.byType(SnackBar), findsNothing);
+    expect(find.byType(ToastView), findsNothing);
   });
 
   testWidgets('a partial history warns before exporting', (tester) async {

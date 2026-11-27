@@ -7,6 +7,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../theme/tokens.dart';
 import 'focus_ring.dart';
 import 'tap_target.dart';
+import 'motion.dart';
 
 /// Tallest the anchored menu grows before it scrolls.
 const double _menuMaxHeight = 320;
@@ -112,7 +113,10 @@ class _GerfautSelectState<T> extends State<GerfautSelect<T>> {
     final picked = wide
         ? await _showAnchored<T>(context, widget)
         : await _showSheet<T>(context, widget);
-    if (picked != null && mounted) widget.onChanged?.call(picked.value);
+    if (picked == null || !mounted) return;
+    // The click of a choice that changed; none for the current one.
+    if (picked.value != widget.value) HapticFeedback.selectionClick();
+    widget.onChanged?.call(picked.value);
   }
 
   @override
@@ -237,7 +241,7 @@ Future<_Picked<T>?> _showSheet<T>(
 ) {
   final tokens = Theme.of(context).extension<GerfautTokens>()!;
   final maxHeight = MediaQuery.sizeOf(context).height * _sheetShare;
-  return showModalBottomSheet<_Picked<T>>(
+  return showGerfautSheet<_Picked<T>>(
     context: context,
     backgroundColor: tokens.surface,
     isScrollControlled: true,
@@ -333,7 +337,11 @@ class _AnchoredMenuRoute<T> extends PopupRoute<_Picked<T>> {
   ) {
     // A fade only: nothing slides, nothing bounces.
     return FadeTransition(
-      opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
+      opacity: CurvedAnimation(
+        parent: animation,
+        curve: GerfautMotion.ease,
+        reverseCurve: GerfautMotion.ease.flipped,
+      ),
       child: child,
     );
   }

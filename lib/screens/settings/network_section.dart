@@ -24,6 +24,7 @@ import 'fields.dart';
 import 'tor_section.dart';
 import '../../widgets/toast.dart';
 import '../../widgets/dialog.dart';
+import '../../widgets/motion.dart';
 
 /// Said once a server without TLS is saved: an Electrum server over
 /// plain TCP, or an Esplora one over plain HTTP outside Tor. Both read
@@ -186,7 +187,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
   }
 
   void _toast(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(Toast(message));
+    Toast.of(context).show(message);
   }
 
   /// Switches the workspace network. A refusal is said under the
@@ -425,7 +426,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
     // it still shows on the page that comes back, and so is the test.
     final container = ProviderScope.containerOf(context, listen: false);
     final bridge = ref.read(bridgeProvider);
-    final messenger = ScaffoldMessenger.of(context);
+    final toast = Toast.of(context);
     final config = switch (_backendKind) {
       'custom_esplora' => CustomEsplora(
         url: _esploraController.text.trim(),
@@ -473,7 +474,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
       if (mounted && config is CustomElectrum) {
         setState(_stopFollowingPort);
       }
-      messenger.showSnackBar(Toast('Setting saved'));
+      toast.show('Setting saved');
       // Stored: whether it answers is the test's to say, wherever the
       // person is by then.
       unawaited(
@@ -1267,45 +1268,14 @@ class _BackendTestStatusState extends State<_BackendTestStatus> {
   }
 }
 
-/// The loader of a busy button, beside a line that says what is under
-/// way: one turn a second, still when the phone turns animations off.
-class _Spinner extends StatefulWidget {
+/// The loader of a busy line, beside words that say what is under way.
+class _Spinner extends StatelessWidget {
   const _Spinner();
-
-  @override
-  State<_Spinner> createState() => _SpinnerState();
-}
-
-class _SpinnerState extends State<_Spinner>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _turn = AnimationController(
-    vsync: this,
-    duration: const Duration(seconds: 1),
-  );
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    if (MediaQuery.disableAnimationsOf(context)) {
-      _turn.stop();
-    } else if (!_turn.isAnimating) {
-      _turn.repeat();
-    }
-  }
-
-  @override
-  void dispose() {
-    _turn.dispose();
-    super.dispose();
-  }
 
   @override
   Widget build(BuildContext context) {
     final tokens = Theme.of(context).extension<GerfautTokens>()!;
-    return RotationTransition(
-      turns: _turn,
-      child: Icon(LucideIcons.loaderCircle, size: 16, color: tokens.textMuted),
-    );
+    return TurningIcon(turning: true, size: 16, color: tokens.textMuted);
   }
 }
 

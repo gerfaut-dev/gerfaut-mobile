@@ -15,7 +15,7 @@ class GerfautPageTransitionsBuilder extends PageTransitionsBuilder {
   const GerfautPageTransitionsBuilder();
 
   /// How far the arriving page travels, in logical pixels.
-  static const double travel = GerfautSpacing.lg;
+  static const double travel = GerfautMotion.travel;
 
   @override
   Duration get transitionDuration => GerfautMotion.slow;
@@ -71,8 +71,12 @@ class _PageTransitionState extends State<_PageTransition> {
   /// without it.
   static CurvedAnimation _fadeOf(Animation<double> parent) => CurvedAnimation(
     parent: parent,
-    curve: const Interval(0, 0.5, curve: GerfautMotion.ease),
-    reverseCurve: Interval(0.5, 1, curve: GerfautMotion.ease.flipped),
+    curve: const Interval(0, GerfautMotion.pageFade, curve: GerfautMotion.ease),
+    reverseCurve: Interval(
+      1 - GerfautMotion.pageFade,
+      1,
+      curve: GerfautMotion.ease.flipped,
+    ),
   );
 
   @override
@@ -101,7 +105,7 @@ class _PageTransitionState extends State<_PageTransition> {
   @override
   Widget build(BuildContext context) {
     // With animations reduced the page keeps its fade and stays put.
-    final travel = MediaQuery.disableAnimationsOf(context)
+    final travel = GerfautMotion.reduced(context)
         ? 0.0
         : GerfautPageTransitionsBuilder.travel;
     final side = Directionality.of(context) == TextDirection.rtl ? -1.0 : 1.0;

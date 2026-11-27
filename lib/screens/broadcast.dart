@@ -25,6 +25,7 @@ import '../widgets/icon_chip.dart';
 import '../widgets/input_error.dart';
 import '../widgets/io_row.dart';
 import '../widgets/notice.dart';
+import '../widgets/motion.dart';
 import '../widgets/op_return_preview.dart';
 import '../widgets/confirmation_pie.dart' show settledConfirmations;
 import '../widgets/tx_diagram.dart';
@@ -409,13 +410,14 @@ class _BroadcastScreenState extends ConsumerState<BroadcastScreen> {
               // error, so the slot never shrinks below the hint's height
               // and what follows moves only by what the error has over
               // it. Preview is pinned to the bottom and never moves.
+              // The hint fades out under the error as the error's place
+              // opens; a hidden hint is not read out.
               Stack(
                 children: [
-                  Visibility(
-                    visible: inputError == null,
-                    maintainSize: true,
-                    maintainAnimation: true,
-                    maintainState: true,
+                  AnimatedOpacity(
+                    opacity: inputError == null ? 1 : 0,
+                    duration: GerfautMotion.base,
+                    curve: GerfautMotion.ease,
                     child: Text(
                       'Gerfaut never signs. It reads a finished transaction, '
                       'shows what it does, and hands it to the network on '
@@ -423,8 +425,14 @@ class _BroadcastScreenState extends ConsumerState<BroadcastScreen> {
                       style: tokens.bodySmall.copyWith(color: tokens.textMuted),
                     ),
                   ),
-                  if (inputError case final error?)
-                    InputError(error.headline, detail: error.detail),
+                  OpeningPlace(
+                    child: inputError == null
+                        ? null
+                        : InputError(
+                            inputError.headline,
+                            detail: inputError.detail,
+                          ),
+                  ),
                 ],
               ),
               const SizedBox(height: GerfautSpacing.md),
@@ -510,14 +518,19 @@ class _BroadcastScreenState extends ConsumerState<BroadcastScreen> {
             padding: const EdgeInsets.all(GerfautSpacing.md),
             children: [
               _Hero(preview: preview, tokens: tokens, sent: sent != null),
-              if (sent != null) ...[
-                const SizedBox(height: GerfautSpacing.lg),
-                _StatusCard(
-                  key: ValueKey(sent.txid),
-                  record: sent,
-                  sentTo: sent.backend,
-                ),
-              ],
+              // The result opens its place under the hero.
+              OpeningPlace(
+                child: sent == null
+                    ? null
+                    : Padding(
+                        padding: const EdgeInsets.only(top: GerfautSpacing.lg),
+                        child: _StatusCard(
+                          key: ValueKey(sent.txid),
+                          record: sent,
+                          sentTo: sent.backend,
+                        ),
+                      ),
+              ),
               const SizedBox(height: GerfautSpacing.lg),
               TxDiagram(
                 inputs: _inputBranches(preview.inputs),
@@ -572,51 +585,60 @@ class _BroadcastScreenState extends ConsumerState<BroadcastScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (refusal != null) ...[
-                _RefusalBlock(message: refusal),
-                const SizedBox(height: GerfautSpacing.md),
-              ],
-              if (sent == null)
-                Row(
-                  children: [
-                    SecondaryButton(
-                      label: 'Back',
-                      onPressed: sending ? null : _back,
-                    ),
-                    const SizedBox(width: GerfautSpacing.sm),
-                    Expanded(
-                      child: PrimaryButton(
-                        label: sending ? 'Broadcasting…' : 'Broadcast',
-                        icon: LucideIcons.radio,
-                        expand: true,
-                        busy: sending,
-                        // The state the pill reads, not a second one.
-                        onPressed: preview.readiness.sendable
-                            ? () => _confirmAndSend(preview)
-                            : null,
+              OpeningPlace(
+                child: refusal == null
+                    ? null
+                    : Padding(
+                        padding: const EdgeInsets.only(
+                          bottom: GerfautSpacing.md,
+                        ),
+                        child: _RefusalBlock(message: refusal),
                       ),
-                    ),
-                  ],
-                )
-              else
-                Row(
-                  children: [
-                    // Leaving is the way out beside the screen's
-                    // action: secondary, so the blue stays with it.
-                    SecondaryButton(
-                      label: 'Done',
-                      onPressed: () => Navigator.of(context).pop(),
-                    ),
-                    const SizedBox(width: GerfautSpacing.sm),
-                    Expanded(
-                      child: PrimaryButton(
-                        label: 'Broadcast another',
-                        expand: true,
-                        onPressed: _another,
+              ),
+              // Sent: the actions to send fade into the ways out.
+              FadeInPlace(
+                state: sent != null,
+                child: sent == null
+                    ? Row(
+                        children: [
+                          SecondaryButton(
+                            label: 'Back',
+                            onPressed: sending ? null : _back,
+                          ),
+                          const SizedBox(width: GerfautSpacing.sm),
+                          Expanded(
+                            child: PrimaryButton(
+                              label: sending ? 'Broadcasting…' : 'Broadcast',
+                              icon: LucideIcons.radio,
+                              expand: true,
+                              busy: sending,
+                              // The state the pill reads, not a second one.
+                              onPressed: preview.readiness.sendable
+                                  ? () => _confirmAndSend(preview)
+                                  : null,
+                            ),
+                          ),
+                        ],
+                      )
+                    : Row(
+                        children: [
+                          // Leaving is the way out beside the screen's
+                          // action: secondary, so the blue stays with it.
+                          SecondaryButton(
+                            label: 'Done',
+                            onPressed: () => Navigator.of(context).pop(),
+                          ),
+                          const SizedBox(width: GerfautSpacing.sm),
+                          Expanded(
+                            child: PrimaryButton(
+                              label: 'Broadcast another',
+                              expand: true,
+                              onPressed: _another,
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                  ],
-                ),
+              ),
             ],
           ),
         ),

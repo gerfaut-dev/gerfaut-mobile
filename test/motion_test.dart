@@ -270,7 +270,7 @@ void main() {
             ),
           ),
         );
-        await tester.tap(find.byType(Switch));
+        await tester.tap(find.byType(GerfautSwitch));
         await tester.pumpAndSettle();
       });
       expect(on, isTrue);

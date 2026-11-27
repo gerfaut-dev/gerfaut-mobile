@@ -19,6 +19,7 @@ import '../../widgets/password_field.dart';
 import '../../widgets/section_card.dart';
 import '../../widgets/setting_switch.dart';
 import 'fields.dart';
+import '../../widgets/motion.dart';
 
 /// Why "Unlock with biometrics" is greyed on a phone whose only
 /// biometric is a weak one.
@@ -43,7 +44,7 @@ class _SecuritySectionState extends ConsumerState<SecuritySection> {
   void _afterChange() => ref.invalidate(settingsProvider);
 
   Future<void> _setLock({LockKind? kind}) async {
-    final chosen = await showModalBottomSheet<_NewSecret>(
+    final chosen = await showGerfautSheet<_NewSecret>(
       context: context,
       isScrollControlled: true,
       builder: (_) => _SetLockSheet(kind: kind, asksCurrent: kind != null),
@@ -67,7 +68,7 @@ class _SecuritySectionState extends ConsumerState<SecuritySection> {
     // removing the lock takes the disguise off first, and the sheet
     // says so before the secret is asked.
     final disguised = ref.read(disguiseProvider).disguised;
-    final current = await showModalBottomSheet<String>(
+    final current = await showGerfautSheet<String>(
       context: context,
       isScrollControlled: true,
       builder: (_) => _ConfirmSecretSheet(
@@ -104,7 +105,7 @@ class _SecuritySectionState extends ConsumerState<SecuritySection> {
       await _swapFace(false);
       return;
     }
-    final confirmed = await showModalBottomSheet<bool>(
+    final confirmed = await showGerfautSheet<bool>(
       context: context,
       isScrollControlled: true,
       builder: (_) => DisguiseSheet(
@@ -135,7 +136,7 @@ class _SecuritySectionState extends ConsumerState<SecuritySection> {
   /// sheet was dismissed.
   Future<String?> _askSecret(LockKind kind, String title) {
     setState(() => _error = null);
-    return showModalBottomSheet<String>(
+    return showGerfautSheet<String>(
       context: context,
       isScrollControlled: true,
       builder: (_) => _ConfirmSecretSheet(kind: kind, title: title),

@@ -16,6 +16,7 @@ import '../widgets/empty_state.dart';
 import '../widgets/icon_chip.dart';
 import '../widgets/load_failure.dart';
 import '../widgets/mask_unsaved_notice.dart';
+import '../widgets/motion.dart';
 import '../widgets/notice.dart';
 import '../widgets/overflow_menu.dart';
 import '../widgets/reorder.dart';
@@ -70,6 +71,86 @@ class HomeScreen extends ConsumerWidget {
     final syncs = ref.watch(syncProvider);
     final sync = ref.read(syncProvider.notifier);
     final network = settings.value?.activeNetwork;
+    // The list stays out of any fade: an opacity over a long list is the
+    // costly part, and it keeps its scroll and a drop under way. Only
+    // the bounded blocks around it fade into one another.
+    const listState = 'list';
+    final (Object bodyState, Widget body) = switch ((settings, wallets)) {
+      // The wallets alone failed: the vault is open, and the list can be
+      // asked for again.
+      (AsyncData(), AsyncError(:final error)) => (
+        'failure',
+        LoadFailure(
+          what: 'The wallets',
+          error: error,
+          onRetry: () => ref.invalidate(walletsProvider),
+        ),
+      ),
+      (AsyncError(), _) || (_, AsyncError()) => (
+        'vault',
+        Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: GerfautSpacing.md),
+            child: Text(
+              'The vault could not be opened. Restart Gerfaut; if '
+              'this persists, the secure storage refused access to '
+              'the vault key.',
+              style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      ),
+      // A value, the current one or the last while the vault is read
+      // again — refreshed after a drop, or reloaded behind a settings
+      // change: the list stays mounted through it, and what it holds —
+      // a drop on its way, the note of a refused one — survives, instead
+      // of giving way to the opening line and coming back blank.
+      (_, AsyncValue(:final value?)) when value.isEmpty => (
+        'empty',
+        EmptyState(
+          // The first screen of the app: the full logo, once, where
+          // every other empty state gets a watermark.
+          art: GerfautLockup(
+            color: tokens.primary,
+            width: 160,
+            semanticLabel: 'Gerfaut',
+          ),
+          title: 'No wallets yet',
+          hint: 'Import a descriptor, xpub, or address to start watching it.',
+        ),
+      ),
+      (_, AsyncValue(:final value?)) => (
+        listState,
+        _WalletList(
+          wallets: value,
+          refreshing: wallets.isLoading,
+          onRefresh: () async {
+            if (network == null) return;
+            final report = await sync.syncAll(network);
+            if (report == null || !context.mounted) return;
+            // A benign confirmation: the summary may disappear,
+            // per-wallet failures stay on the freshness lines.
+            final synced = report.reports.length;
+            final failed = report.failures.length;
+            Toast.of(context).show(
+              failed == 0
+                  ? (synced == 1 ? '1 wallet synced' : '$synced wallets synced')
+                  : '$synced synced, $failed failed',
+            );
+          },
+        ),
+      ),
+      _ => (
+        'loading',
+        Center(
+          child: Text(
+            'Opening the vault…',
+            style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+          ),
+        ),
+      ),
+    };
 
     return Scaffold(
       appBar: GerfautAppBar(
@@ -154,79 +235,9 @@ class HomeScreen extends ConsumerWidget {
               const UpdateNotice(),
               const MaskUnsavedNotice(),
               Expanded(
-                child: switch ((settings, wallets)) {
-                  // The wallets alone failed: the vault is open, and the
-                  // list can be asked for again.
-                  (AsyncData(), AsyncError(:final error)) => LoadFailure(
-                    what: 'The wallets',
-                    error: error,
-                    onRetry: () => ref.invalidate(walletsProvider),
-                  ),
-                  (AsyncError(), _) || (_, AsyncError()) => Center(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: GerfautSpacing.md,
-                      ),
-                      child: Text(
-                        'The vault could not be opened. Restart Gerfaut; if '
-                        'this persists, the secure storage refused access to '
-                        'the vault key.',
-                        style: tokens.bodySmall.copyWith(
-                          color: tokens.textMuted,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                    ),
-                  ),
-                  // A value, the current one or the last while the vault
-                  // is read again — refreshed after a drop, or reloaded
-                  // behind a settings change: the list stays mounted
-                  // through it, and what it holds — a drop on its way,
-                  // the note of a refused one — survives, instead of
-                  // giving way to the opening line and coming back blank.
-                  (_, AsyncValue(:final value?)) when value.isEmpty =>
-                    EmptyState(
-                      // The first screen of the app: the full logo, once,
-                      // where every other empty state gets a watermark.
-                      art: GerfautLockup(
-                        color: tokens.primary,
-                        width: 160,
-                        semanticLabel: 'Gerfaut',
-                      ),
-                      title: 'No wallets yet',
-                      hint:
-                          'Import a descriptor, xpub, or address to start '
-                          'watching it.',
-                    ),
-                  (_, AsyncValue(:final value?)) => _WalletList(
-                    wallets: value,
-                    refreshing: wallets.isLoading,
-                    onRefresh: () async {
-                      if (network == null) return;
-                      final report = await sync.syncAll(network);
-                      if (report == null || !context.mounted) return;
-                      // A benign confirmation: the summary may disappear,
-                      // per-wallet failures stay on the freshness lines.
-                      final synced = report.reports.length;
-                      final failed = report.failures.length;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        Toast(
-                          failed == 0
-                              ? (synced == 1
-                                    ? '1 wallet synced'
-                                    : '$synced wallets synced')
-                              : '$synced synced, $failed failed',
-                        ),
-                      );
-                    },
-                  ),
-                  _ => Center(
-                    child: Text(
-                      'Opening the vault…',
-                      style: tokens.bodySmall.copyWith(color: tokens.textMuted),
-                    ),
-                  ),
-                },
+                child: bodyState == listState
+                    ? body
+                    : FadeInPlace(state: bodyState, child: body),
               ),
               Padding(
                 padding: const EdgeInsets.all(GerfautSpacing.md),
@@ -416,33 +427,37 @@ class _WalletListState extends ConsumerState<_WalletList> {
         // Above the cards, in the list's own margins: the header takes
         // the top of the padding and the first card gives it up, so the
         // gap under the note is the header's to set.
-        header: refused == null
-            ? null
-            : Padding(
-                padding: const EdgeInsets.only(bottom: GerfautSpacing.md),
-                child: GerfautNotice(
-                  tone: NoticeTone.info,
-                  // It lands in reaction to the drop, and nothing else
-                  // on the screen says the order went back.
-                  liveRegion: true,
-                  message: 'The new order could not be saved.',
-                  hint: stale ? 'The list changed. Drag again.' : null,
-                  detail: stale ? null : refused.reason,
-                  actionsBelow: true,
-                  action: stale
-                      ? SecondaryButton(label: 'Dismiss', onPressed: _dismiss)
-                      : ConfirmActions(
-                          cancel: SecondaryButton(
-                            label: 'Dismiss',
-                            onPressed: _dismiss,
+        // The note opens its place above the cards rather than pushing
+        // them down in one jump; only this bounded header moves.
+        header: OpeningPlace(
+          child: refused == null
+              ? null
+              : Padding(
+                  padding: const EdgeInsets.only(bottom: GerfautSpacing.md),
+                  child: GerfautNotice(
+                    tone: NoticeTone.info,
+                    // It lands in reaction to the drop, and nothing else
+                    // on the screen says the order went back.
+                    liveRegion: true,
+                    message: 'The new order could not be saved.',
+                    hint: stale ? 'The list changed. Drag again.' : null,
+                    detail: stale ? null : refused.reason,
+                    actionsBelow: true,
+                    action: stale
+                        ? SecondaryButton(label: 'Dismiss', onPressed: _dismiss)
+                        : ConfirmActions(
+                            cancel: SecondaryButton(
+                              label: 'Dismiss',
+                              onPressed: _dismiss,
+                            ),
+                            confirm: PrimaryButton(
+                              label: 'Try again',
+                              onPressed: _retry,
+                            ),
                           ),
-                          confirm: PrimaryButton(
-                            label: 'Try again',
-                            onPressed: _retry,
-                          ),
-                        ),
+                  ),
                 ),
-              ),
+        ),
         itemCount: shown.length,
         onReorderItem: _reorder,
         itemBuilder: (context, index) {
@@ -513,14 +528,11 @@ class _WalletCard extends StatelessWidget {
     final tokens = Theme.of(context).extension<GerfautTokens>()!;
     // Held and moving, the card is the one thing on screen that really
     // floats, and gets the one shadow. At rest, never.
-    final lifted = LiftedItem.of(context);
     return Padding(
       padding: const EdgeInsets.only(bottom: GerfautSpacing.gutter),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(GerfautRadius.lg),
-          boxShadow: lifted ? [tokens.shadowOverlay] : null,
-        ),
+      child: LiftShadow(
+        shadow: tokens.shadowOverlay,
+        borderRadius: BorderRadius.circular(GerfautRadius.lg),
         child: Material(
           color: tokens.surface,
           borderRadius: BorderRadius.circular(GerfautRadius.lg),
@@ -567,51 +579,60 @@ class _WalletCard extends StatelessWidget {
                     const SizedBox(height: GerfautSpacing.sm),
                     LiveCoveragePill(coverage: coverage!),
                   ],
-                  if (error != null) ...[
-                    const SizedBox(height: GerfautSpacing.sm),
-                    // One line, amber: the reason is a tap away here,
-                    // and spelled out on the wallet's page. A tap, not a
-                    // hold: holding the card is how it gets moved, and
-                    // two gestures on one press would fight for it.
-                    Tooltip(
-                      message: error!,
-                      triggerMode: TooltipTriggerMode.tap,
-                      // A full touch target: a tap on the line reads
-                      // the reason rather than opening the wallet
-                      // around it.
-                      child: ConstrainedBox(
-                        constraints: const BoxConstraints(
-                          minHeight: GerfautTouch.target,
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              LucideIcons.triangleAlert,
-                              size: 12,
-                              color: tokens.pending,
-                            ),
-                            const SizedBox(width: GerfautSpacing.xs),
-                            Flexible(
-                              child: Text(
-                                'Sync failed',
-                                style: tokens.label.copyWith(
-                                  color: tokens.pending,
-                                ),
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
+                  // The note opens its place when a sync fails and closes
+                  // it when one succeeds, instead of resizing the card in
+                  // one jump. A card built with it is drawn with it.
+                  OpeningPlace(
+                    child: error == null ? null : _syncFailed(tokens, error!),
+                  ),
                 ],
               ),
             ),
           ),
         ),
       ),
+    );
+  }
+
+  Widget _syncFailed(GerfautTokens tokens, String error) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const SizedBox(height: GerfautSpacing.sm),
+        // One line, amber: the reason is a tap away here,
+        // and spelled out on the wallet's page. A tap, not a
+        // hold: holding the card is how it gets moved, and
+        // two gestures on one press would fight for it.
+        Tooltip(
+          message: error,
+          triggerMode: TooltipTriggerMode.tap,
+          // A full touch target: a tap on the line reads
+          // the reason rather than opening the wallet
+          // around it.
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: GerfautTouch.target),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  LucideIcons.triangleAlert,
+                  size: 12,
+                  color: tokens.pending,
+                ),
+                const SizedBox(width: GerfautSpacing.xs),
+                Flexible(
+                  child: Text(
+                    'Sync failed',
+                    style: tokens.label.copyWith(color: tokens.pending),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

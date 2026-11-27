@@ -6,6 +6,7 @@ import '../src/format.dart';
 import '../src/models.dart';
 import '../src/state.dart';
 import '../theme/tokens.dart';
+import 'motion.dart';
 
 /// How old a sync may get before the line that dates it says so. An
 /// open app syncs every ten minutes: past thirty, three of those syncs
@@ -64,8 +65,62 @@ class SyncIndicator extends ConsumerWidget {
     // "5 min ago" moves on its own, while the page stays open.
     ref.watch(relativeClockProvider);
     final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    final reason = failed && !syncing ? this.reason : null;
+    final kind = _kind();
+    // The line fades when what it says changes kind (syncing, synced,
+    // failed, old), never when only its words move: "2 min ago" turning
+    // into "3 min ago" is the same state and is replaced in place.
+    final words = _line(tokens, kind);
+    final line = FadeInPlace(
+      state: kind,
+      child: reason == null ? words : _fullOnLongPress(reason, words),
+    );
+    // The reason opens its own place under the line, so the rows below
+    // move down with it rather than in one jump.
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        line,
+        OpeningPlace(
+          child: reason == null
+              ? null
+              : _fullOnLongPress(
+                  reason,
+                  Text(
+                    reason,
+                    style: tokens.label.copyWith(color: tokens.textMuted),
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+        ),
+      ],
+    );
+  }
+
+  /// Long-press on the line or on the reason shows the reason in full.
+  /// Each carries its own tooltip, inside its own animated place: one
+  /// tooltip around both would give the line a new parent the moment a
+  /// reason arrives, and the line would cut instead of fading.
+  Widget _fullOnLongPress(String reason, Widget child) => Tooltip(
+    message: reason,
+    triggerMode: TooltipTriggerMode.longPress,
+    child: child,
+  );
+
+  _SyncKind _kind() {
     final stamp = this.stamp;
-    if (syncing) {
+    if (syncing) return _SyncKind.syncing;
+    if (failed) return _SyncKind.failed;
+    if (stamp == null) return _SyncKind.never;
+    if (!refreshing && syncIsStale(stamp)) return _SyncKind.stale;
+    return _SyncKind.synced;
+  }
+
+  Widget _line(GerfautTokens tokens, _SyncKind kind) {
+    final stamp = this.stamp;
+    if (kind == _SyncKind.syncing) {
       return Text(
         stamp == null
             ? syncingWords
@@ -89,31 +144,12 @@ class SyncIndicator extends ConsumerWidget {
         ),
       ],
     );
-    if (failed) {
-      final line = warned(
+    if (kind == _SyncKind.failed) {
+      return warned(
         LucideIcons.triangleAlert,
         stamp == null
             ? 'Sync failed'
             : 'Sync failed · last sync ${relativeTime(stamp.at)}',
-      );
-      final reason = this.reason;
-      if (reason == null) return line;
-      return Tooltip(
-        message: reason,
-        triggerMode: TooltipTriggerMode.longPress,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            line,
-            Text(
-              reason,
-              style: tokens.label.copyWith(color: tokens.textMuted),
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-        ),
       );
     }
     if (stamp == null) {
@@ -124,7 +160,7 @@ class SyncIndicator extends ConsumerWidget {
       );
     }
     final words = 'Synced ${relativeTime(stamp.at)} · ${stamp.backend}';
-    if (!refreshing && syncIsStale(stamp)) {
+    if (kind == _SyncKind.stale) {
       return warned(LucideIcons.clockAlert, words);
     }
     return Text(
@@ -134,3 +170,7 @@ class SyncIndicator extends ConsumerWidget {
     );
   }
 }
+
+/// What the line says, as far as its fade is concerned: a new kind
+/// fades in, the same kind with newer words does not.
+enum _SyncKind { syncing, synced, never, failed, stale }

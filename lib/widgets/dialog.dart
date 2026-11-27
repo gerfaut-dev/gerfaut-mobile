@@ -36,7 +36,8 @@ Future<T?> showGerfautDialog<T>({
   );
 }
 
-/// A modal leaves faster than it arrives: by then it has been read.
+/// A modal leaves faster than it arrives: by then it has been read,
+/// and it goes back by the road it came.
 class _GerfautDialogRoute<T> extends RawDialogRoute<T> {
   _GerfautDialogRoute({
     required super.pageBuilder,
@@ -48,7 +49,7 @@ class _GerfautDialogRoute<T> extends RawDialogRoute<T> {
   });
 
   @override
-  Duration get reverseTransitionDuration => GerfautMotion.fast;
+  Duration get reverseTransitionDuration => GerfautMotion.base;
 }
 
 class _DialogTransition extends StatefulWidget {
@@ -82,7 +83,7 @@ class _DialogTransitionState extends State<_DialogTransition> {
   @override
   Widget build(BuildContext context) {
     // With animations reduced the modal keeps its fade and stays put.
-    final rise = MediaQuery.disableAnimationsOf(context) ? 0.0 : _rise;
+    final rise = GerfautMotion.reduced(context) ? 0.0 : _rise;
     return AnimatedBuilder(
       animation: _eased,
       builder: (context, child) => Transform.translate(
@@ -95,4 +96,4 @@ class _DialogTransitionState extends State<_DialogTransition> {
 }
 
 /// How far a modal rises as it arrives, in logical pixels.
-const double _rise = GerfautSpacing.sm;
+const double _rise = GerfautMotion.rise;

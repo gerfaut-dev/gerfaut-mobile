@@ -78,8 +78,15 @@ class SettingSwitch extends StatelessWidget {
   }
 }
 
-/// The switch itself, wherever one stands: a ring around it for a
-/// keyboard focus, a click under the finger when it is thrown.
+/// The switch itself, wherever one stands: a 44 × 24 track, the border
+/// tone when off and the action colour when on, and a knob that slides
+/// in [GerfautMotion.base] on [GerfautMotion.ease].
+///
+/// Drawn here rather than taken from Material: the Material 3 switch
+/// overshoots its end on a curve no theme can change, and nothing in
+/// Gerfaut bounces. It keeps what the platform's gave: read as a switch
+/// with its state, a keyboard stop with the focus ring, Space or Enter
+/// to throw it, a 48-point target, and a click under the finger.
 class GerfautSwitch extends StatelessWidget {
   const GerfautSwitch({
     super.key,
@@ -92,27 +99,98 @@ class GerfautSwitch extends StatelessWidget {
   /// Null greys the switch out.
   final ValueChanged<bool>? onChanged;
 
+  static const double _width = 44;
+  static const double _height = 24;
+  static const double _inset = 2;
+  static const double _target = 48;
+
   @override
   Widget build(BuildContext context) {
+    final tokens = Theme.of(context).extension<GerfautTokens>()!;
+    final light = Theme.of(context).brightness == Brightness.light;
     final onChanged = this.onChanged;
+    final enabled = onChanged != null;
+    void flip() {
+      if (onChanged == null) return;
+      // The click of a switch thrown.
+      HapticFeedback.selectionClick();
+      onChanged(!value);
+    }
+
+    final still = GerfautMotion.reduced(context);
+    final knob = value
+        ? tokens.onPrimary
+        : light
+        ? tokens.surface
+        : tokens.textMuted;
+    final track = AnimatedContainer(
+      duration: GerfautMotion.base,
+      curve: GerfautMotion.ease,
+      width: _width,
+      height: _height,
+      padding: const EdgeInsets.all(_inset),
+      decoration: BoxDecoration(
+        color: value ? tokens.primary : tokens.border,
+        borderRadius: BorderRadius.circular(GerfautRadius.full),
+      ),
+      child: AnimatedAlign(
+        // The knob jumps to its side with animations reduced; the
+        // colours still turn.
+        duration: still ? Duration.zero : GerfautMotion.base,
+        curve: GerfautMotion.ease,
+        alignment: value
+            ? AlignmentDirectional.centerEnd
+            : AlignmentDirectional.centerStart,
+        child: AnimatedContainer(
+          duration: GerfautMotion.base,
+          curve: GerfautMotion.ease,
+          width: _height - 2 * _inset,
+          height: _height - 2 * _inset,
+          decoration: BoxDecoration(color: knob, shape: BoxShape.circle),
+        ),
+      ),
+    );
+
     // The theme gives the switch the same colours whether or not it
     // can move: on its own a greyed switch still wears the Glacier
     // track of one that is on, and reads as on. At the opacity of
     // every disabled control, it reads as out of reach.
-    return Opacity(
-      opacity: onChanged == null ? 0.45 : 1,
-      child: FocusRing(
-        radius: GerfautRadius.full,
-        child: Switch(
-          value: value,
-          focusColor: Colors.transparent,
-          onChanged: onChanged == null
-              ? null
-              : (value) {
-                  // The click of a switch thrown.
-                  HapticFeedback.selectionClick();
-                  onChanged(value);
-                },
+    return Semantics(
+      toggled: value,
+      enabled: enabled,
+      onTap: enabled ? flip : null,
+      child: Opacity(
+        opacity: enabled ? 1 : 0.45,
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          excludeFromSemantics: true,
+          onTap: enabled ? flip : null,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(
+              minWidth: _target,
+              minHeight: _target,
+            ),
+            child: Center(
+              widthFactor: 1,
+              heightFactor: 1,
+              // The ring hugs the track, not the wider target around it.
+              child: FocusRing(
+                radius: GerfautRadius.full,
+                child: FocusableActionDetector(
+                  enabled: enabled,
+                  mouseCursor: enabled
+                      ? SystemMouseCursors.click
+                      : SystemMouseCursors.basic,
+                  actions: {
+                    ActivateIntent: CallbackAction<ActivateIntent>(
+                      onInvoke: (_) => flip(),
+                    ),
+                  },
+                  child: track,
+                ),
+              ),
+            ),
+          ),
         ),
       ),
     );

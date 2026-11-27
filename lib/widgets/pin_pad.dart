@@ -26,18 +26,24 @@ List<int> shuffledDigits(Random random) => [...phoneOrder]..shuffle(random);
 /// Empty, it says what to do, in the same height: the pad under it does
 /// not move as the first digit lands.
 class PinDots extends StatelessWidget {
-  const PinDots({super.key, required this.count});
+  const PinDots({super.key, required this.count, this.refused = false});
 
   final int count;
+
+  /// The digits were just refused: the dots turn the alert colour,
+  /// with no shake, until the next key.
+  final bool refused;
 
   @override
   Widget build(BuildContext context) {
     final tokens = Theme.of(context).extension<GerfautTokens>()!;
-    final said = switch (count) {
-      0 => 'PIN, no digits entered',
-      1 => 'PIN, 1 digit entered',
-      _ => 'PIN, $count digits entered',
-    };
+    final said = refused
+        ? 'PIN refused'
+        : switch (count) {
+            0 => 'PIN, no digits entered',
+            1 => 'PIN, 1 digit entered',
+            _ => 'PIN, $count digits entered',
+          };
     return Semantics(
       container: true,
       label: said,
@@ -65,7 +71,7 @@ class PinDots extends StatelessWidget {
                           width: 10,
                           height: 10,
                           decoration: BoxDecoration(
-                            color: tokens.text,
+                            color: refused ? tokens.alert : tokens.text,
                             shape: BoxShape.circle,
                           ),
                         ),
@@ -238,11 +244,14 @@ class _PadKeyState extends State<_PadKey> {
     if (_pressed != pressed) setState(() => _pressed = pressed);
   }
 
+  // A click under each key: a PIN pad has no other answer under the
+  // finger, the digits it takes being drawn as dots.
   void _tap() {
     HapticFeedback.selectionClick();
     widget.onTap();
   }
 
+  // The hold that clears the whole PIN is felt as such.
   void _longPress() {
     _press(false);
     HapticFeedback.mediumImpact();

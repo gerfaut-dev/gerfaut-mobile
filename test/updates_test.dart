@@ -19,6 +19,7 @@ import 'package:gerfaut/widgets/tap_target.dart';
 import 'package:gerfaut/widgets/status_pill.dart';
 import 'package:gerfaut/widgets/update_notice.dart';
 import 'package:url_launcher_platform_interface/url_launcher_platform_interface.dart';
+import 'package:gerfaut/widgets/setting_switch.dart';
 
 import 'fakes.dart';
 
@@ -375,18 +376,27 @@ void main() {
         ),
         findsOne,
       );
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isTrue);
+      expect(
+        tester.widget<GerfautSwitch>(find.byType(GerfautSwitch)).value,
+        isTrue,
+      );
 
-      await tester.tap(find.byType(Switch));
+      await tester.tap(find.byType(GerfautSwitch));
       await tester.pumpAndSettle();
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+      expect(
+        tester.widget<GerfautSwitch>(find.byType(GerfautSwitch)).value,
+        isFalse,
+      );
       expect(bridge.updates.automatic, isFalse);
     });
 
     testWidgets('reads the setting from the core', (tester) async {
       final bridge = _bridge()..updates.automatic = false;
       await open(tester, bridge);
-      expect(tester.widget<Switch>(find.byType(Switch)).value, isFalse);
+      expect(
+        tester.widget<GerfautSwitch>(find.byType(GerfautSwitch)).value,
+        isFalse,
+      );
     });
 
     testWidgets('its own button opens the download page and nothing else', (

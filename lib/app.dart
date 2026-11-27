@@ -30,6 +30,8 @@ import 'widgets/price_credit.dart';
 import 'src/prefs.dart';
 import 'src/share.dart';
 import 'widgets/readable_width.dart';
+import 'widgets/motion.dart';
+import 'widgets/toast.dart';
 
 /// Root widget: both Toundra themes, light by default, and the startup
 /// bootstrap (Rust bridge + encrypted vault) before the home screen.
@@ -131,11 +133,14 @@ class _GerfautAppState extends ConsumerState<GerfautApp> {
       navigatorKey: _navigator,
       navigatorObservers: [_credits],
       // One slot for the credit a price source asks for, under every
-      // screen: see widgets/price_credit.dart.
-      builder: (context, child) => CreditFrame(child: child!),
+      // screen: see widgets/price_credit.dart. The toasts of every
+      // screen show over the navigator, never over the lock.
+      builder: (context, child) =>
+          CreditFrame(child: _ToastsOffTheLock(child: child!)),
       theme: themeFrom(GerfautTokens.light, Brightness.light),
       darkTheme: themeFrom(GerfautTokens.dark, Brightness.dark),
       themeMode: themeMode,
+      themeAnimationStyle: GerfautMotion.theme,
       home: _ready == null
           ? const _Hydrated(child: _Gate())
           : _BootstrapGate(
@@ -146,6 +151,19 @@ class _GerfautAppState extends ConsumerState<GerfautApp> {
             ),
     );
   }
+}
+
+/// Closes the toasts while the lock, or the calculator standing for it,
+/// is the screen: a "Copied" made a moment before the lock came down is
+/// never drawn over it, nor one an unfinished save says behind it.
+class _ToastsOffTheLock extends ConsumerWidget {
+  const _ToastsOffTheLock({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) =>
+      ToastGate(open: !ref.watch(lockProvider).locked, child: child);
 }
 
 /// Hydrates the UI preferences from the vault as soon as the settings
@@ -388,22 +406,32 @@ class _GateState extends ConsumerState<_Gate> with WidgetsBindingObserver {
       // shown, and the calculator stands in front of it. A PIN-shaped
       // number reads the settings again, and settings that load bring
       // the lock, behind the same calculator.
-      if (!disguise.loaded) return const _StartupScreen();
+      if (!disguise.loaded) return _root('start', const _StartupScreen());
       if (disguise.disguised) {
-        return CalculatorScreen(
-          onPin: (_) async => ref.invalidate(settingsProvider),
+        return _root(
+          'calculator',
+          CalculatorScreen(
+            onPin: (_) async => ref.invalidate(settingsProvider),
+          ),
         );
       }
-      return _StartupErrorScreen(
-        error: settings.error!,
-        onRetry: () => ref.invalidate(settingsProvider),
+      return _root(
+        'error',
+        _StartupErrorScreen(
+          error: settings.error!,
+          onRetry: () => ref.invalidate(settingsProvider),
+        ),
       );
     }
-    if (!lock.loaded || !disguise.loaded) return const _StartupScreen();
+    if (!lock.loaded || !disguise.loaded) {
+      return _root('start', const _StartupScreen());
+    }
     if (lock.locked) {
       // The calculator never asks for a biometric: a system prompt
       // over a calculator would give the app away.
-      return disguise.disguised ? const CalculatorScreen() : const LockScreen();
+      return disguise.disguised
+          ? _root('calculator', const CalculatorScreen())
+          : _root('lock', const LockScreen());
     }
 
     // The tour only ever stands in front of an empty vault: someone
@@ -412,9 +440,9 @@ class _GateState extends ConsumerState<_Gate> with WidgetsBindingObserver {
     final hydrated = ref.watch(prefsHydratedProvider);
     final seen = ref.watch(onboardingSeenProvider);
     if (hydrated && !seen && wallets != null && wallets.isEmpty) {
-      return const WelcomeScreen();
+      return _root('welcome', const WelcomeScreen());
     }
-    return const HomeScreen();
+    return _root('home', const HomeScreen());
   }
 }
 
@@ -445,20 +473,26 @@ class _BootstrapGate extends ConsumerWidget {
       future: ready,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
-          return const _StartupScreen();
+          return _root('start', const _StartupScreen());
         }
         if (snapshot.hasError) {
-          if (!disguise.loaded) return const _StartupScreen();
+          if (!disguise.loaded) return _root('start', const _StartupScreen());
           if (disguise.disguised) {
-            return CalculatorScreen(onPin: (_) => onRetryBehind());
+            return _root(
+              'calculator',
+              CalculatorScreen(onPin: (_) => onRetryBehind()),
+            );
           }
-          return _StartupErrorScreen(
-            error: snapshot.error!,
-            onRetry: onRetry,
-            onStartOver: onStartOver,
+          return _root(
+            'error',
+            _StartupErrorScreen(
+              error: snapshot.error!,
+              onRetry: onRetry,
+              onStartOver: onStartOver,
+            ),
           );
         }
-        return const _Hydrated(child: _Gate());
+        return _root('gate', const _Hydrated(child: _Gate()));
       },
     );
   }
@@ -608,22 +642,6 @@ ThemeData themeFrom(GerfautTokens tokens, Brightness brightness) {
       titleTextStyle: tokens.h2,
       contentTextStyle: tokens.bodySmall,
     ),
-    // The toast is an island of the dark theme in either theme, as on
-    // the desktop app: night ground, foam text. On a light page it
-    // stands out by itself. In the dark theme its ground is the page's
-    // own, so there, and only there, the theme's hairline gives it an
-    // edge.
-    snackBarTheme: SnackBarThemeData(
-      backgroundColor: GerfautTokens.dark.background,
-      contentTextStyle: GerfautTokens.dark.bodySmall,
-      behavior: SnackBarBehavior.floating,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(GerfautRadius.md),
-        side: brightness == Brightness.dark
-            ? BorderSide(color: tokens.border)
-            : BorderSide.none,
-      ),
-    ),
     tabBarTheme: TabBarThemeData(
       labelColor: tokens.text,
       unselectedLabelColor: tokens.textMuted,
@@ -640,6 +658,16 @@ ThemeData themeFrom(GerfautTokens tokens, Brightness brightness) {
     extensions: [tokens],
   );
 }
+
+/// A root screen standing in for another. The lock and the calculator
+/// appear at once, so nothing of the app shows through them for a
+/// frame; every other root screen, the lock leaving included, fades
+/// in place of the last one.
+Widget _root(String state, Widget screen) => ScreenFade(
+  state: state,
+  cut: state == 'lock' || state == 'calculator',
+  child: screen,
+);
 
 /// The quiet screen of a starting app. It names the vault only once the
 /// platform has said the app is not disguised: a calculator that opened

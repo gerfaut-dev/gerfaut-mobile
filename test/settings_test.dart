@@ -415,7 +415,7 @@ void main() {
       find.text('Serves the fiat value and the overview price.'),
       findsNothing,
     );
-    await tester.tap(find.byType(Switch).first);
+    await tester.tap(find.byType(GerfautSwitch).first);
     await tester.pumpAndSettle();
     expect(
       find.text('Serves the fiat value and the overview price.'),
@@ -683,7 +683,7 @@ void main() {
       await tester.tap(
         find.descendant(
           of: find.widgetWithText(SettingSwitch, 'Spending'),
-          matching: find.byType(Switch),
+          matching: find.byType(GerfautSwitch),
         ),
       );
       await tester.pumpAndSettle();
@@ -736,7 +736,7 @@ void main() {
       await tester.tap(
         find.descendant(
           of: find.widgetWithText(SettingSwitch, 'Cold storage'),
-          matching: find.byType(Switch),
+          matching: find.byType(GerfautSwitch),
         ),
       );
       await tester.pumpAndSettle();
@@ -1072,7 +1072,7 @@ void main() {
     /// Turns the fiat display on: the currency and source controls only
     /// exist once it is.
     Future<void> enableFiat(WidgetTester tester) async {
-      await tester.tap(find.byType(Switch).first);
+      await tester.tap(find.byType(GerfautSwitch).first);
       await tester.pumpAndSettle();
     }
 
@@ -2617,7 +2617,7 @@ void main() {
 
     Finder ownNodeSwitch() => find.descendant(
       of: find.widgetWithText(SettingSwitch, 'This is my node'),
-      matching: find.byType(Switch),
+      matching: find.byType(GerfautSwitch),
     );
 
     Future<void> save(WidgetTester tester) async {
@@ -2638,7 +2638,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(tester.widget<Switch>(ownNodeSwitch()).value, isFalse);
+      expect(tester.widget<GerfautSwitch>(ownNodeSwitch()).value, isFalse);
       expect(
         find.textContaining('Live then follows up to 20 000 addresses'),
         findsOneWidget,
@@ -2665,7 +2665,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(tester.widget<Switch>(ownNodeSwitch()).value, isTrue);
+      expect(tester.widget<GerfautSwitch>(ownNodeSwitch()).value, isTrue);
       // Another port, and nothing said about the switch: the save must
       // not take it for off.
       await tester.enterText(
@@ -3006,12 +3006,12 @@ void main() {
     /// Where the TLS toggle of the Electrum form stands.
     bool tlsOn(WidgetTester tester) {
       return tester
-          .widget<Switch>(
+          .widget<GerfautSwitch>(
             find.descendant(
               of: find
                   .ancestor(of: find.text('TLS'), matching: find.byType(Row))
                   .first,
-              matching: find.byType(Switch),
+              matching: find.byType(GerfautSwitch),
             ),
           )
           .value;
@@ -3089,7 +3089,7 @@ void main() {
       );
       Finder ownNodeSwitch() => find.descendant(
         of: find.widgetWithText(SettingSwitch, 'This is my node'),
-        matching: find.byType(Switch),
+        matching: find.byType(GerfautSwitch),
       );
 
       // The stored server read again keeps the switch.
@@ -3098,7 +3098,7 @@ void main() {
       await tester.pumpWidget(settingsWithCamera(bridge, 'node.local:50002:s'));
       await tester.pumpAndSettle();
       await scan(tester);
-      expect(tester.widget<Switch>(ownNodeSwitch()).value, isTrue);
+      expect(tester.widget<GerfautSwitch>(ownNodeSwitch()).value, isTrue);
 
       // Another one turns it off.
       bridge = declared();
@@ -3110,7 +3110,7 @@ void main() {
       await tester.pumpAndSettle();
       await scan(tester);
       expect(fieldTexts(tester).first, 'electrum.example.org');
-      expect(tester.widget<Switch>(ownNodeSwitch()).value, isFalse);
+      expect(tester.widget<GerfautSwitch>(ownNodeSwitch()).value, isFalse);
     });
 
     testWidgets('the onion fact names the Tor mode in force', (tester) async {
@@ -3402,10 +3402,11 @@ void main() {
 
     Finder tlsSwitch() => find.descendant(
       of: find.ancestor(of: find.text('TLS'), matching: find.byType(Row)).first,
-      matching: find.byType(Switch),
+      matching: find.byType(GerfautSwitch),
     );
 
-    bool tlsOn(WidgetTester tester) => tester.widget<Switch>(tlsSwitch()).value;
+    bool tlsOn(WidgetTester tester) =>
+        tester.widget<GerfautSwitch>(tlsSwitch()).value;
 
     testWidgets('a plain port typed on an empty form turns TLS off, and says '
         'so', (tester) async {

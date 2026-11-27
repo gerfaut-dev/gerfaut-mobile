@@ -17,6 +17,7 @@ import '../widgets/buttons.dart';
 import '../widgets/choice_group.dart';
 import '../widgets/facts.dart';
 import '../widgets/load_failure.dart';
+import '../widgets/motion.dart';
 import '../widgets/notice.dart';
 import '../widgets/password_field.dart';
 import '../widgets/pinned_action_form.dart';
@@ -167,7 +168,7 @@ class _BackupExportScreenState extends ConsumerState<BackupExportScreen> {
   /// app, and the lock popped this screen with the backup on it.
   Future<void> _saveFile(BackupBundle bundle) async {
     if (_trip != null) return;
-    final messenger = ScaffoldMessenger.of(context);
+    final toast = Toast.of(context);
     final lock = ref.read(lockProvider.notifier);
     final bytes = base64Decode(bundle.data);
     setState(() {
@@ -190,7 +191,7 @@ class _BackupExportScreenState extends ConsumerState<BackupExportScreen> {
       );
       // A dialog waved away says nothing: the backup is still here.
       if (saved) {
-        messenger.showSnackBar(Toast('Saved'));
+        toast.show('Saved');
       }
     } on DocumentSaveException catch (error) {
       _fail('The file could not be saved.', detail: error.message);
@@ -268,6 +269,11 @@ class _BackupExportScreenState extends ConsumerState<BackupExportScreen> {
         all != null &&
         _passwordController.text.isNotEmpty &&
         _confirmController.text.isNotEmpty;
+    // Both counts equal means a network scope would seal the same thing
+    // under another name: there is no choice to make, and a group of one
+    // option would read as a control that does nothing. The scope is
+    // said plainly, as on the desktop.
+    final choice = all != null && onNetwork != null && onNetwork != all.length;
     return PinnedActionForm(
       action: PrimaryButton(
         label: _creating ? 'Creating…' : 'Create backup',
@@ -284,53 +290,54 @@ class _BackupExportScreenState extends ConsumerState<BackupExportScreen> {
         const SizedBox(height: GerfautSpacing.md),
         FieldLabel('Wallets', tokens: tokens),
         const SizedBox(height: GerfautSpacing.sm),
-        if (_wallets case _ListFailed(:final error))
-          LoadFailure(
-            what: 'The wallet list',
-            error: error,
-            centered: false,
-            onRetry: () {
-              setState(() => _wallets = const _ListLoading());
-              _loadWallets();
-            },
-          )
-        // Both counts equal means a network scope would seal the same
-        // thing under another name: there is no choice to make, and a
-        // group of one option would read as a control that does
-        // nothing. The scope is said plainly, as on the desktop.
-        else if (all != null && onNetwork != null && onNetwork != all.length)
-          ChoiceGroup<_Scope>(
-            label: 'Wallets',
-            value: _scope,
-            options: [
-              ChoiceOption(
-                value: _Scope.all,
-                label: 'All wallets (${all.length})',
-              ),
-              ChoiceOption(
-                value: _Scope.network,
-                label: '${active!.label} only ($onNetwork)',
-              ),
-            ],
-            onChanged: (scope) => setState(() => _scope = scope),
-          )
-        else
-          Text.rich(
-            TextSpan(
-              text: 'All wallets',
-              children: [
-                if (all != null)
-                  TextSpan(
-                    text: ' (${all.length})',
-                    style: TextStyle(
-                      color: tokens.textMuted,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
-                  ),
-              ],
+        // The list that fails, or arrives as a choice, fades in place.
+        FadeInPlace(
+          state: _wallets is _ListFailed
+              ? 'failed'
+              : (choice ? 'choice' : 'plain'),
+          child: switch (_wallets) {
+            _ListFailed(:final error) => LoadFailure(
+              what: 'The wallet list',
+              error: error,
+              centered: false,
+              onRetry: () {
+                setState(() => _wallets = const _ListLoading());
+                _loadWallets();
+              },
             ),
-            style: tokens.body.copyWith(color: tokens.text),
-          ),
+            _ when choice => ChoiceGroup<_Scope>(
+              label: 'Wallets',
+              value: _scope,
+              options: [
+                ChoiceOption(
+                  value: _Scope.all,
+                  label: 'All wallets (${all.length})',
+                ),
+                ChoiceOption(
+                  value: _Scope.network,
+                  label: '${active!.label} only ($onNetwork)',
+                ),
+              ],
+              onChanged: (scope) => setState(() => _scope = scope),
+            ),
+            _ => Text.rich(
+              TextSpan(
+                text: 'All wallets',
+                children: [
+                  if (all != null)
+                    TextSpan(
+                      text: ' (${all.length})',
+                      style: TextStyle(
+                        color: tokens.textMuted,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                ],
+              ),
+              style: tokens.body.copyWith(color: tokens.text),
+            ),
+          },
+        ),
         const SizedBox(height: GerfautSpacing.md),
         SettingSwitch(
           title: 'Include node settings',
@@ -369,13 +376,17 @@ class _BackupExportScreenState extends ConsumerState<BackupExportScreen> {
           'to recover it.',
           style: tokens.bodySmall.copyWith(color: tokens.textMuted),
         ),
-        if (_error != null) ...[
-          const SizedBox(height: GerfautSpacing.sm),
-          Text(
-            _error!,
-            style: tokens.bodySmall.copyWith(color: tokens.textMuted),
-          ),
-        ],
+        OpeningPlace(
+          child: _error == null
+              ? null
+              : Padding(
+                  padding: const EdgeInsets.only(top: GerfautSpacing.sm),
+                  child: Text(
+                    _error!,
+                    style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+                  ),
+                ),
+        ),
         const SizedBox(height: GerfautSpacing.md),
       ],
     );
@@ -440,18 +451,21 @@ class _BackupExportScreenState extends ConsumerState<BackupExportScreen> {
             ),
           ],
         ),
-        if (_failure != null) ...[
-          const SizedBox(height: GerfautSpacing.sm),
-          // Amber: the backup is still here, it simply did not get
-          // where it was going, and the platform's words say why when
-          // it had any.
-          GerfautNotice(
-            tone: NoticeTone.info,
-            message: _failure!.message,
-            detail: _failure!.detail,
-            liveRegion: true,
-          ),
-        ],
+        // Amber: the backup is still here, it simply did not get where
+        // it was going, and the platform's words say why when it had any.
+        OpeningPlace(
+          child: _failure == null
+              ? null
+              : Padding(
+                  padding: const EdgeInsets.only(top: GerfautSpacing.sm),
+                  child: GerfautNotice(
+                    tone: NoticeTone.info,
+                    message: _failure!.message,
+                    detail: _failure!.detail,
+                    liveRegion: true,
+                  ),
+                ),
+        ),
         const SizedBox(height: GerfautSpacing.sm),
         SecondaryButton(
           label: 'Show QR code',
