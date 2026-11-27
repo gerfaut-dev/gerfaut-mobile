@@ -254,17 +254,20 @@ void main() {
         'transaction in hex, or a PSBT.';
     final hint = find.ancestor(
       of: find.textContaining('Gerfaut never signs.'),
-      matching: find.byType(Visibility),
+      matching: find.byType(AnimatedOpacity),
     );
     expect(find.text(headline), findsOneWidget);
-    // Kept under the error, hidden: it holds the slot's height.
-    expect(tester.widget<Visibility>(hint).visible, isFalse);
+    // Kept under the error, faded out: it holds the slot's height.
+    expect(tester.widget<AnimatedOpacity>(hint).opacity, 0);
     expect(tester.getTopLeft(find.text('Preview')), previewAt);
 
     await tester.enterText(find.byType(TextField), 'hello world!');
     await tester.pump();
+    // The error is gone at the first keystroke, fading out of a place
+    // that closes as the hint fades back in.
     expect(find.text(headline), findsNothing);
-    expect(tester.widget<Visibility>(hint).visible, isTrue);
+    expect(tester.widget<AnimatedOpacity>(hint).opacity, 1);
+    await tester.pumpAndSettle();
     // Back where everything was before the error.
     expect(tester.getTopLeft(find.text('Import a file')), importBefore);
     expect(tester.getTopLeft(find.text('Preview')), previewAt);

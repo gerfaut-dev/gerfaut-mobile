@@ -18,6 +18,7 @@ import '../widgets/buttons.dart';
 import '../widgets/choice_group.dart';
 import '../widgets/facts.dart';
 import '../widgets/load_failure.dart';
+import '../widgets/motion.dart';
 import '../widgets/notice.dart';
 import '../widgets/setting_switch.dart';
 import '../widgets/toast.dart';
@@ -209,27 +210,41 @@ class _ExportScreenState extends ConsumerState<ExportScreen> {
                       style: tokens.bodySmall.copyWith(color: tokens.textMuted),
                     ),
                     const SizedBox(height: GerfautSpacing.md),
-                    if (failed) ...[
-                      LoadFailure(
-                        what: 'The transactions',
-                        error: snapshotAsync.error,
-                        centered: false,
-                        onRetry: () =>
-                            ref.invalidate(snapshotProvider(widget.walletId)),
-                      ),
-                      const SizedBox(height: GerfautSpacing.md),
-                    ],
+                    OpeningPlace(
+                      child: failed
+                          ? Padding(
+                              padding: const EdgeInsets.only(
+                                bottom: GerfautSpacing.md,
+                              ),
+                              child: LoadFailure(
+                                what: 'The transactions',
+                                error: snapshotAsync.error,
+                                centered: false,
+                                onRetry: () => ref.invalidate(
+                                  snapshotProvider(widget.walletId),
+                                ),
+                              ),
+                            )
+                          : null,
+                    ),
                     // It changes what the file holds, so it is a note and
                     // not a line of grey.
-                    if (snapshot?.truncated ?? false) ...[
-                      const GerfautNotice(
-                        tone: NoticeTone.info,
-                        message:
-                            'Only the loaded transactions export. Load older '
-                            'transactions first for a complete file.',
-                      ),
-                      const SizedBox(height: GerfautSpacing.md),
-                    ],
+                    OpeningPlace(
+                      child: (snapshot?.truncated ?? false)
+                          ? const Padding(
+                              padding: EdgeInsets.only(
+                                bottom: GerfautSpacing.md,
+                              ),
+                              child: GerfautNotice(
+                                tone: NoticeTone.info,
+                                message:
+                                    'Only the loaded transactions export. '
+                                    'Load older transactions first for a '
+                                    'complete file.',
+                              ),
+                            )
+                          : null,
+                    ),
                     FieldLabel('Date range', tokens: tokens),
                     const SizedBox(height: GerfautSpacing.sm),
                     Row(
@@ -294,32 +309,50 @@ class _ExportScreenState extends ConsumerState<ExportScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    if (snapshot != null)
-                      Text(
-                        '$selected of $total transactions selected',
-                        style: tokens.figureOf(color: tokens.textMuted),
-                        textAlign: TextAlign.center,
-                      )
-                    else if (!failed)
-                      Text(
-                        'Loading…',
-                        style: tokens.bodySmall.copyWith(
-                          color: tokens.textMuted,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                    if (_failure != null) ...[
-                      const SizedBox(height: GerfautSpacing.sm),
-                      // Amber: nothing is at risk, the file simply did
-                      // not get where it was going, and the other side's
-                      // words say why when it had any.
-                      GerfautNotice(
-                        tone: NoticeTone.info,
-                        message: _failure!.message,
-                        detail: _failure!.detail,
-                        liveRegion: true,
-                      ),
-                    ],
+                    // The count arrives in a fade; once there, a new count
+                    // replaces the last in the same frame.
+                    OpeningPlace(
+                      child: snapshot == null && failed
+                          ? null
+                          : FadeInPlace(
+                              state: snapshot != null,
+                              alignment: Alignment.topCenter,
+                              child: snapshot != null
+                                  ? Text(
+                                      '$selected of $total transactions '
+                                      'selected',
+                                      style: tokens.figureOf(
+                                        color: tokens.textMuted,
+                                      ),
+                                      textAlign: TextAlign.center,
+                                    )
+                                  : Text(
+                                      'Loading…',
+                                      style: tokens.bodySmall.copyWith(
+                                        color: tokens.textMuted,
+                                      ),
+                                      textAlign: TextAlign.center,
+                                    ),
+                            ),
+                    ),
+                    // Amber: nothing is at risk, the file simply did not
+                    // get where it was going, and the other side's words
+                    // say why when it had any.
+                    OpeningPlace(
+                      child: _failure == null
+                          ? null
+                          : Padding(
+                              padding: const EdgeInsets.only(
+                                top: GerfautSpacing.sm,
+                              ),
+                              child: GerfautNotice(
+                                tone: NoticeTone.info,
+                                message: _failure!.message,
+                                detail: _failure!.detail,
+                                liveRegion: true,
+                              ),
+                            ),
+                    ),
                     const SizedBox(height: GerfautSpacing.sm),
                     Row(
                       children: [
