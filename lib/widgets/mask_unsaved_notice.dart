@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../src/state.dart';
 import '../theme/tokens.dart';
 import 'buttons.dart';
+import 'motion.dart';
 import 'notice.dart';
 
 /// Says that balances hidden in the app are hidden there only, on every
@@ -18,9 +19,13 @@ class MaskUnsavedNotice extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (!ref.watch(maskUnsavedProvider) || !ref.watch(maskedProvider)) {
-      return const SizedBox.shrink();
-    }
+    final shown = ref.watch(maskUnsavedProvider) && ref.watch(maskedProvider);
+    // It opens its place, and closes it with its words still on it
+    // rather than blanking first.
+    return OpeningPlace(child: shown ? _notice(ref) : null);
+  }
+
+  Widget _notice(WidgetRef ref) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(
         GerfautSpacing.md,

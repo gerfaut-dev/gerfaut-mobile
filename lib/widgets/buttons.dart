@@ -366,12 +366,20 @@ class _FilledActionState extends State<_FilledAction> {
           ),
         );
 
-    final Widget? leading = busy
-        // Still with animations reduced: the label carries the state.
-        ? const TurningIcon(turning: true, size: _glyph)
-        : widget.icon == null
+    final icon = widget.icon;
+    // A glyph that changes (copy then copied, the spinner of a busy
+    // button) fades into the next in place, as every copy icon does.
+    final Widget? leading = !busy && icon == null
         ? null
-        : Icon(widget.icon, size: _glyph);
+        : FadeInPlace(
+            state: busy ? null : icon,
+            alignment: Alignment.center,
+            child: busy
+                // Still with animations reduced: the label carries the
+                // state.
+                ? const TurningIcon(turning: true, size: _glyph)
+                : Icon(icon, size: _glyph),
+          );
 
     final live = !busy && widget.onPressed != null;
     void press(bool down) {
