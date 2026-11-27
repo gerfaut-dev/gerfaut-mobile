@@ -994,6 +994,9 @@ void main() {
     }
 
     final newAddress = find.widgetWithText(SecondaryButton, 'New address');
+    const shownBeforeNote =
+        'This address may have been shown before. Make sure it was not '
+        'already used or given to someone.';
     const noneInReach =
         'Every address within 200 of the first unused one was shown '
         'before. Use one of them, or wait for a payment to free the next '
@@ -1065,6 +1068,92 @@ void main() {
       expect(newAddress, findsNothing);
     });
 
+    testWidgets('says nothing of an address on its first showing, even once '
+        'the core keeps it revealed', (tester) async {
+      useTallSurface(tester);
+      final bridge = bridgeWith(const AddressList(external: [], internal: []));
+      await tester.pumpWidget(receiveApp(bridge));
+      await tester.pumpAndSettle();
+      expect(bridge.revealCalls, [('w1', 0)]);
+      // Read again since: the core now says index 0 was handed out.
+      expect(bridge.receiveLookaheads.length, greaterThan(1));
+      expect(find.text(shownBeforeNote), findsNothing);
+      expect(newAddress, findsNothing);
+    });
+
+    testWidgets('an address shown in an earlier run is still the one '
+        'offered, with the note', (tester) async {
+      useTallSurface(tester);
+      await tester.pumpWidget(receiveApp(revealedBridge()));
+      await tester.pumpAndSettle();
+      expect(find.text('NEXT UNUSED ADDRESS · INDEX 4'), findsOneWidget);
+      expect(find.text(shownBeforeNote), findsOneWidget);
+    });
+
+    testWidgets('an address seen earlier in the visit, or on a visit '
+        'before, carries the note', (tester) async {
+      useTallSurface(tester);
+      final bridge = bridgeWith(const AddressList(external: [], internal: []));
+      await tester.pumpWidget(
+        ProviderScope(
+          retry: noRetry,
+          overrides: [bridgeProvider.overrideWithValue(bridge)],
+          child: MaterialApp(
+            theme: themeFrom(GerfautTokens.light, Brightness.light),
+            home: Builder(
+              builder: (context) => Scaffold(
+                body: TextButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                      builder: (_) => const ReceiveScreen(walletId: 'w1'),
+                    ),
+                  ),
+                  child: const Text('Open receive'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.tap(find.text('Open receive'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Next address'));
+      await tester.pumpAndSettle();
+      expect(find.text(shownBeforeNote), findsNothing);
+      await tester.tap(find.text('First unused'));
+      await tester.pumpAndSettle();
+      expect(find.text(shownBeforeNote), findsOneWidget);
+
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Open receive'));
+      await tester.pumpAndSettle();
+      expect(find.text('NEXT UNUSED ADDRESS · INDEX 0'), findsOneWidget);
+      expect(find.text(shownBeforeNote), findsOneWidget);
+    });
+
+    testWidgets('a payment in the mempool takes the shown address away, and '
+        'the next one comes without the note', (tester) async {
+      useTallSurface(tester);
+      final bridge = revealedBridge();
+      await tester.pumpWidget(receiveApp(bridge));
+      await tester.pumpAndSettle();
+      expect(find.text(shownBeforeNote), findsOneWidget);
+
+      // A sync finds an unconfirmed payment to index 4 and 5: the core
+      // no longer offers either.
+      bridge.addresses['w1'] = const [
+        AddressEntry(index: 6, address: 'tb1qnext6', used: false),
+      ];
+      ProviderScope.containerOf(tester.element(find.byType(ReceiveScreen)))
+          .read(syncProvider.notifier)
+          .refreshed('w1');
+      await tester.pumpAndSettle();
+      expect(find.text('NEXT UNUSED ADDRESS · INDEX 6'), findsOneWidget);
+      expect(find.text('tb1qgiven4'), findsNothing);
+      expect(find.text(shownBeforeNote), findsNothing);
+    });
+
     testWidgets('hides where the screen can go no further', (tester) async {
       useTallSurface(tester);
       final meta = makeMeta(gapLimit: 500);
@@ -1093,8 +1182,8 @@ void main() {
       expect(newAddress, findsNothing);
     });
 
-    testWidgets('goes to the first address never shown, a new one each '
-        'press', (tester) async {
+    testWidgets('goes to the first address never shown, which needs no '
+        'note and no other way out', (tester) async {
       useTallSurface(tester);
       final bridge = revealedBridge();
       await tester.pumpWidget(receiveApp(bridge));
@@ -1113,16 +1202,13 @@ void main() {
       expect(find.text('tb1qgiven42'), findsOneWidget);
       expect(bridge.revealCalls, [('w1', 6)]);
       expect(find.byType(AddressStatePill), findsNWidgets(3));
-      expect(tester.widget<SecondaryButton>(newAddress).busy, isFalse);
-
-      // Index 6 now counts as handed out: the next press goes past it.
-      await tester.tap(newAddress);
-      await tester.pumpAndSettle();
-      expect(find.text('UNUSED ADDRESS · INDEX 7'), findsOneWidget);
+      expect(find.text(shownBeforeNote), findsNothing);
+      expect(newAddress, findsNothing);
 
       await tester.tap(find.text('First unused'));
       await tester.pumpAndSettle();
       expect(find.text('NEXT UNUSED ADDRESS · INDEX 4'), findsOneWidget);
+      expect(find.text(shownBeforeNote), findsOneWidget);
     });
 
     testWidgets('never offers an address reached with Next address', (

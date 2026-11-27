@@ -88,6 +88,13 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
   /// if it failed to.
   final Set<(String, int)> _shownHere = {};
 
+  /// The address on screen, by wallet and index, and whether it was
+  /// shown before it got there: revealed by an earlier visit or a sync,
+  /// or seen earlier in this visit. Read once, on arrival: the screen
+  /// reveals the address it shows, and that must not count.
+  (String, int)? _onScreen;
+  bool _shownBefore = false;
+
   /// The list last on screen, kept while the next one is read: a longer
   /// peek is another request, and the address stays in view meanwhile.
   List<AddressEntry>? _shown;
@@ -155,6 +162,10 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
   /// and says it was always given.
   void _keepRevealed(AddressEntry entry) {
     final key = (widget.walletId, entry.index);
+    if (key != _onScreen) {
+      _onScreen = key;
+      _shownBefore = entry.revealed || _shownHere.contains(key);
+    }
     _shownHere.add(key);
     if (entry.revealed) return;
     if (!_revealAsked.add(key)) return;
@@ -247,6 +258,9 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
                       entry: entry,
                       single: single,
                       oneAddress: oneAddress,
+                      // One address to give is always the one shown
+                      // before: nothing to warn about.
+                      shownBefore: !oneAddress && _shownBefore,
                       offset: _offset,
                       gap: unusedInARow(list!, min(_offset, list.length - 1)),
                       hasNext: hasNext,
@@ -357,6 +371,7 @@ class _AddressBlock extends StatelessWidget {
     required this.entry,
     required this.single,
     required this.oneAddress,
+    required this.shownBefore,
     required this.offset,
     required this.gap,
     required this.hasNext,
@@ -376,6 +391,10 @@ class _AddressBlock extends StatelessWidget {
   /// Only one address to give, a watched one or a descriptor without a
   /// wildcard: no way to skip ahead.
   final bool oneAddress;
+
+  /// Shown before it reached the screen: on an earlier visit, after a
+  /// restart too, or earlier in this one.
+  final bool shownBefore;
   final int offset;
 
   /// The longest run of unused addresses before the one on offer.
@@ -462,6 +481,18 @@ class _AddressBlock extends StatelessWidget {
             child: SelectableText(entry.address, style: addressStyle),
           ),
         ),
+        // Still the first address nobody paid, so still the one offered:
+        // whoever was shown it may have kept it. Read before copying; the
+        // choice is the user's, so amber, and no block.
+        if (shownBefore) ...[
+          const SizedBox(height: GerfautSpacing.md),
+          const GerfautNotice(
+            tone: NoticeTone.info,
+            message:
+                'This address may have been shown before. Make sure it was '
+                'not already used or given to someone.',
+          ),
+        ],
         const SizedBox(height: GerfautSpacing.md),
         PrimaryButton(
           label: copied ? 'Copied' : 'Copy address',
@@ -490,11 +521,10 @@ class _AddressBlock extends StatelessWidget {
               ],
             ],
           ),
-          // Shown on an address handed out before: the screen starts at
-          // the oldest unused one, which may already sit in someone's
-          // records. Not where the screen can go no further, nor once it
-          // found none within reach.
-          if (entry.revealed && hasNext && newAddress is! _NewAddressNone) ...[
+          // With the note: the way to an address nobody was shown, for
+          // whoever would rather not use this one. Not where the screen
+          // can go no further, nor once it found none within reach.
+          if (shownBefore && hasNext && newAddress is! _NewAddressNone) ...[
             const SizedBox(height: GerfautSpacing.sm),
             SecondaryButton(
               label: 'New address',
