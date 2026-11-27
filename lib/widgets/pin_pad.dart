@@ -1,7 +1,6 @@
 import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -26,18 +25,24 @@ List<int> shuffledDigits(Random random) => [...phoneOrder]..shuffle(random);
 /// Empty, it says what to do, in the same height: the pad under it does
 /// not move as the first digit lands.
 class PinDots extends StatelessWidget {
-  const PinDots({super.key, required this.count});
+  const PinDots({super.key, required this.count, this.refused = false});
 
   final int count;
+
+  /// The digits were just refused: the dots turn the alert colour,
+  /// with no shake, until the next key.
+  final bool refused;
 
   @override
   Widget build(BuildContext context) {
     final tokens = Theme.of(context).extension<GerfautTokens>()!;
-    final said = switch (count) {
-      0 => 'PIN, no digits entered',
-      1 => 'PIN, 1 digit entered',
-      _ => 'PIN, $count digits entered',
-    };
+    final said = refused
+        ? 'PIN refused'
+        : switch (count) {
+            0 => 'PIN, no digits entered',
+            1 => 'PIN, 1 digit entered',
+            _ => 'PIN, $count digits entered',
+          };
     return Semantics(
       container: true,
       label: said,
@@ -65,7 +70,7 @@ class PinDots extends StatelessWidget {
                           width: 10,
                           height: 10,
                           decoration: BoxDecoration(
-                            color: tokens.text,
+                            color: refused ? tokens.alert : tokens.text,
                             shape: BoxShape.circle,
                           ),
                         ),
@@ -238,14 +243,12 @@ class _PadKeyState extends State<_PadKey> {
     if (_pressed != pressed) setState(() => _pressed = pressed);
   }
 
-  void _tap() {
-    HapticFeedback.selectionClick();
-    widget.onTap();
-  }
+  // No click under a key: the phone answers a choice that changes and
+  // a PIN refused, not each button pressed.
+  void _tap() => widget.onTap();
 
   void _longPress() {
     _press(false);
-    HapticFeedback.mediumImpact();
     widget.onLongPress!();
   }
 

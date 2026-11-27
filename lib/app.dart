@@ -30,6 +30,7 @@ import 'widgets/price_credit.dart';
 import 'src/prefs.dart';
 import 'src/share.dart';
 import 'widgets/readable_width.dart';
+import 'widgets/motion.dart';
 
 /// Root widget: both Toundra themes, light by default, and the startup
 /// bootstrap (Rust bridge + encrypted vault) before the home screen.
@@ -136,6 +137,7 @@ class _GerfautAppState extends ConsumerState<GerfautApp> {
       theme: themeFrom(GerfautTokens.light, Brightness.light),
       darkTheme: themeFrom(GerfautTokens.dark, Brightness.dark),
       themeMode: themeMode,
+      themeAnimationStyle: GerfautMotion.theme,
       home: _ready == null
           ? const _Hydrated(child: _Gate())
           : _BootstrapGate(
@@ -388,22 +390,32 @@ class _GateState extends ConsumerState<_Gate> with WidgetsBindingObserver {
       // shown, and the calculator stands in front of it. A PIN-shaped
       // number reads the settings again, and settings that load bring
       // the lock, behind the same calculator.
-      if (!disguise.loaded) return const _StartupScreen();
+      if (!disguise.loaded) return _root('start', const _StartupScreen());
       if (disguise.disguised) {
-        return CalculatorScreen(
-          onPin: (_) async => ref.invalidate(settingsProvider),
+        return _root(
+          'calculator',
+          CalculatorScreen(
+            onPin: (_) async => ref.invalidate(settingsProvider),
+          ),
         );
       }
-      return _StartupErrorScreen(
-        error: settings.error!,
-        onRetry: () => ref.invalidate(settingsProvider),
+      return _root(
+        'error',
+        _StartupErrorScreen(
+          error: settings.error!,
+          onRetry: () => ref.invalidate(settingsProvider),
+        ),
       );
     }
-    if (!lock.loaded || !disguise.loaded) return const _StartupScreen();
+    if (!lock.loaded || !disguise.loaded) {
+      return _root('start', const _StartupScreen());
+    }
     if (lock.locked) {
       // The calculator never asks for a biometric: a system prompt
       // over a calculator would give the app away.
-      return disguise.disguised ? const CalculatorScreen() : const LockScreen();
+      return disguise.disguised
+          ? _root('calculator', const CalculatorScreen())
+          : _root('lock', const LockScreen());
     }
 
     // The tour only ever stands in front of an empty vault: someone
@@ -412,9 +424,9 @@ class _GateState extends ConsumerState<_Gate> with WidgetsBindingObserver {
     final hydrated = ref.watch(prefsHydratedProvider);
     final seen = ref.watch(onboardingSeenProvider);
     if (hydrated && !seen && wallets != null && wallets.isEmpty) {
-      return const WelcomeScreen();
+      return _root('welcome', const WelcomeScreen());
     }
-    return const HomeScreen();
+    return _root('home', const HomeScreen());
   }
 }
 
@@ -445,20 +457,26 @@ class _BootstrapGate extends ConsumerWidget {
       future: ready,
       builder: (context, snapshot) {
         if (snapshot.connectionState != ConnectionState.done) {
-          return const _StartupScreen();
+          return _root('start', const _StartupScreen());
         }
         if (snapshot.hasError) {
-          if (!disguise.loaded) return const _StartupScreen();
+          if (!disguise.loaded) return _root('start', const _StartupScreen());
           if (disguise.disguised) {
-            return CalculatorScreen(onPin: (_) => onRetryBehind());
+            return _root(
+              'calculator',
+              CalculatorScreen(onPin: (_) => onRetryBehind()),
+            );
           }
-          return _StartupErrorScreen(
-            error: snapshot.error!,
-            onRetry: onRetry,
-            onStartOver: onStartOver,
+          return _root(
+            'error',
+            _StartupErrorScreen(
+              error: snapshot.error!,
+              onRetry: onRetry,
+              onStartOver: onStartOver,
+            ),
           );
         }
-        return const _Hydrated(child: _Gate());
+        return _root('gate', const _Hydrated(child: _Gate()));
       },
     );
   }
@@ -640,6 +658,16 @@ ThemeData themeFrom(GerfautTokens tokens, Brightness brightness) {
     extensions: [tokens],
   );
 }
+
+/// A root screen standing in for another. The lock and the calculator
+/// appear at once, so nothing of the app shows through them for a
+/// frame; every other root screen, the lock leaving included, fades
+/// in place of the last one.
+Widget _root(String state, Widget screen) => ScreenFade(
+  state: state,
+  cut: state == 'lock' || state == 'calculator',
+  child: screen,
+);
 
 /// The quiet screen of a starting app. It names the vault only once the
 /// platform has said the app is not disguised: a calculator that opened

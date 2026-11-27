@@ -33,6 +33,10 @@ class _LockScreenState extends ConsumerState<LockScreen> {
   /// keyboard never sees it.
   String _pin = '';
 
+  /// How many digits the PIN just refused had: drawn in the alert
+  /// colour until the next key.
+  int _refused = 0;
+
   /// Where the digits of the pad stand, drawn anew each time the
   /// screen opens and after each PIN refused.
   late List<int> _shuffled;
@@ -119,6 +123,7 @@ class _LockScreenState extends ConsumerState<LockScreen> {
 
   void _digit(int digit) {
     if (!_padOpen || _pin.length >= pinMaxLength) return;
+    _refused = 0;
     setState(() {
       _pin += '$digit';
       _message = null;
@@ -173,6 +178,7 @@ class _LockScreenState extends ConsumerState<LockScreen> {
       final kind = ref.read(lockProvider).lock?.kind ?? LockKind.pin;
       setState(() {
         _controller.clear();
+        _refused = _pin.length;
         _pin = '';
         // Someone who watched where the finger went learns nothing
         // they can use on the next try.
@@ -181,6 +187,9 @@ class _LockScreenState extends ConsumerState<LockScreen> {
             ? null
             : 'Wrong ${kind == LockKind.pin ? 'PIN' : 'password'}';
       });
+      // The one impact of the app: the phone says no as the dots turn
+      // the alert colour.
+      HapticFeedback.mediumImpact();
       if (verdict.retryAfterSecs > 0) _startCountdown(verdict.retryAfterSecs);
     } catch (error) {
       if (mounted) setState(() => _message = '$error');
@@ -317,7 +326,10 @@ class _LockScreenState extends ConsumerState<LockScreen> {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         ...head,
-                        PinDots(count: _pin.length),
+                        PinDots(
+                          count: _pin.isEmpty ? _refused : _pin.length,
+                          refused: _pin.isEmpty && _refused > 0,
+                        ),
                         if (note != null) ...[
                           const SizedBox(height: GerfautSpacing.sm),
                           note,

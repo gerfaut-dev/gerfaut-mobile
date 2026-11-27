@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -680,7 +681,11 @@ class _WalletRow extends StatelessWidget {
                   borderRadius: BorderRadius.circular(GerfautRadius.sm),
                 ),
                 onChanged: enabled
-                    ? (value) => onChanged!(value ?? false)
+                    ? (value) {
+                        // The click of a box ticked or cleared.
+                        HapticFeedback.selectionClick();
+                        onChanged!(value ?? false);
+                      }
                     : null,
               ),
               const SizedBox(width: GerfautSpacing.xs),
