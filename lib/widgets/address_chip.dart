@@ -2,16 +2,17 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../src/format.dart';
 import '../theme/tokens.dart';
 import 'fitted_text.dart';
 import 'focus_ring.dart';
+import 'motion.dart';
 
 /// Address or txid shown inline: Givre surface, mono 13px, truncated in
 /// the middle only. Tap copies the full value with explicit feedback —
-/// the icon flips to a check for 1.5 s and the word `Copied` appears.
+/// the icon fades to a check for [GerfautMotion.hold] and the word
+/// `Copied` appears.
 ///
 /// The chip keeps the width it had while that word is showing. It sits
 /// in a [Wrap] on the transaction detail, and a chip that grows pushes
@@ -65,7 +66,7 @@ class _AddressChipState extends State<AddressChip> {
     await Clipboard.setData(ClipboardData(text: widget.value));
     if (!mounted) return;
     setState(() => _copied = true);
-    await Future<void>.delayed(const Duration(milliseconds: 1500));
+    await Future<void>.delayed(GerfautMotion.hold);
     if (mounted) setState(() => _copied = false);
   }
 
@@ -174,8 +175,10 @@ class _AddressChipState extends State<AddressChip> {
                         ),
                       ),
                       const SizedBox(width: GerfautSpacing.xs),
-                      Icon(
-                        _copied ? LucideIcons.check : LucideIcons.copy,
+                      // Copy and check share one 14 px place, so the
+                      // fade between them never moves the chip's width.
+                      CopyGlyph(
+                        copied: _copied,
                         size: 14,
                         color: tokens.textMuted,
                       ),

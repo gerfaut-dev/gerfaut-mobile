@@ -12,6 +12,7 @@ import '../widgets/address_chip.dart';
 import '../widgets/app_bar.dart';
 import '../widgets/facts.dart';
 import '../widgets/load_failure.dart';
+import '../widgets/motion.dart';
 import '../widgets/notice.dart';
 import '../widgets/status_pill.dart';
 import '../widgets/toast.dart';
@@ -57,11 +58,16 @@ class PolicyScreen extends ConsumerWidget {
               switch (policy) {
                 // A read that failed says so, whatever it carried before;
                 // once Try again is under way, the placeholder shows it.
-                AsyncError(:final error, isLoading: false) => LoadFailure(
-                  what: 'The policy',
-                  error: error,
-                  centered: false,
-                  onRetry: () => ref.invalidate(policyProvider(walletId)),
+                // The failure and the placeholder fade into one another;
+                // the cards stay out of any fade, being most of the page.
+                AsyncError(:final error, isLoading: false) => FadeInPlace(
+                  state: 'error',
+                  child: LoadFailure(
+                    what: 'The policy',
+                    error: error,
+                    centered: false,
+                    onRetry: () => ref.invalidate(policyProvider(walletId)),
+                  ),
                 ),
                 // Whatever the page has read stays up: a sync refetches the
                 // policy, and a refresh under way still carries the last
@@ -71,7 +77,10 @@ class PolicyScreen extends ConsumerWidget {
                   snapshot: snapshot,
                   wallet: meta?.kind,
                 ),
-                _ => const PolicyPlaceholder(),
+                _ => const FadeInPlace(
+                  state: 'loading',
+                  child: PolicyPlaceholder(),
+                ),
               },
             ],
           ),
@@ -603,25 +612,32 @@ class _DescriptorSectionState extends State<_DescriptorSection> {
             ),
           ),
         ),
-        if (_open) ...[
-          const SizedBox(height: GerfautSpacing.xs),
-          _CodeBox(
-            text: widget.descriptor,
-            style: tokens.data,
-            copyTooltip: 'Copy descriptor',
-          ),
-          const SizedBox(height: GerfautSpacing.sm),
-          Text(
-            'Read as',
-            style: tokens.label.copyWith(color: tokens.textMuted),
-          ),
-          const SizedBox(height: GerfautSpacing.xs),
-          _CodeBox(
-            text: widget.policy,
-            style: tokens.data.copyWith(color: tokens.textMuted),
-            copyTooltip: 'Copy policy',
-          ),
-        ],
+        // The descriptor opens its place rather than pushing the page
+        // down in one jump.
+        OpeningPlace(child: _open ? _disclosed(tokens) : null),
+      ],
+    );
+  }
+
+  Widget _disclosed(GerfautTokens tokens) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const SizedBox(height: GerfautSpacing.xs),
+        _CodeBox(
+          text: widget.descriptor,
+          style: tokens.data,
+          copyTooltip: 'Copy descriptor',
+        ),
+        const SizedBox(height: GerfautSpacing.sm),
+        Text('Read as', style: tokens.label.copyWith(color: tokens.textMuted)),
+        const SizedBox(height: GerfautSpacing.xs),
+        _CodeBox(
+          text: widget.policy,
+          style: tokens.data.copyWith(color: tokens.textMuted),
+          copyTooltip: 'Copy policy',
+        ),
       ],
     );
   }
@@ -662,7 +678,7 @@ class _CodeBoxState extends ConsumerState<_CodeBox> {
     setState(() => _copied = true);
     ScaffoldMessenger.of(context)
         .showSnackBar(Toast(copiedWords('Copied', timed: timed)));
-    await Future<void>.delayed(const Duration(milliseconds: 1500));
+    await Future<void>.delayed(GerfautMotion.hold);
     if (mounted) setState(() => _copied = false);
   }
 
@@ -695,10 +711,7 @@ class _CodeBoxState extends ConsumerState<_CodeBox> {
             onPressed: _copy,
             tooltip: widget.copyTooltip,
             iconSize: 16,
-            icon: Icon(
-              _copied ? LucideIcons.check : LucideIcons.copy,
-              color: tokens.textMuted,
-            ),
+            icon: CopyGlyph(copied: _copied, color: tokens.textMuted),
           ),
         ),
       ],

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../src/state.dart';
 import '../../theme/tokens.dart';
 import '../../widgets/load_failure.dart';
+import '../../widgets/motion.dart';
 
 /// What a section shows in place of its controls until the vault's
 /// settings are in, and when they cannot be read.
@@ -24,17 +25,22 @@ class SettingsPending extends ConsumerWidget {
     final tokens = Theme.of(context).extension<GerfautTokens>()!;
     final settings = ref.watch(settingsProvider);
     // A retry is loading again with the old error still behind it.
-    if (settings.hasError && !settings.isLoading) {
-      return LoadFailure(
-        what: what,
-        error: settings.error,
-        onRetry: () => ref.invalidate(settingsProvider),
-        centered: false,
-      );
-    }
-    return Text(
-      'Loading…',
-      style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+    final failed = settings.hasError && !settings.isLoading;
+    // Loading and failure are two states of one block: the one fades
+    // into the other where it stands, rather than cutting.
+    return FadeInPlace(
+      state: failed,
+      child: failed
+          ? LoadFailure(
+              what: what,
+              error: settings.error,
+              onRetry: () => ref.invalidate(settingsProvider),
+              centered: false,
+            )
+          : Text(
+              'Loading…',
+              style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+            ),
     );
   }
 }

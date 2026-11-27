@@ -16,6 +16,7 @@ import '../widgets/buttons.dart';
 import '../widgets/count_badge.dart';
 import '../widgets/fitted_text.dart';
 import '../widgets/load_failure.dart';
+import '../widgets/motion.dart';
 import '../widgets/notice.dart';
 import '../widgets/status_pill.dart';
 import '../widgets/toast.dart';
@@ -180,7 +181,7 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
     if (!mounted) return;
     setState(() => _copied = true);
     ScaffoldMessenger.of(context).showSnackBar(Toast('Copied'));
-    await Future<void>.delayed(const Duration(milliseconds: 1500));
+    await Future<void>.delayed(GerfautMotion.hold);
     if (mounted) setState(() => _copied = false);
   }
 
@@ -238,17 +239,25 @@ class _ReceiveScreenState extends ConsumerState<ReceiveScreen> {
       appBar: GerfautAppBar.text('Receive'),
       body: SafeArea(
         child: ReadableWidth(
+          // The address page scrolls and stays out of any fade; only the
+          // bounded line standing in for it fades between its states.
           child: addresses.hasError
-              ? LoadFailure(
-                  what: 'The receive address',
-                  error: addresses.error,
-                  onRetry: () => ref.invalidate(receiveProvider),
+              ? FadeInPlace(
+                  state: 'error',
+                  child: LoadFailure(
+                    what: 'The receive address',
+                    error: addresses.error,
+                    onRetry: () => ref.invalidate(receiveProvider),
+                  ),
                 )
               : entry == null
-              ? Center(
-                  child: Text(
-                    'Deriving address…',
-                    style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+              ? FadeInPlace(
+                  state: 'loading',
+                  child: Center(
+                    child: Text(
+                      'Deriving address…',
+                      style: tokens.bodySmall.copyWith(color: tokens.textMuted),
+                    ),
                   ),
                 )
               : ListView(
