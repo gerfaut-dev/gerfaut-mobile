@@ -159,7 +159,7 @@ class _AboutSectionState extends ConsumerState<AboutSection> {
   }
 
   /// The release check: what it found, the button, the automatic
-  /// switch. Only where Gerfaut asks GitHub for its releases.
+  /// switch. Only where Gerfaut asks the site for its releases.
   List<Widget> _updateRows(
     GerfautTokens tokens,
     UpdateStatus? result,
@@ -173,7 +173,7 @@ class _AboutSectionState extends ConsumerState<AboutSection> {
         Padding(
           padding: const EdgeInsets.only(bottom: GerfautSpacing.sm),
           child: Text(
-            'Could not reach the release page. Try again later.',
+            'Could not check for updates. Try again later.',
             style: tokens.bodySmall.copyWith(color: tokens.textMuted),
           ),
         ),
@@ -186,11 +186,14 @@ class _AboutSectionState extends ConsumerState<AboutSection> {
             style: tokens.bodySmall.copyWith(color: tokens.textMuted),
           ),
         ),
-      if (result != null && newer == null)
+      // Worded as on the desktop; the version is the one the site names.
+      if (result != null)
         Padding(
           padding: const EdgeInsets.only(bottom: GerfautSpacing.sm),
           child: Text(
-            'You are up to date.',
+            newer == null
+                ? 'You are up to date.'
+                : 'Gerfaut $newer is available.',
             style: tokens.bodySmall.copyWith(color: tokens.textMuted),
           ),
         ),
@@ -231,10 +234,10 @@ class _AboutSectionState extends ConsumerState<AboutSection> {
         title: 'Check automatically',
         // Worded as on the desktop; the disguise is the phone's alone.
         hint:
-            'Asks GitHub for the latest release at most once a day while '
-            'Gerfaut is unlocked, and downloads nothing. With a .onion '
-            'node it goes through Tor or not at all, and never while the '
-            'app is disguised.',
+            'Asks gerfaut-wallet.com for the latest version at most once '
+            'a day while Gerfaut is unlocked, and downloads nothing. '
+            'With a .onion node it goes through Tor or not at all, and '
+            'never while the app is disguised.',
         value: automatic,
         onChanged: (on) => ref.read(updateProvider.notifier).setAutomatic(on),
       ),

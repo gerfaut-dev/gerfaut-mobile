@@ -1143,8 +1143,8 @@ pub async fn retry_price() -> String {
     }
 }
 
-/// GitHub repository whose releases this build follows.
-const UPDATE_REPO: &str = "gerfaut-wallet/gerfaut-mobile";
+/// The file of the site this build reads its latest release from.
+const UPDATE_FEED: gerfaut_core::updates::ReleaseFeed = gerfaut_core::updates::ReleaseFeed::Android;
 
 /// What to say about releases to someone running `current_version`, as
 /// the core decides it from what the vault keeps. Reads only. Returns a
@@ -1159,7 +1159,7 @@ pub async fn update_status(current_version: String) -> String {
 /// and says what to announce. Returns a serialized `UpdateStatus`.
 pub async fn update_session(current_version: String) -> String {
     let manager = try_json!(manager());
-    to_json(&manager.update_session(UPDATE_REPO, &current_version).await)
+    to_json(&manager.update_session(UPDATE_FEED, &current_version).await)
 }
 
 /// Checks the latest published release now, due or not. Returns a
@@ -1170,7 +1170,7 @@ pub async fn update_session(current_version: String) -> String {
 /// it does not go at all and comes back as `tor`.
 pub async fn check_update(current_version: String) -> String {
     let manager = try_json!(manager());
-    match manager.check_update(UPDATE_REPO, &current_version).await {
+    match manager.check_update(UPDATE_FEED, &current_version).await {
         Ok(status) => to_json(&status),
         Err(e) => core_error_json(&e),
     }
