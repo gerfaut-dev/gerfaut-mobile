@@ -69,10 +69,41 @@ void main() {
         _app(const FadeInPlace(state: 'data', child: Text('2 000 sats'))),
       );
       await tester.pump(GerfautMotion.base ~/ 2);
-      expect(find.text('Loading…'), findsOne);
+      // Midway, the old state still paints, half faded, but it is no
+      // longer what the block shows: not found, not read out, not hit.
+      final leaving = find.text('Loading…', skipOffstage: false);
+      final opacity = tester
+          .widget<FadeTransition>(
+            find
+                .ancestor(
+                  of: leaving,
+                  matching: find.byType(FadeTransition, skipOffstage: false),
+                )
+                .first,
+          )
+          .opacity
+          .value;
+      expect(opacity, inExclusiveRange(0, 1));
+      expect(find.text('Loading…'), findsNothing);
+      expect(find.bySemanticsLabel('Loading…'), findsNothing);
       expect(find.text('2 000 sats'), findsOne);
       await tester.pumpAndSettle();
-      expect(find.text('Loading…'), findsNothing);
+      expect(find.text('Loading…', skipOffstage: false), findsNothing);
+    });
+
+    testWidgets('takes back a state that returns while it fades out', (
+      tester,
+    ) async {
+      Widget block(String state) =>
+          _app(FadeInPlace(state: state, child: Text(state)));
+      await tester.pumpWidget(block('loading'));
+      await tester.pumpWidget(block('data'));
+      await tester.pumpWidget(block('loading'));
+      expect(tester.takeException(), isNull);
+      expect(find.text('loading'), findsOne);
+      await tester.pumpAndSettle();
+      expect(find.text('data', skipOffstage: false), findsNothing);
+      expect(find.text('loading', skipOffstage: false), findsOne);
     });
   });
 

@@ -15,7 +15,7 @@ import '../theme/tokens.dart';
 ///
 /// Never around a whole page or a list that scrolls: an opacity over a
 /// large surface is the costly part of a fade.
-class FadeInPlace extends StatelessWidget {
+class FadeInPlace extends StatefulWidget {
   const FadeInPlace({
     super.key,
     required this.state,
@@ -29,15 +29,72 @@ class FadeInPlace extends StatelessWidget {
   final AlignmentGeometry alignment;
 
   @override
+  State<FadeInPlace> createState() => _FadeInPlaceState();
+}
+
+class _FadeInPlaceState extends State<FadeInPlace> {
+  /// Counts the changes of state. The child is keyed on it rather than
+  /// on the state itself: a state that comes back while it is still
+  /// fading out (loading, content, loading) is a new child, never a
+  /// second one under the same key.
+  int _change = 0;
+
+  @override
+  void didUpdateWidget(FadeInPlace old) {
+    super.didUpdateWidget(old);
+    if (old.state != widget.state) _change++;
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final alignment = widget.alignment;
     return AnimatedSwitcher(
       duration: GerfautMotion.base,
       switchInCurve: GerfautMotion.ease,
       switchOutCurve: GerfautMotion.ease.flipped,
-      layoutBuilder: (current, previous) =>
-          Stack(alignment: alignment, children: [...previous, ?current]),
-      child: KeyedSubtree(key: ValueKey<Object?>(state), child: child),
+      // Every child keeps the same wrapper, leaving or not, so the one
+      // that starts leaving keeps its element and its state.
+      layoutBuilder: (current, previous) => Stack(
+        alignment: alignment,
+        children: [
+          for (final old in previous)
+            _Stage(key: old.key, leaving: true, child: old),
+          if (current != null)
+            _Stage(key: current.key, leaving: false, child: current),
+        ],
+      ),
+      child: KeyedSubtree(key: ValueKey<int>(_change), child: widget.child),
     );
+  }
+}
+
+/// Where a child of a fade stands. The one leaving still paints while it
+/// fades out, but it is no longer what the block shows: it takes no
+/// touch, is not read out a second time beside its successor, and is
+/// not found as onstage content, as with [Offstage] or a hidden
+/// [Overlay] entry.
+class _Stage extends StatelessWidget {
+  const _Stage({super.key, required this.leaving, required this.child});
+
+  final bool leaving;
+  final Widget child;
+
+  @override
+  StatelessElement createElement() => _StageElement(this);
+
+  @override
+  Widget build(BuildContext context) => IgnorePointer(
+    ignoring: leaving,
+    child: ExcludeSemantics(excluding: leaving, child: child),
+  );
+}
+
+class _StageElement extends StatelessElement {
+  _StageElement(_Stage super.widget);
+
+  @override
+  void debugVisitOnstageChildren(ElementVisitor visitor) {
+    if (!(widget as _Stage).leaving) super.debugVisitOnstageChildren(visitor);
   }
 }
 
@@ -71,14 +128,31 @@ class CopyGlyph extends StatelessWidget {
 ///
 /// With animations reduced the place opens at once and only the fade is
 /// left. Never around a list that scrolls.
-class OpeningPlace extends StatelessWidget {
+class OpeningPlace extends StatefulWidget {
   const OpeningPlace({super.key, required this.child});
 
   final Widget? child;
 
   @override
+  State<OpeningPlace> createState() => _OpeningPlaceState();
+}
+
+class _OpeningPlaceState extends State<OpeningPlace> {
+  /// Counts the openings and closings, as [FadeInPlace] counts its
+  /// changes: a note that comes back while it is still closing is a new
+  /// child, never a second one under the same key.
+  int _change = 0;
+
+  @override
+  void didUpdateWidget(OpeningPlace old) {
+    super.didUpdateWidget(old);
+    if ((old.child == null) != (widget.child == null)) _change++;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final child = this.child;
+    final child = widget.child;
+    final key = ValueKey<int>(_change);
     return AnimatedSize(
       duration: GerfautMotion.reduced(context)
           ? Duration.zero
@@ -96,13 +170,20 @@ class OpeningPlace extends StatelessWidget {
           alignment: AlignmentDirectional.topStart,
           children: [
             for (final old in previous)
-              PositionedDirectional(top: 0, start: 0, end: 0, child: old),
-            ?current,
+              PositionedDirectional(
+                key: old.key,
+                top: 0,
+                start: 0,
+                end: 0,
+                child: _Stage(leaving: true, child: old),
+              ),
+            if (current != null)
+              _Stage(key: current.key, leaving: false, child: current),
           ],
         ),
         child: child == null
-            ? const SizedBox(key: ValueKey(false), width: double.infinity)
-            : KeyedSubtree(key: const ValueKey(true), child: child),
+            ? SizedBox(key: key, width: double.infinity)
+            : KeyedSubtree(key: key, child: child),
       ),
     );
   }
@@ -356,17 +437,12 @@ class _ScreenFadeState extends State<ScreenFade>
 
   /// The same shape for the screen that stays and the one that leaves,
   /// so a screen that starts leaving keeps its element and its state.
-  Widget _slot(ScreenFade screen, {required bool leaving}) => KeyedSubtree(
+  Widget _slot(ScreenFade screen, {required bool leaving}) => _Stage(
     key: ValueKey<Object>(screen.state),
-    child: IgnorePointer(
-      ignoring: leaving,
-      child: ExcludeSemantics(
-        excluding: leaving,
-        child: FadeTransition(
-          opacity: leaving ? _eased : kAlwaysCompleteAnimation,
-          child: screen.child,
-        ),
-      ),
+    leaving: leaving,
+    child: FadeTransition(
+      opacity: leaving ? _eased : kAlwaysCompleteAnimation,
+      child: screen.child,
     ),
   );
 

@@ -990,11 +990,15 @@ void main() {
     await tester.tap(find.text('Broadcast').last);
     await tester.pump();
 
-    // The lock takes the screen away while the transaction travels.
+    // The lock takes the screen away while the transaction travels; the
+    // app keeps its theme, and the dialog still closing is drawn in it.
     await tester.pumpWidget(
       UncontrolledProviderScope(
         container: container,
-        child: const MaterialApp(home: SizedBox()),
+        child: MaterialApp(
+          theme: themeFrom(GerfautTokens.light, Brightness.light),
+          home: const SizedBox(),
+        ),
       ),
     );
     sent.complete(

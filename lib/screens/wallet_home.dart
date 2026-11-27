@@ -20,6 +20,7 @@ import '../widgets/fitted_text.dart';
 import '../widgets/icon_chip.dart';
 import '../widgets/load_failure.dart';
 import '../widgets/mask_unsaved_notice.dart';
+import '../widgets/motion.dart';
 import '../widgets/overflow_menu.dart';
 import '../widgets/status_pill.dart';
 import '../widgets/sync_button.dart';
@@ -165,6 +166,9 @@ class _WalletHomeScreenState extends ConsumerState<WalletHomeScreen> {
           children: [
             const ReadableWidth(child: MaskUnsavedNotice()),
             Expanded(
+              // The loaded page stays out of any fade: an opacity over a
+              // whole page and its lists is the costly part. Only the
+              // bounded line standing in for it fades between its states.
               child: loaded != null
                   ? _buildLoaded(
                       loaded,
@@ -172,22 +176,26 @@ class _WalletHomeScreenState extends ConsumerState<WalletHomeScreen> {
                       refreshing: snapshot.isLoading,
                     )
                   : ReadableWidth(
-                      child: switch (snapshot) {
-                        AsyncError(:final error) => LoadFailure(
-                          what: 'This wallet',
-                          error: error,
-                          onRetry: () =>
-                              ref.invalidate(snapshotProvider(widget.walletId)),
-                        ),
-                        _ => Center(
-                          child: Text(
-                            'Loading wallet…',
-                            style: tokens.bodySmall.copyWith(
-                              color: tokens.textMuted,
+                      child: FadeInPlace(
+                        state: snapshot is AsyncError ? 'error' : 'loading',
+                        child: switch (snapshot) {
+                          AsyncError(:final error) => LoadFailure(
+                            what: 'This wallet',
+                            error: error,
+                            onRetry: () => ref.invalidate(
+                              snapshotProvider(widget.walletId),
                             ),
                           ),
-                        ),
-                      },
+                          _ => Center(
+                            child: Text(
+                              'Loading wallet…',
+                              style: tokens.bodySmall.copyWith(
+                                color: tokens.textMuted,
+                              ),
+                            ),
+                          ),
+                        },
+                      ),
                     ),
             ),
           ],
@@ -241,7 +249,7 @@ class _WalletHomeScreenState extends ConsumerState<WalletHomeScreen> {
       transactions: snapshot.txs.length,
       utxos: ref.watch(utxosProvider(widget.walletId)).value?.length ?? 0,
     );
-    return DefaultTabController(
+    return GerfautTabController(
       length: 2,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -455,12 +463,17 @@ class _PinnedTabs extends SliverPersistentHeaderDelegate {
 /// across a switch of tab, and its top clear of the tabs. [rows] is the
 /// list; without rows, [fill] takes what is left of the screen.
 class _TabPane extends StatelessWidget {
-  const _TabPane({required this.storage, this.rows, this.fill})
-    : assert((rows == null) != (fill == null));
+  const _TabPane({required this.storage, this.rows, this.fill, this.fillState})
+    : assert((rows == null) != (fill == null)),
+      assert((fill == null) == (fillState == null));
 
   final String storage;
   final Widget? rows;
   final Widget? fill;
+
+  /// What [fill] stands for (loading, empty, first sync, failure): a new
+  /// one fades into the last in place. The rows never fade.
+  final Object? fillState;
 
   @override
   Widget build(BuildContext context) {
@@ -470,7 +483,11 @@ class _TabPane extends StatelessWidget {
         SliverOverlapInjector(
           handle: NestedScrollView.sliverOverlapAbsorberHandleFor(context),
         ),
-        rows ?? SliverFillRemaining(hasScrollBody: false, child: fill),
+        rows ??
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: FadeInPlace(state: fillState, child: fill!),
+            ),
       ],
     );
   }
@@ -725,6 +742,7 @@ class _TxList extends ConsumerWidget {
     if (txs.isEmpty && !truncated) {
       return _TabPane(
         storage: 'transactions',
+        fillState: firstSync ? 'syncing' : 'empty',
         fill: firstSync
             ? const _FirstSyncList()
             : const EmptyState(
@@ -960,6 +978,7 @@ class _UtxoList extends ConsumerWidget {
       if (utxos.hasError) {
         return _TabPane(
           storage: 'utxos',
+          fillState: 'error',
           fill: LoadFailure(
             what: 'The UTXOs',
             error: utxos.error,
@@ -969,6 +988,7 @@ class _UtxoList extends ConsumerWidget {
       }
       return _TabPane(
         storage: 'utxos',
+        fillState: 'loading',
         fill: Center(
           child: Text(
             'Loading UTXOs…',
@@ -980,6 +1000,7 @@ class _UtxoList extends ConsumerWidget {
     if (value.isEmpty) {
       return _TabPane(
         storage: 'utxos',
+        fillState: firstSync ? 'syncing' : 'empty',
         fill: firstSync
             ? const _FirstSyncList()
             : const EmptyState(

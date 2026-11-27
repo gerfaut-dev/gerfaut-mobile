@@ -42,7 +42,7 @@ void main() {
     await tester.pump();
     // Still synced: the newer words stand alone, with no older line
     // fading out under them.
-    expect(find.textContaining('Synced'), findsOneWidget);
+    expect(find.textContaining('Synced', skipOffstage: false), findsOneWidget);
   });
 
   testWidgets('the sync line fades when its state changes', (tester) async {
@@ -50,11 +50,13 @@ void main() {
     await tester.pumpWidget(_host(SyncIndicator(stamp: stamp, syncing: false)));
     await tester.pumpWidget(_host(SyncIndicator(stamp: stamp, syncing: true)));
     await tester.pump(GerfautMotion.base ~/ 2);
-    // Midway, the synced line is still fading out under the syncing one.
-    expect(find.textContaining('Synced'), findsOneWidget);
+    // Midway, the synced line is still fading out under the syncing
+    // one, which alone reads as the line.
+    expect(find.textContaining('Synced', skipOffstage: false), findsOneWidget);
+    expect(find.textContaining('Synced'), findsNothing);
     expect(find.textContaining('last sync'), findsOneWidget);
     await tester.pumpAndSettle();
-    expect(find.textContaining('Synced'), findsNothing);
+    expect(find.textContaining('Synced', skipOffstage: false), findsNothing);
   });
 
   testWidgets('a failure reason opens its place under the line', (

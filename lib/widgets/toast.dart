@@ -16,8 +16,6 @@ const Duration toastDuration = Duration(seconds: 3);
 /// Every toast of the app goes through here: it arrives and leaves at
 /// the pace of every surface.
 extension ShowToast on ScaffoldMessengerState {
-  void showToast(String message) => showSnackBar(
-    Toast(message),
-    snackBarAnimationStyle: GerfautMotion.toast,
-  );
+  void showToast(String message) =>
+      showSnackBar(Toast(message), snackBarAnimationStyle: GerfautMotion.toast);
 }
