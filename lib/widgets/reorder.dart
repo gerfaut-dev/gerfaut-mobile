@@ -19,9 +19,6 @@ class LiftedItem extends InheritedWidget {
   /// follows it in and out.
   final Animation<double> lift;
 
-  /// Whether the widget at [context] is being dragged right now.
-  static bool of(BuildContext context) => liftOf(context) != null;
-
   /// The rise of the item at [context], null when it is not dragged.
   static Animation<double>? liftOf(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<LiftedItem>()?.lift;
@@ -37,6 +34,38 @@ class LiftedItem extends InheritedWidget {
 
   @override
   bool updateShouldNotify(LiftedItem oldWidget) => false;
+}
+
+/// The shadow of an item under the finger: it comes in as the item lifts
+/// and goes as it lands. At rest, none.
+class LiftShadow extends StatelessWidget {
+  const LiftShadow({
+    super.key,
+    required this.shadow,
+    required this.borderRadius,
+    required this.child,
+  });
+
+  final BoxShadow shadow;
+  final BorderRadius borderRadius;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final lift = LiftedItem.liftOf(context);
+    if (lift == null) return child;
+    return AnimatedBuilder(
+      animation: lift,
+      builder: (context, child) => DecoratedBox(
+        decoration: BoxDecoration(
+          borderRadius: borderRadius,
+          boxShadow: LiftedItem.shadowOf(lift, shadow),
+        ),
+        child: child,
+      ),
+      child: child,
+    );
+  }
 }
 
 /// The `proxyDecorator` of every reorderable list in the app.

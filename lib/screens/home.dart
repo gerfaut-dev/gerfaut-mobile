@@ -528,14 +528,11 @@ class _WalletCard extends StatelessWidget {
     final tokens = Theme.of(context).extension<GerfautTokens>()!;
     // Held and moving, the card is the one thing on screen that really
     // floats, and gets the one shadow. At rest, never.
-    final lifted = LiftedItem.of(context);
     return Padding(
       padding: const EdgeInsets.only(bottom: GerfautSpacing.gutter),
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(GerfautRadius.lg),
-          boxShadow: lifted ? [tokens.shadowOverlay] : null,
-        ),
+      child: LiftShadow(
+        shadow: tokens.shadowOverlay,
+        borderRadius: BorderRadius.circular(GerfautRadius.lg),
         child: Material(
           color: tokens.surface,
           borderRadius: BorderRadius.circular(GerfautRadius.lg),
