@@ -14,6 +14,7 @@ import 'package:gerfaut/src/state.dart';
 import 'package:gerfaut/src/window.dart';
 import 'package:gerfaut/theme/tokens.dart';
 import 'package:gerfaut/widgets/notice.dart';
+import 'package:gerfaut/widgets/setting_switch.dart';
 
 import 'fakes.dart';
 
@@ -105,7 +106,7 @@ Finder _disguiseSwitch() => find.descendant(
     of: find.text('Disguise the app'),
     matching: find.byType(Row),
   ),
-  matching: find.byType(Switch),
+  matching: find.byType(GerfautSwitch),
 );
 
 void main() {
@@ -115,7 +116,10 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('Disguise the app'), findsOneWidget);
-      expect(tester.widget<Switch>(_disguiseSwitch()).onChanged, isNotNull);
+      expect(
+        tester.widget<GerfautSwitch>(_disguiseSwitch()).onChanged,
+        isNotNull,
+      );
     });
 
     testWidgets('is disabled and explained without a PIN lock', (tester) async {
@@ -124,7 +128,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(tester.widget<Switch>(_disguiseSwitch()).onChanged, isNull);
+      expect(tester.widget<GerfautSwitch>(_disguiseSwitch()).onChanged, isNull);
       expect(find.textContaining('Needs a PIN lock'), findsOneWidget);
     });
 
@@ -262,7 +266,7 @@ void main() {
       // left on the home screen next to the calculator.
       expect(disguise.calls, ['widgets:false', 'disguise:true']);
       expect(disguise.disguised, isTrue);
-      expect(tester.widget<Switch>(_disguiseSwitch()).value, isTrue);
+      expect(tester.widget<GerfautSwitch>(_disguiseSwitch()).value, isTrue);
     });
 
     testWidgets('turning it on takes what was said off the shade', (
@@ -307,7 +311,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(disguise.disguised, isTrue);
-      expect(tester.widget<Switch>(_disguiseSwitch()).value, isTrue);
+      expect(tester.widget<GerfautSwitch>(_disguiseSwitch()).value, isTrue);
     });
 
     testWidgets('a launcher that refuses leaves the switch off and says why', (
@@ -327,7 +331,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(disguise.disguised, isFalse);
-      expect(tester.widget<Switch>(_disguiseSwitch()).value, isFalse);
+      expect(tester.widget<GerfautSwitch>(_disguiseSwitch()).value, isFalse);
       expect(find.text('the component could not be enabled'), findsOneWidget);
     });
 
@@ -357,7 +361,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      expect(tester.widget<Switch>(_disguiseSwitch()).value, isTrue);
+      expect(tester.widget<GerfautSwitch>(_disguiseSwitch()).value, isTrue);
       await tester.tap(_disguiseSwitch());
       await tester.pumpAndSettle();
 
@@ -381,7 +385,7 @@ void main() {
           of: find.text('App lock'),
           matching: find.byType(Row),
         ),
-        matching: find.byType(Switch),
+        matching: find.byType(GerfautSwitch),
       );
       await tester.tap(appLock);
       await tester.pumpAndSettle();

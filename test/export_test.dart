@@ -14,6 +14,7 @@ import 'package:gerfaut/src/state.dart';
 import 'package:gerfaut/theme/tokens.dart';
 import 'package:gerfaut/widgets/choice_group.dart';
 import 'package:gerfaut/widgets/notice.dart';
+import 'package:gerfaut/widgets/setting_switch.dart';
 
 import 'fakes.dart';
 
@@ -102,7 +103,7 @@ void main() {
     expect(find.text('3 of 3 transactions selected'), findsOneWidget);
 
     // Dropping pending keeps only the confirmed rows.
-    final pendingSwitch = find.byType(Switch).first;
+    final pendingSwitch = find.byType(GerfautSwitch).first;
     await tester.tap(pendingSwitch);
     await tester.pumpAndSettle();
     expect(find.text('2 of 3 transactions selected'), findsOneWidget);
