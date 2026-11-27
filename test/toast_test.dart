@@ -169,6 +169,23 @@ void main() {
     await leave(tester);
   });
 
+  testWidgets('once it starts leaving, a touch goes through it', (
+    tester,
+  ) async {
+    var taps = 0;
+    await tester.pumpWidget(toastApp(onBehind: () => taps++));
+    toastOf(tester).show('Copied');
+    await tester.pump();
+    await arrive(tester);
+    await tester.pump(toastDuration);
+    await tester.pump(GerfautMotion.base ~/ 4);
+
+    // On the toast itself, while it fades out.
+    await tester.tapAt(tester.getCenter(find.byType(ToastView)));
+    expect(taps, 1);
+    await leave(tester);
+  });
+
   testWidgets('its words are announced', (tester) async {
     final semantics = tester.ensureSemantics();
     await tester.pumpWidget(toastApp());

@@ -181,7 +181,12 @@ class _ToastLayerState extends State<_ToastLayer>
   void _onStatus(AnimationStatus status) {
     // Its time starts once it has landed.
     if (status.isCompleted) _startClock();
-    if (status.isDismissed) setState(() => _shown = null);
+    if (status.isDismissed) {
+      setState(() => _shown = null);
+    } else if (status == AnimationStatus.reverse) {
+      // Leaving: off to touch and to screen readers from its first frame.
+      setState(() {});
+    }
   }
 
   void _startClock() =>

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -54,8 +55,11 @@ class _FadeInPlaceState extends State<FadeInPlace> {
       switchOutCurve: GerfautMotion.ease.flipped,
       // Every child keeps the same wrapper, leaving or not, so the one
       // that starts leaving keeps its element and its state.
+      // The parent's constraints reach the child as if the fade were not
+      // there: a line stretched to the width of its column stays so.
       layoutBuilder: (current, previous) => Stack(
         alignment: alignment,
+        fit: StackFit.passthrough,
         children: [
           for (final old in previous)
             _Stage(key: old.key, leaving: true, child: old),
@@ -166,27 +170,57 @@ class _OpeningPlaceState extends State<OpeningPlace> {
         // What leaves is laid over the place rather than holding it
         // open: the height follows what stays, and the old block fades
         // out as the place closes over it.
+        // Every child keeps the same wrappers, leaving or not, so the one
+        // that starts leaving keeps its element and its state.
         layoutBuilder: (current, previous) => Stack(
           alignment: AlignmentDirectional.topStart,
+          fit: StackFit.passthrough,
           children: [
             for (final old in previous)
-              PositionedDirectional(
+              _Place(
                 key: old.key,
-                top: 0,
-                start: 0,
-                end: 0,
+                over: true,
                 child: _Stage(leaving: true, child: old),
               ),
             if (current != null)
-              _Stage(key: current.key, leaving: false, child: current),
+              _Place(
+                key: current.key,
+                over: false,
+                child: _Stage(leaving: false, child: current),
+              ),
           ],
         ),
         child: child == null
-            ? SizedBox(key: key, width: double.infinity)
+            ? SizedBox.shrink(key: key)
             : KeyedSubtree(key: key, child: child),
       ),
     );
   }
+}
+
+/// Where a child of an [OpeningPlace] stands in its stack: what stays
+/// holds the place and gives it its height; what leaves is laid over
+/// it, across its width from the top, and no longer holds it open. One
+/// widget for both, so a child that starts leaving is not rebuilt.
+class _Place extends ParentDataWidget<StackParentData> {
+  const _Place({super.key, required this.over, required super.child});
+
+  final bool over;
+
+  @override
+  void applyParentData(RenderObject renderObject) {
+    final data = renderObject.parentData! as StackParentData;
+    final edge = over ? 0.0 : null;
+    if (data.top == edge && data.left == edge && data.right == edge) return;
+    data
+      ..top = edge
+      ..left = edge
+      ..right = edge;
+    renderObject.parent?.markNeedsLayout();
+  }
+
+  @override
+  Type get debugTypicalAncestorWidgetClass => Stack;
 }
 
 /// The icon of an action under way: one turn in [GerfautMotion.turn],
@@ -406,10 +440,9 @@ class _ScreenFadeState extends State<ScreenFade>
     duration: GerfautMotion.base,
     value: 1,
   );
-  late final CurvedAnimation _eased = CurvedAnimation(
-    parent: _fade,
-    curve: GerfautMotion.ease,
-  );
+  // Played backwards only: the flipped curve makes the screen that
+  // leaves start as briskly as anything that arrives.
+  late final CurvedAnimation _eased = GerfautMotion.eased(_fade);
 
   ScreenFade? _leaving;
 

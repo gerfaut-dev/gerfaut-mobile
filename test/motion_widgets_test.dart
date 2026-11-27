@@ -288,4 +288,105 @@ void main() {
     expect(cleared, 1);
     expect(haptics, ['HapticFeedbackType.mediumImpact']);
   });
+
+  group('a place that opens', () {
+    testWidgets('keeps what it held while it closes over it', (tester) async {
+      _Counted.starts = 0;
+      Widget place(bool open) => _app(
+        Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [OpeningPlace(child: open ? const _Counted() : null)],
+        ),
+      );
+      await tester.pumpWidget(place(true));
+      expect(_Counted.starts, 1);
+      await tester.pumpWidget(place(false));
+      await tester.pump(GerfautMotion.base ~/ 2);
+      // Still painting as it closes, and the same block, not a new one.
+      expect(find.byType(_Counted, skipOffstage: false), findsOne);
+      expect(_Counted.starts, 1);
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('holds no width when it holds nothing', (tester) async {
+      await tester.pumpWidget(
+        _app(
+          const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [OpeningPlace(child: null), Text('Beside')],
+          ),
+        ),
+      );
+      expect(tester.takeException(), isNull);
+      expect(tester.getSize(find.byType(OpeningPlace)).width, 0);
+    });
+
+    testWidgets('lets a line take the width of its column', (tester) async {
+      await tester.pumpWidget(
+        _app(
+          const SizedBox(
+            width: 300,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                OpeningPlace(
+                  child: FadeInPlace(
+                    state: 'read',
+                    child: Text('2 of 5', textAlign: TextAlign.center),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      expect(tester.getSize(find.text('2 of 5')).width, 300);
+    });
+  });
+
+  testWidgets('a screen that leaves starts fading at once', (tester) async {
+    await tester.pumpWidget(
+      _app(const ScreenFade(state: 'lock', child: Text('Locked'))),
+    );
+    await tester.pumpWidget(
+      _app(const ScreenFade(state: 'home', child: Text('Home'))),
+    );
+    await tester.pump(GerfautMotion.base ~/ 4);
+    final opacity = tester
+        .widget<FadeTransition>(
+          find
+              .ancestor(
+                of: find.text('Locked', skipOffstage: false),
+                matching: find.byType(FadeTransition, skipOffstage: false),
+              )
+              .first,
+        )
+        .opacity
+        .value;
+    // A quarter of the way, most of it is already gone.
+    expect(opacity, lessThan(0.5));
+    await tester.pumpAndSettle();
+  });
+}
+
+/// Counts how many times it is built from scratch.
+class _Counted extends StatefulWidget {
+  const _Counted();
+
+  static int starts = 0;
+
+  @override
+  State<_Counted> createState() => _CountedState();
+}
+
+class _CountedState extends State<_Counted> {
+  @override
+  void initState() {
+    super.initState();
+    _Counted.starts++;
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      const SizedBox(height: 40, child: Text('Note'));
 }
