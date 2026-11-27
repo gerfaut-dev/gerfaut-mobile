@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -243,12 +244,17 @@ class _PadKeyState extends State<_PadKey> {
     if (_pressed != pressed) setState(() => _pressed = pressed);
   }
 
-  // No click under a key: the phone answers a choice that changes and
-  // a PIN refused, not each button pressed.
-  void _tap() => widget.onTap();
+  // A click under each key: a PIN pad has no other answer under the
+  // finger, the digits it takes being drawn as dots.
+  void _tap() {
+    HapticFeedback.selectionClick();
+    widget.onTap();
+  }
 
+  // The hold that clears the whole PIN is felt as such.
   void _longPress() {
     _press(false);
+    HapticFeedback.mediumImpact();
     widget.onLongPress!();
   }
 

@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:gerfaut/app.dart';
 import 'package:gerfaut/theme/tokens.dart';
 import 'package:gerfaut/widgets/motion.dart';
+import 'package:gerfaut/widgets/pin_pad.dart';
 import 'package:gerfaut/widgets/setting_switch.dart';
 
 Widget _app(Widget body, {bool still = false}) => MaterialApp(
@@ -261,5 +262,30 @@ void main() {
       expect(tester.getSize(find.byType(GerfautSwitch)).height, 48);
       handle.dispose();
     });
+  });
+
+  testWidgets('the PIN pad clicks under each key and knocks when held '
+      'to clear', (tester) async {
+    final haptics = _listenToHaptics(tester);
+    final digits = <int>[];
+    var cleared = 0;
+    await tester.pumpWidget(
+      _app(
+        PinPad(
+          order: phoneOrder,
+          onDigit: digits.add,
+          onDelete: () {},
+          onClear: () => cleared++,
+        ),
+      ),
+    );
+    await tester.tap(find.byKey(const Key('pin.5')));
+    expect(digits, [5]);
+    expect(haptics, ['HapticFeedbackType.selectionClick']);
+
+    haptics.clear();
+    await tester.longPress(find.byKey(const Key('pin.delete')));
+    expect(cleared, 1);
+    expect(haptics, ['HapticFeedbackType.mediumImpact']);
   });
 }

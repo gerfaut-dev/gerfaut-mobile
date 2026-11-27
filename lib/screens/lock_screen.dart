@@ -187,8 +187,7 @@ class _LockScreenState extends ConsumerState<LockScreen> {
             ? null
             : 'Wrong ${kind == LockKind.pin ? 'PIN' : 'password'}';
       });
-      // The one impact of the app: the phone says no as the dots turn
-      // the alert colour.
+      // The phone says no as the dots turn the alert colour.
       HapticFeedback.mediumImpact();
       if (verdict.retryAfterSecs > 0) _startCountdown(verdict.retryAfterSecs);
     } catch (error) {
