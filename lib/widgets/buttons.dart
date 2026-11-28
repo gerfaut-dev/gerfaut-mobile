@@ -421,10 +421,15 @@ class _FilledActionState extends State<_FilledAction> {
 }
 
 /// What a filled button shows: its glyph, or the spinner while busy,
-/// then its label. When either changes ("Add wallet", then "Adding…"),
-/// the old fades into the new in place, and the button keeps the room
-/// of the wider of the two, during the fade and after it, so neither it
-/// nor what stands beside it moves.
+/// then its label. When its state changes ("Add wallet", then "Adding…";
+/// a busy label that moves on; a glyph that changes), the old fades into
+/// the new in place, and the button keeps the room of the widest label
+/// it showed, during the fade and after it, so neither it nor what
+/// stands beside it moves.
+///
+/// A label that changes at rest is a value ("Restore 3 wallets"): it is
+/// replaced in the same frame, as an amount is, and the button takes its
+/// width.
 class _FilledContent extends StatefulWidget {
   const _FilledContent({
     required this.label,
@@ -441,30 +446,41 @@ class _FilledContent extends StatefulWidget {
 }
 
 class _FilledContentState extends State<_FilledContent> {
-  /// The label shown before the last change, and whether a glyph stood
-  /// before it: held unseen for its width. Null until something changes.
-  (String, bool)? _before;
+  /// Counts the changes of state, which fade.
+  int _change = 0;
+
+  /// The labels shown since the last change at rest, each with whether a
+  /// glyph stood before it: held unseen for their width.
+  final List<(String, bool)> _held = [];
 
   @override
   void didUpdateWidget(_FilledContent old) {
     super.didUpdateWidget(old);
-    if (old.label != widget.label ||
-        old.busy != widget.busy ||
-        old.icon != widget.icon) {
-      _before = (old.label, old.busy || old.icon != null);
+    final was = (old.label, old.busy || old.icon != null);
+    final now = (widget.label, widget.busy || widget.icon != null);
+    if (old.label == widget.label &&
+        old.busy == widget.busy &&
+        old.icon == widget.icon) {
+      return;
     }
+    if (old.busy || widget.busy || old.icon != widget.icon) {
+      _change++;
+      if (!_held.contains(was)) _held.add(was);
+    } else {
+      _held.clear();
+    }
+    _held.remove(now);
   }
 
   @override
   Widget build(BuildContext context) {
     final icon = widget.icon;
-    final before = _before;
     return Stack(
       alignment: Alignment.center,
       fit: StackFit.passthrough,
       children: [
         FadeInPlace(
-          state: (widget.label, widget.busy, icon),
+          state: _change,
           alignment: Alignment.center,
           child: _Content(
             label: widget.label,
@@ -475,14 +491,16 @@ class _FilledContentState extends State<_FilledContent> {
                 : (icon == null ? null : Icon(icon, size: _glyph)),
           ),
         ),
-        if (before != null)
+        for (final (label, glyph) in _held)
           HeldPlace(
-            child: _Content(
-              label: before.$1,
-              leading: before.$2
-                  ? const SizedBox.square(dimension: _glyph)
-                  : null,
-            ),
+            // On one line, as the label it stands beside: wrapped, it
+            // would hold a height the button does not have.
+            child: glyph
+                ? _Content(
+                    label: label,
+                    leading: const SizedBox.square(dimension: _glyph),
+                  )
+                : Text(label, maxLines: 1, softWrap: false),
           ),
       ],
     );

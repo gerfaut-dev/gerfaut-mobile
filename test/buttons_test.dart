@@ -393,6 +393,53 @@ void main() {
       expect(width(tester), wider);
     });
 
+    testWidgets('keeps the room of every label of the work', (tester) async {
+      const labels = ['Save backend', 'Checking the certificate…', 'Saving…'];
+      final widest = await alone(tester, labels[1], busy: true);
+      var step = 0;
+      await tester.pumpWidget(
+        _page(
+          StatefulBuilder(
+            builder: (context, setState) {
+              set = setState;
+              return PrimaryButton(
+                label: labels[step % 3],
+                busy: step % 3 != 0,
+                onPressed: () {},
+              );
+            },
+          ),
+        ),
+      );
+      for (var i = 1; i <= 3; i++) {
+        set(() => step = i);
+        await tester.pump();
+        await tester.pump(GerfautMotion.base * 2);
+        expect(width(tester), widest, reason: labels[i % 3]);
+      }
+    });
+
+    testWidgets('swaps a value at rest in the same frame', (tester) async {
+      var count = 2;
+      await tester.pumpWidget(
+        _page(
+          StatefulBuilder(
+            builder: (context, setState) {
+              set = setState;
+              return PrimaryButton(
+                label: 'Restore $count wallets',
+                onPressed: () {},
+              );
+            },
+          ),
+        ),
+      );
+      set(() => count = 3);
+      await tester.pump();
+      expect(find.text('Restore 2 wallets', skipOffstage: false), findsNothing);
+      expect(find.text('Restore 3 wallets'), findsOne);
+    });
+
     testWidgets('is read out once, the label shown', (tester) async {
       final semantics = tester.ensureSemantics();
       await tester.pumpWidget(form());
