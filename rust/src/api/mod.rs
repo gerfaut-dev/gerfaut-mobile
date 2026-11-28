@@ -103,6 +103,15 @@ fn reply<T: serde::Serialize>(result: Result<T, CoreError>) -> String {
     }
 }
 
+/// The answer of a core call that returns nothing: `{"ok": true}`, or
+/// its failure.
+fn reply_ok(result: Result<(), CoreError>) -> String {
+    match result {
+        Ok(()) => ok_json(),
+        Err(e) => core_error_json(&e),
+    }
+}
+
 /// The initialized manager, or the `{"error": ...}` payload to return.
 fn manager() -> Result<&'static WalletManager, String> {
     MANAGER
@@ -293,18 +302,12 @@ pub async fn list_wallets(network: Option<String>) -> String {
 /// Removes a wallet from this device.
 pub async fn remove_wallet(id: String) -> String {
     let manager = try_json!(manager());
-    match manager.remove_wallet(&id).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.remove_wallet(&id).await)
 }
 
 pub async fn rename_wallet(id: String, name: String) -> String {
     let manager = try_json!(manager());
-    match manager.rename_wallet(&id, &name).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.rename_wallet(&id, &name).await)
 }
 
 /// Changes the glyph a wallet shows next to its name. `icon` is the
@@ -312,10 +315,7 @@ pub async fn rename_wallet(id: String, name: String) -> String {
 pub async fn set_wallet_icon(id: String, icon: String) -> String {
     let manager = try_json!(manager());
     let icon: WalletIcon = try_json!(parse_variant(&icon, "wallet icon"));
-    match manager.set_wallet_icon(&id, icon).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_wallet_icon(&id, icon).await)
 }
 
 /// Puts a wallet ahead of the others in the live watch, or back among
@@ -324,10 +324,7 @@ pub async fn set_wallet_icon(id: String, icon: String) -> String {
 /// by itself.
 pub async fn set_wallet_live_pinned(id: String, pinned: bool) -> String {
     let manager = try_json!(manager());
-    match manager.set_wallet_live_pinned(&id, pinned).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_wallet_live_pinned(&id, pinned).await)
 }
 
 /// Puts the listed wallets in that order. Wallets left out keep their
@@ -335,10 +332,7 @@ pub async fn set_wallet_live_pinned(id: String, pinned: bool) -> String {
 /// network's wallets. A repeated id is refused, an unknown one too.
 pub async fn reorder_wallets(ids: Vec<String>) -> String {
     let manager = try_json!(manager());
-    match manager.reorder_wallets(&ids).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.reorder_wallets(&ids).await)
 }
 
 // --- views -------------------------------------------------------------
@@ -378,10 +372,7 @@ pub async fn receive_addresses(id: String, lookahead: u32) -> String {
 /// as new again. A wallet with a single address has nothing to reveal.
 pub async fn reveal_receive_address(id: String, index: u32) -> String {
     let manager = try_json!(manager());
-    match manager.reveal_receive_address(&id, index).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.reveal_receive_address(&id, index).await)
 }
 
 /// Revealed addresses of a wallet, by keychain, with usage and balance.
@@ -507,20 +498,14 @@ pub async fn get_settings() -> String {
 pub async fn set_active_network(network: String) -> String {
     let manager = try_json!(manager());
     let network = try_json!(parse_network(&network));
-    match manager.set_active_network(network).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_active_network(network).await)
 }
 
 /// Sets the global gap limit applied to every descriptor wallet on the
 /// next sync. Bounded to 1..=500 by the core.
 pub async fn set_gap_limit(gap_limit: u32) -> String {
     let manager = try_json!(manager());
-    match manager.set_gap_limit(gap_limit).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_gap_limit(gap_limit).await)
 }
 
 /// Sets the backend for a network from a serialized `BackendConfig`.
@@ -531,10 +516,7 @@ pub async fn set_backend(network: String, config_json: String) -> String {
         serde_json::from_str(&config_json)
             .map_err(|e| error_json("bad_json", format!("invalid BackendConfig JSON: {e}")))
     );
-    match manager.set_backend(network, config).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_backend(network, config).await)
 }
 
 /// Sets the backend for a network and trusts the certificate the user
@@ -552,13 +534,11 @@ pub async fn set_backend_trusting(
         serde_json::from_str(&config_json)
             .map_err(|e| error_json("bad_json", format!("invalid BackendConfig JSON: {e}")))
     );
-    match manager
-        .set_backend_trusting(network, config, &url, &fingerprint)
-        .await
-    {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(
+        manager
+            .set_backend_trusting(network, config, &url, &fingerprint)
+            .await,
+    )
 }
 
 /// Tests the backend stored for a network the way a sync reaches it:
@@ -606,20 +586,14 @@ pub async fn inspect_certificate(url: String) -> String {
 /// connection to that host asks again.
 pub async fn forget_certificate(host: String) -> String {
     let manager = try_json!(manager());
-    match manager.forget_certificate(&host).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.forget_certificate(&host).await)
 }
 
 /// Stores one small preference of this app alone in the encrypted
 /// vault. The ones both apps keep go through [`set_preferences`].
 pub async fn set_app_pref(key: String, value: String) -> String {
     let manager = try_json!(manager());
-    match manager.set_app_pref(key, value).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_app_pref(key, value).await)
 }
 
 /// Changes some of the preferences both apps keep, from a serialized
@@ -672,10 +646,7 @@ pub async fn recent_broadcasts(network: String) -> String {
 /// on the network and untouched.
 pub async fn forget_broadcast(txid: String) -> String {
     let manager = try_json!(manager());
-    match manager.forget_broadcast(&txid).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.forget_broadcast(&txid).await)
 }
 
 // --- tor ---------------------------------------------------------------
@@ -693,10 +664,7 @@ pub async fn tor_status() -> String {
 pub async fn set_tor_settings(settings_json: String) -> String {
     let manager = try_json!(manager());
     let settings: TorSettings = try_json!(from_json(&settings_json, "TorSettings"));
-    match manager.set_tor_settings(settings).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_tor_settings(settings).await)
 }
 
 /// Resolves the route now, bootstrapping the built-in client if that is
@@ -720,21 +688,16 @@ pub async fn app_lock() -> String {
 pub async fn set_app_lock(kind: String, secret: String, current: Option<String>) -> String {
     let manager = try_json!(manager());
     let kind: LockKind = try_json!(parse_variant(&kind, "lock kind"));
-    match manager
-        .set_app_lock(kind, &secret, current.as_deref())
-        .await
-    {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(
+        manager
+            .set_app_lock(kind, &secret, current.as_deref())
+            .await,
+    )
 }
 
 pub async fn clear_app_lock(current: String) -> String {
     let manager = try_json!(manager());
-    match manager.clear_app_lock(&current).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.clear_app_lock(&current).await)
 }
 
 /// Tries a secret. Returns a serialized `LockVerdict`, whose delay says
@@ -747,10 +710,7 @@ pub async fn verify_app_lock(secret: String) -> String {
 /// Whether the phone's biometric prompt may stand in for the secret.
 pub async fn set_biometric_unlock(enabled: bool, current: String) -> String {
     let manager = try_json!(manager());
-    match manager.set_biometric_unlock(enabled, &current).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_biometric_unlock(enabled, &current).await)
 }
 
 // --- backup ------------------------------------------------------------
@@ -1097,19 +1057,13 @@ pub async fn check_update(current_version: String) -> String {
 /// Closes the notice on the release it announced.
 pub async fn dismiss_update(version: String) -> String {
     let manager = try_json!(manager());
-    match manager.dismiss_update(&version).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.dismiss_update(&version).await)
 }
 
 /// Turns the daily check on or off.
 pub async fn set_update_automatic(automatic: bool) -> String {
     let manager = try_json!(manager());
-    match manager.set_update_automatic(automatic).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_update_automatic(automatic).await)
 }
 
 #[cfg(test)]
