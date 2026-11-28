@@ -59,6 +59,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- A button that says it is working, such as "Add wallet" turning into "Adding…", now fades its old label into the new one and keeps its width. The label used to change at once, and the button grew or shrank with the word.
 - When the price source fails, amounts keep their fiat value with the last price, for up to 6 hours. Settings › General shows its age next to the rate under Price source, such as "updated 4 min ago". It used to take the fiat value off every amount at the first failed request, and show "The price source did not answer." in orange.
 - A single failed price request is no longer shown. After a second one in a row, a note under the price says what happened and what to do, such as "CoinGecko is not answering. Amounts use the last price until it answers. You can also switch to mempool.space.", with a "Try again" button. When the source limits requests, the note says when Gerfaut asks again, and has no button.
 - Gerfaut asks a failing price source again after 1 minute, then waits longer each time, up to 30 minutes, and follows the wait the source names.
