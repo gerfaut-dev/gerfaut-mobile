@@ -119,6 +119,18 @@ fn manager() -> Result<&'static WalletManager, String> {
         .ok_or_else(|| error_json("not_initialized", "call init_manager first"))
 }
 
+/// The initialized manager, or `None` once the `{"error": ...}` payload
+/// has gone down the stream.
+fn manager_or_send(sink: &StreamSink<String>) -> Option<&'static WalletManager> {
+    match manager() {
+        Ok(manager) => Some(manager),
+        Err(payload) => {
+            let _ = sink.add(payload);
+            None
+        }
+    }
+}
+
 fn parse_network(name: &str) -> Result<Network, String> {
     name.parse::<Network>().map_err(|e| core_error_json(&e))
 }
@@ -244,10 +256,7 @@ pub async fn parse_backend(input: String) -> String {
 /// [`parse_input`]. The scanner sends each frame once to a scan the
 /// core holds instead ([`push_qr_frame`]).
 pub async fn assemble_qr(frames_json: String) -> String {
-    let frames: Vec<String> = try_json!(
-        serde_json::from_str(&frames_json)
-            .map_err(|e| error_json("bad_json", format!("invalid frames JSON: {e}")))
-    );
+    let frames: Vec<String> = try_json!(from_json(&frames_json, "frames"));
     reply(gerfaut_core::input::qr::assemble(&frames))
 }
 
@@ -284,10 +293,7 @@ pub fn close_qr_scan(scan: u32) {
 /// Returns the new wallet's metadata.
 pub async fn add_wallet(name: String, parsed_json: String, network: String) -> String {
     let manager = try_json!(manager());
-    let parsed: ParsedInput = try_json!(
-        serde_json::from_str(&parsed_json)
-            .map_err(|e| error_json("bad_json", format!("invalid ParsedInput JSON: {e}")))
-    );
+    let parsed: ParsedInput = try_json!(from_json(&parsed_json, "ParsedInput"));
     let network = try_json!(parse_network(&network));
     reply(manager.add_wallet(&name, &parsed, network).await)
 }
@@ -387,10 +393,7 @@ pub async fn address_list(id: String) -> String {
 /// device.
 pub async fn export_transactions(id: String, options_json: String) -> String {
     let manager = try_json!(manager());
-    let options: ExportOptions = try_json!(
-        serde_json::from_str(&options_json)
-            .map_err(|e| error_json("bad_json", format!("invalid ExportOptions JSON: {e}")))
-    );
+    let options: ExportOptions = try_json!(from_json(&options_json, "ExportOptions"));
     match manager.export_transactions(&id, &options).await {
         Ok(result) => json!({ "ok": result }).to_string(),
         Err(e) => core_error_json(&e),
@@ -436,12 +439,8 @@ pub async fn sync_all(network: Option<String>) -> String {
 /// and is then sent where every wallet stands now, so it never keeps a
 /// wallet syncing that no longer is.
 pub async fn sync_changes(sink: StreamSink<String>) {
-    let manager = match manager() {
-        Ok(manager) => manager,
-        Err(payload) => {
-            let _ = sink.add(payload);
-            return;
-        }
+    let Some(manager) = manager_or_send(&sink) else {
+        return;
     };
     forward_sync_changes(
         manager.sync_changes(),
@@ -512,10 +511,7 @@ pub async fn set_gap_limit(gap_limit: u32) -> String {
 pub async fn set_backend(network: String, config_json: String) -> String {
     let manager = try_json!(manager());
     let network = try_json!(parse_network(&network));
-    let config: BackendConfig = try_json!(
-        serde_json::from_str(&config_json)
-            .map_err(|e| error_json("bad_json", format!("invalid BackendConfig JSON: {e}")))
-    );
+    let config: BackendConfig = try_json!(from_json(&config_json, "BackendConfig"));
     reply_ok(manager.set_backend(network, config).await)
 }
 
@@ -530,10 +526,7 @@ pub async fn set_backend_trusting(
 ) -> String {
     let manager = try_json!(manager());
     let network = try_json!(parse_network(&network));
-    let config: BackendConfig = try_json!(
-        serde_json::from_str(&config_json)
-            .map_err(|e| error_json("bad_json", format!("invalid BackendConfig JSON: {e}")))
-    );
+    let config: BackendConfig = try_json!(from_json(&config_json, "BackendConfig"));
     reply_ok(
         manager
             .set_backend_trusting(network, config, &url, &fingerprint)
@@ -807,12 +800,8 @@ enum RunEnd {
 /// for: a stop asked since, even during the start, ends the run as a
 /// stop.
 pub async fn live_run(sink: StreamSink<String>, stops_seen: u32) {
-    let manager = match manager() {
-        Ok(manager) => manager,
-        Err(payload) => {
-            let _ = sink.add(payload);
-            return;
-        }
+    let Some(manager) = manager_or_send(&sink) else {
+        return;
     };
     let mut events = {
         let mut running = LIVE_RUNNING.lock().await;
@@ -1253,18 +1242,15 @@ mod tests {
     /// taken for one that may say everything.
     #[tokio::test]
     async fn the_words_of_a_notification_are_asked_with_the_whole_context() {
-        let kind = |payload: String| {
-            serde_json::from_str::<Value>(&payload).expect("JSON")["error"]["kind"].clone()
-        };
         let txs = r#"[{"wallet_id":"w1","txid":"aa","net_sats":1000,"stage":"mempool"}]"#;
         let partial = r#"{"names":{},"unit":"btc","masked":false}"#;
         let whole = r#"{"names":{},"unit":"btc","masked":false,"details":true}"#;
         assert_eq!(
-            kind(live_notices(txs.into(), partial.into()).await),
+            kind_of(&live_notices(txs.into(), partial.into()).await),
             "bad_json"
         );
         assert_eq!(
-            kind(live_notices("[{}]".into(), whole.into()).await),
+            kind_of(&live_notices("[{}]".into(), whole.into()).await),
             "bad_json"
         );
     }
