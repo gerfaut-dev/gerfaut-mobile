@@ -7,7 +7,7 @@ import 'frb_generated.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `console_log_level`, `core_error_json`, `decode_key`, `error_json`, `forward_sync_changes`, `from_json`, `manager`, `ok_json`, `parse_network_opt`, `parse_network`, `parse_variant`, `put_down`, `stopped_json`, `then_always`, `to_json`
+// These functions are ignored because they are not marked as `pub`: `console_log_level`, `core_error_json`, `decode_key`, `error_json`, `forward_sync_changes`, `from_json`, `manager_or_send`, `manager`, `ok_json`, `parse_network_opt`, `parse_network`, `parse_variant`, `put_down`, `reply_ok`, `reply`, `stopped_json`, `then_always`, `to_json`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RunEnd`
 
 /// Opens (or creates) the vault under `data_dir` with a 32-byte key given

@@ -148,13 +148,14 @@ String reportedFailure(String kind, String message) =>
 /// name a layer instead of the thing refused. A private key is refused
 /// wherever it comes from, and the sentence says what to bring instead.
 /// A descriptor the wallet engine will not take is said to be that,
-/// with the engine's reason after it.
-String materialRefusal(BridgeException error, {bool backup = false}) {
+/// with the engine's reason after it. `privateKey` is the sentence the
+/// screen says of a private key.
+String materialRefusal(
+  BridgeException error, {
+  String privateKey = privateMaterialMessage,
+}) {
   return switch (error.kind) {
-    'private_material' when backup =>
-      'A wallet in this backup holds a private key, and Gerfaut only '
-          'watches: nothing was restored.',
-    'private_material' => privateMaterialMessage,
+    'private_material' => privateKey,
     'descriptor' =>
       'This descriptor could not be used: '
           '${error.message.replaceFirst('descriptor error: ', '')}',
@@ -167,6 +168,11 @@ String materialRefusal(BridgeException error, {bool backup = false}) {
 const String privateMaterialMessage =
     'This holds a private key, and Gerfaut only watches: nothing was saved. '
     'Bring the public descriptor or extended public key instead.';
+
+/// What the restore says of a backup that holds a private key.
+const String privateKeyInABackup =
+    'A wallet in this backup holds a private key, and Gerfaut only '
+    'watches: nothing was restored.';
 
 /// The same refusal on the screens that do not import a wallet: each
 /// says what it waited for instead. The same words as on the desktop.

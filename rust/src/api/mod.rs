@@ -95,11 +95,40 @@ fn to_json<T: serde::Serialize>(value: &T) -> String {
     }
 }
 
+/// The answer of a core call: its value serialized, or its failure.
+fn reply<T: serde::Serialize>(result: Result<T, CoreError>) -> String {
+    match result {
+        Ok(value) => to_json(&value),
+        Err(e) => core_error_json(&e),
+    }
+}
+
+/// The answer of a core call that returns nothing: `{"ok": true}`, or
+/// its failure.
+fn reply_ok(result: Result<(), CoreError>) -> String {
+    match result {
+        Ok(()) => ok_json(),
+        Err(e) => core_error_json(&e),
+    }
+}
+
 /// The initialized manager, or the `{"error": ...}` payload to return.
 fn manager() -> Result<&'static WalletManager, String> {
     MANAGER
         .get()
         .ok_or_else(|| error_json("not_initialized", "call init_manager first"))
+}
+
+/// The initialized manager, or `None` once the `{"error": ...}` payload
+/// has gone down the stream.
+fn manager_or_send(sink: &StreamSink<String>) -> Option<&'static WalletManager> {
+    match manager() {
+        Ok(manager) => Some(manager),
+        Err(payload) => {
+            let _ = sink.add(payload);
+            None
+        }
+    }
 }
 
 fn parse_network(name: &str) -> Result<Network, String> {
@@ -199,10 +228,7 @@ pub async fn parse_input(input: String, script: Option<String>) -> String {
             Err(_) => return error_json("invalid_input", format!("unknown script type `{id}`")),
         },
     };
-    match gerfaut_core::input::parse_input_with(&input, script) {
-        Ok(parsed) => to_json(&parsed),
-        Err(e) => core_error_json(&e),
-    }
+    reply(gerfaut_core::input::parse_input_with(&input, script))
 }
 
 /// Classifies wallet material with the choices of the import screen:
@@ -212,10 +238,9 @@ pub async fn parse_input(input: String, script: Option<String>) -> String {
 /// two; the network decides the first address shown.
 pub async fn parse_input_with_options(input: String, options_json: String) -> String {
     let options: ImportOptions = try_json!(from_json(&options_json, "ImportOptions"));
-    match gerfaut_core::input::parse_input_with_options(&input, &options) {
-        Ok(parsed) => to_json(&parsed),
-        Err(e) => core_error_json(&e),
-    }
+    reply(gerfaut_core::input::parse_input_with_options(
+        &input, &options,
+    ))
 }
 
 /// Reads a server address scanned or pasted into the backend settings:
@@ -224,10 +249,7 @@ pub async fn parse_input_with_options(input: String, options_json: String) -> St
 /// Returns the serialized `ScannedBackend`; the screen fills its fields
 /// with it and the person still presses Save.
 pub async fn parse_backend(input: String) -> String {
-    match gerfaut_core::chain::connect::parse_backend(&input) {
-        Ok(backend) => to_json(&backend),
-        Err(e) => core_error_json(&e),
-    }
+    reply(gerfaut_core::chain::connect::parse_backend(&input))
 }
 
 /// Assembles the QR frames scanned so far (plain text, UR, BBQr) from a
@@ -236,14 +258,8 @@ pub async fn parse_backend(input: String) -> String {
 /// [`parse_input`]. The scanner sends each frame once to a scan the
 /// core holds instead ([`push_qr_frame`]).
 pub async fn assemble_qr(frames_json: String) -> String {
-    let frames: Vec<String> = try_json!(
-        serde_json::from_str(&frames_json)
-            .map_err(|e| error_json("bad_json", format!("invalid frames JSON: {e}")))
-    );
-    match gerfaut_core::input::qr::assemble(&frames) {
-        Ok(progress) => to_json(&progress),
-        Err(e) => core_error_json(&e),
-    }
+    let frames: Vec<String> = try_json!(from_json(&frames_json, "frames"));
+    reply(gerfaut_core::input::qr::assemble(&frames))
 }
 
 /// The scans the scanner screen holds, bounded in number and size by
@@ -265,10 +281,7 @@ pub fn open_qr_scan() -> u32 {
 /// after it, as [`assemble_qr`] says of every frame so far. A scan that
 /// answers with its text or a refusal starts again empty.
 pub fn push_qr_frame(scan: u32, frame: String) -> String {
-    match QR_SCANS.push(scan, &frame) {
-        Ok(progress) => to_json(&progress),
-        Err(e) => core_error_json(&e),
-    }
+    reply(QR_SCANS.push(scan, &frame))
 }
 
 /// Lets the core drop a scan: the scanner screen went, done or not.
@@ -282,15 +295,9 @@ pub fn close_qr_scan(scan: u32) {
 /// Returns the new wallet's metadata.
 pub async fn add_wallet(name: String, parsed_json: String, network: String) -> String {
     let manager = try_json!(manager());
-    let parsed: ParsedInput = try_json!(
-        serde_json::from_str(&parsed_json)
-            .map_err(|e| error_json("bad_json", format!("invalid ParsedInput JSON: {e}")))
-    );
+    let parsed: ParsedInput = try_json!(from_json(&parsed_json, "ParsedInput"));
     let network = try_json!(parse_network(&network));
-    match manager.add_wallet(&name, &parsed, network).await {
-        Ok(meta) => to_json(&meta),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.add_wallet(&name, &parsed, network).await)
 }
 
 /// Lists wallet metadata, optionally restricted to one network.
@@ -303,18 +310,12 @@ pub async fn list_wallets(network: Option<String>) -> String {
 /// Removes a wallet from this device.
 pub async fn remove_wallet(id: String) -> String {
     let manager = try_json!(manager());
-    match manager.remove_wallet(&id).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.remove_wallet(&id).await)
 }
 
 pub async fn rename_wallet(id: String, name: String) -> String {
     let manager = try_json!(manager());
-    match manager.rename_wallet(&id, &name).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.rename_wallet(&id, &name).await)
 }
 
 /// Changes the glyph a wallet shows next to its name. `icon` is the
@@ -322,10 +323,7 @@ pub async fn rename_wallet(id: String, name: String) -> String {
 pub async fn set_wallet_icon(id: String, icon: String) -> String {
     let manager = try_json!(manager());
     let icon: WalletIcon = try_json!(parse_variant(&icon, "wallet icon"));
-    match manager.set_wallet_icon(&id, icon).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_wallet_icon(&id, icon).await)
 }
 
 /// Puts a wallet ahead of the others in the live watch, or back among
@@ -334,10 +332,7 @@ pub async fn set_wallet_icon(id: String, icon: String) -> String {
 /// by itself.
 pub async fn set_wallet_live_pinned(id: String, pinned: bool) -> String {
     let manager = try_json!(manager());
-    match manager.set_wallet_live_pinned(&id, pinned).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_wallet_live_pinned(&id, pinned).await)
 }
 
 /// Puts the listed wallets in that order. Wallets left out keep their
@@ -345,20 +340,14 @@ pub async fn set_wallet_live_pinned(id: String, pinned: bool) -> String {
 /// network's wallets. A repeated id is refused, an unknown one too.
 pub async fn reorder_wallets(ids: Vec<String>) -> String {
     let manager = try_json!(manager());
-    match manager.reorder_wallets(&ids).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.reorder_wallets(&ids).await)
 }
 
 // --- views -------------------------------------------------------------
 
 pub async fn wallet_snapshot(id: String) -> String {
     let manager = try_json!(manager());
-    match manager.wallet_snapshot(&id).await {
-        Ok(snapshot) => to_json(&snapshot),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.wallet_snapshot(&id).await)
 }
 
 /// The wallet's descriptor read as a spending policy: its keys, its
@@ -367,35 +356,23 @@ pub async fn wallet_snapshot(id: String) -> String {
 /// address yields one with no keys and no branches.
 pub async fn wallet_policy(id: String) -> String {
     let manager = try_json!(manager());
-    match manager.policy(&id).await {
-        Ok(policy) => to_json(&policy),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.policy(&id).await)
 }
 
 pub async fn tx_detail(id: String, txid: String) -> String {
     let manager = try_json!(manager());
-    match manager.tx_detail(&id, &txid).await {
-        Ok(detail) => to_json(&detail),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.tx_detail(&id, &txid).await)
 }
 
 pub async fn utxos(id: String) -> String {
     let manager = try_json!(manager());
-    match manager.utxos(&id).await {
-        Ok(utxos) => to_json(&utxos),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.utxos(&id).await)
 }
 
 /// The next unused receive address plus `lookahead` upcoming ones.
 pub async fn receive_addresses(id: String, lookahead: u32) -> String {
     let manager = try_json!(manager());
-    match manager.receive_addresses(&id, lookahead).await {
-        Ok(entries) => to_json(&entries),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.receive_addresses(&id, lookahead).await)
 }
 
 /// Keeps every receive address up to `index` revealed: shown on screen,
@@ -403,20 +380,14 @@ pub async fn receive_addresses(id: String, lookahead: u32) -> String {
 /// as new again. A wallet with a single address has nothing to reveal.
 pub async fn reveal_receive_address(id: String, index: u32) -> String {
     let manager = try_json!(manager());
-    match manager.reveal_receive_address(&id, index).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.reveal_receive_address(&id, index).await)
 }
 
 /// Revealed addresses of a wallet, by keychain, with usage and balance.
 /// Capped by the core: an audit view, not an infinite scroll.
 pub async fn address_list(id: String) -> String {
     let manager = try_json!(manager());
-    match manager.address_list(&id).await {
-        Ok(list) => to_json(&list),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.address_list(&id).await)
 }
 
 /// Builds a CSV export of one wallet's transactions from serialized
@@ -424,10 +395,7 @@ pub async fn address_list(id: String) -> String {
 /// device.
 pub async fn export_transactions(id: String, options_json: String) -> String {
     let manager = try_json!(manager());
-    let options: ExportOptions = try_json!(
-        serde_json::from_str(&options_json)
-            .map_err(|e| error_json("bad_json", format!("invalid ExportOptions JSON: {e}")))
-    );
+    let options: ExportOptions = try_json!(from_json(&options_json, "ExportOptions"));
     match manager.export_transactions(&id, &options).await {
         Ok(result) => json!({ "ok": result }).to_string(),
         Err(e) => core_error_json(&e),
@@ -438,10 +406,7 @@ pub async fn export_transactions(id: String, options_json: String) -> String {
 
 pub async fn sync_wallet(id: String) -> String {
     let manager = try_json!(manager());
-    match manager.sync_wallet(&id).await {
-        Ok(report) => to_json(&report),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.sync_wallet(&id).await)
 }
 
 /// Scans a wallet again from its first address with the current gap
@@ -449,20 +414,14 @@ pub async fn sync_wallet(id: String) -> String {
 /// serialized `SyncReport`.
 pub async fn rescan_wallet(id: String) -> String {
     let manager = try_json!(manager());
-    match manager.rescan_wallet(&id).await {
-        Ok(report) => to_json(&report),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.rescan_wallet(&id).await)
 }
 
 /// Fetches an older round of history for a watched address. Returns how
 /// many transactions were added; zero means the history is exhausted.
 pub async fn load_more_history(id: String) -> String {
     let manager = try_json!(manager());
-    match manager.load_more_history(&id).await {
-        Ok(added) => to_json(&added),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.load_more_history(&id).await)
 }
 
 pub async fn sync_all(network: Option<String>) -> String {
@@ -482,12 +441,8 @@ pub async fn sync_all(network: Option<String>) -> String {
 /// and is then sent where every wallet stands now, so it never keeps a
 /// wallet syncing that no longer is.
 pub async fn sync_changes(sink: StreamSink<String>) {
-    let manager = match manager() {
-        Ok(manager) => manager,
-        Err(payload) => {
-            let _ = sink.add(payload);
-            return;
-        }
+    let Some(manager) = manager_or_send(&sink) else {
+        return;
     };
     forward_sync_changes(
         manager.sync_changes(),
@@ -544,34 +499,22 @@ pub async fn get_settings() -> String {
 pub async fn set_active_network(network: String) -> String {
     let manager = try_json!(manager());
     let network = try_json!(parse_network(&network));
-    match manager.set_active_network(network).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_active_network(network).await)
 }
 
 /// Sets the global gap limit applied to every descriptor wallet on the
 /// next sync. Bounded to 1..=500 by the core.
 pub async fn set_gap_limit(gap_limit: u32) -> String {
     let manager = try_json!(manager());
-    match manager.set_gap_limit(gap_limit).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_gap_limit(gap_limit).await)
 }
 
 /// Sets the backend for a network from a serialized `BackendConfig`.
 pub async fn set_backend(network: String, config_json: String) -> String {
     let manager = try_json!(manager());
     let network = try_json!(parse_network(&network));
-    let config: BackendConfig = try_json!(
-        serde_json::from_str(&config_json)
-            .map_err(|e| error_json("bad_json", format!("invalid BackendConfig JSON: {e}")))
-    );
-    match manager.set_backend(network, config).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    let config: BackendConfig = try_json!(from_json(&config_json, "BackendConfig"));
+    reply_ok(manager.set_backend(network, config).await)
 }
 
 /// Sets the backend for a network and trusts the certificate the user
@@ -585,17 +528,12 @@ pub async fn set_backend_trusting(
 ) -> String {
     let manager = try_json!(manager());
     let network = try_json!(parse_network(&network));
-    let config: BackendConfig = try_json!(
-        serde_json::from_str(&config_json)
-            .map_err(|e| error_json("bad_json", format!("invalid BackendConfig JSON: {e}")))
-    );
-    match manager
-        .set_backend_trusting(network, config, &url, &fingerprint)
-        .await
-    {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    let config: BackendConfig = try_json!(from_json(&config_json, "BackendConfig"));
+    reply_ok(
+        manager
+            .set_backend_trusting(network, config, &url, &fingerprint)
+            .await,
+    )
 }
 
 /// Tests the backend stored for a network the way a sync reaches it:
@@ -606,10 +544,7 @@ pub async fn set_backend_trusting(
 pub async fn check_backend(network: String) -> String {
     let manager = try_json!(manager());
     let network = try_json!(parse_network(&network));
-    match manager.check_backend(network).await {
-        Ok(check) => to_json(&check),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.check_backend(network).await)
 }
 
 /// Stops the test of a network's backend under way, which then answers
@@ -639,30 +574,21 @@ pub async fn public_servers(network: String) -> String {
 /// against, plus the `status` the settings screen acts on.
 pub async fn inspect_certificate(url: String) -> String {
     let manager = try_json!(manager());
-    match manager.inspect_certificate(&url).await {
-        Ok(report) => to_json(&report),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.inspect_certificate(&url).await)
 }
 
 /// Drops an accepted certificate, keyed by `host:port`: the next
 /// connection to that host asks again.
 pub async fn forget_certificate(host: String) -> String {
     let manager = try_json!(manager());
-    match manager.forget_certificate(&host).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.forget_certificate(&host).await)
 }
 
 /// Stores one small preference of this app alone in the encrypted
 /// vault. The ones both apps keep go through [`set_preferences`].
 pub async fn set_app_pref(key: String, value: String) -> String {
     let manager = try_json!(manager());
-    match manager.set_app_pref(key, value).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_app_pref(key, value).await)
 }
 
 /// Changes some of the preferences both apps keep, from a serialized
@@ -671,10 +597,7 @@ pub async fn set_app_pref(key: String, value: String) -> String {
 pub async fn set_preferences(change_json: String) -> String {
     let manager = try_json!(manager());
     let change: PreferencesChange = try_json!(from_json(&change_json, "PreferencesChange"));
-    match manager.set_preferences(change).await {
-        Ok(stored) => to_json(&stored),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.set_preferences(change).await)
 }
 
 // --- broadcast ---------------------------------------------------------
@@ -686,10 +609,7 @@ pub async fn set_preferences(change_json: String) -> String {
 pub async fn preview_transaction(input: String, network: String) -> String {
     let manager = try_json!(manager());
     let network = try_json!(parse_network(&network));
-    match manager.preview_transaction(&input, network).await {
-        Ok(preview) => to_json(&preview),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.preview_transaction(&input, network).await)
 }
 
 /// Hands a fully signed transaction (hex) to the backend of `network`.
@@ -698,10 +618,7 @@ pub async fn preview_transaction(input: String, network: String) -> String {
 pub async fn broadcast_transaction(network: String, hex: String) -> String {
     let manager = try_json!(manager());
     let network = try_json!(parse_network(&network));
-    match manager.broadcast_transaction(network, &hex).await {
-        Ok(report) => to_json(&report),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.broadcast_transaction(network, &hex).await)
 }
 
 /// Where a broadcast transaction (hex) stands as the backend of
@@ -709,10 +626,7 @@ pub async fn broadcast_transaction(network: String, hex: String) -> String {
 pub async fn transaction_status(network: String, hex: String) -> String {
     let manager = try_json!(manager());
     let network = try_json!(parse_network(&network));
-    match manager.transaction_status(network, &hex).await {
-        Ok(status) => to_json(&status),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.transaction_status(network, &hex).await)
 }
 
 /// The last transactions broadcast on `network`, newest first, as the
@@ -727,10 +641,7 @@ pub async fn recent_broadcasts(network: String) -> String {
 /// on the network and untouched.
 pub async fn forget_broadcast(txid: String) -> String {
     let manager = try_json!(manager());
-    match manager.forget_broadcast(&txid).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.forget_broadcast(&txid).await)
 }
 
 // --- tor ---------------------------------------------------------------
@@ -748,10 +659,7 @@ pub async fn tor_status() -> String {
 pub async fn set_tor_settings(settings_json: String) -> String {
     let manager = try_json!(manager());
     let settings: TorSettings = try_json!(from_json(&settings_json, "TorSettings"));
-    match manager.set_tor_settings(settings).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_tor_settings(settings).await)
 }
 
 /// Resolves the route now, bootstrapping the built-in client if that is
@@ -759,10 +667,7 @@ pub async fn set_tor_settings(settings_json: String) -> String {
 /// serialized `TorRoute`.
 pub async fn tor_connect() -> String {
     let manager = try_json!(manager());
-    match manager.tor_connect().await {
-        Ok(route) => to_json(&route),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.tor_connect().await)
 }
 
 // --- app lock ----------------------------------------------------------
@@ -778,40 +683,29 @@ pub async fn app_lock() -> String {
 pub async fn set_app_lock(kind: String, secret: String, current: Option<String>) -> String {
     let manager = try_json!(manager());
     let kind: LockKind = try_json!(parse_variant(&kind, "lock kind"));
-    match manager
-        .set_app_lock(kind, &secret, current.as_deref())
-        .await
-    {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(
+        manager
+            .set_app_lock(kind, &secret, current.as_deref())
+            .await,
+    )
 }
 
 pub async fn clear_app_lock(current: String) -> String {
     let manager = try_json!(manager());
-    match manager.clear_app_lock(&current).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.clear_app_lock(&current).await)
 }
 
 /// Tries a secret. Returns a serialized `LockVerdict`, whose delay says
 /// when the next attempt is looked at after repeated failures.
 pub async fn verify_app_lock(secret: String) -> String {
     let manager = try_json!(manager());
-    match manager.verify_app_lock(&secret).await {
-        Ok(verdict) => to_json(&verdict),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.verify_app_lock(&secret).await)
 }
 
 /// Whether the phone's biometric prompt may stand in for the secret.
 pub async fn set_biometric_unlock(enabled: bool, current: String) -> String {
     let manager = try_json!(manager());
-    match manager.set_biometric_unlock(enabled, &current).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_biometric_unlock(enabled, &current).await)
 }
 
 // --- backup ------------------------------------------------------------
@@ -822,20 +716,14 @@ pub async fn set_biometric_unlock(enabled: bool, current: String) -> String {
 pub async fn export_backup(options_json: String, password: String) -> String {
     let manager = try_json!(manager());
     let options: BackupOptions = try_json!(from_json(&options_json, "BackupOptions"));
-    match manager.export_backup(&options, &password).await {
-        Ok(bundle) => to_json(&bundle),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.export_backup(&options, &password).await)
 }
 
 /// Opens a backup (base64 of the file, or the `gerfaut-backup:` text a
 /// scan yields) and lists what it holds. Returns a `BackupPreview`.
 pub async fn preview_backup(source: String, password: String) -> String {
     let manager = try_json!(manager());
-    match manager.preview_backup(&source, &password).await {
-        Ok(preview) => to_json(&preview),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.preview_backup(&source, &password).await)
 }
 
 /// Restores the chosen wallets from serialized `ImportChoices`. Returns
@@ -843,10 +731,7 @@ pub async fn preview_backup(source: String, password: String) -> String {
 pub async fn import_backup(source: String, password: String, choices_json: String) -> String {
     let manager = try_json!(manager());
     let choices: ImportChoices = try_json!(from_json(&choices_json, "ImportChoices"));
-    match manager.import_backup(&source, &password, &choices).await {
-        Ok(report) => to_json(&report),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.import_backup(&source, &password, &choices).await)
 }
 
 // --- live watch --------------------------------------------------------
@@ -917,12 +802,8 @@ enum RunEnd {
 /// for: a stop asked since, even during the start, ends the run as a
 /// stop.
 pub async fn live_run(sink: StreamSink<String>, stops_seen: u32) {
-    let manager = match manager() {
-        Ok(manager) => manager,
-        Err(payload) => {
-            let _ = sink.add(payload);
-            return;
-        }
+    let Some(manager) = manager_or_send(&sink) else {
+        return;
     };
     let mut events = {
         let mut running = LIVE_RUNNING.lock().await;
@@ -1068,10 +949,7 @@ pub async fn claim_announcements(wallet_id: String) -> String {
         took_ms: 0,
         backend: String::new(),
     };
-    match manager.claim_announcements(&report).await {
-        Ok(claimed) => to_json(&claimed),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.claim_announcements(&report).await)
 }
 
 /// What a batch of announced transactions amounts to, as notifications
@@ -1126,10 +1004,7 @@ pub async fn price_table() -> String {
 /// internal failure or a pair the core refuses come back as one.
 pub async fn fetch_price() -> String {
     let manager = try_json!(manager());
-    match manager.fetch_price().await {
-        Ok(reading) => to_json(&reading),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.fetch_price().await)
 }
 
 /// [`fetch_price`] at a person's request, the "Try again" of the
@@ -1137,10 +1012,7 @@ pub async fn fetch_price() -> String {
 /// itself. Returns a `PriceReading`.
 pub async fn retry_price() -> String {
     let manager = try_json!(manager());
-    match manager.retry_price().await {
-        Ok(reading) => to_json(&reading),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.retry_price().await)
 }
 
 /// The file of the site this build reads its latest release from.
@@ -1170,28 +1042,19 @@ pub async fn update_session(current_version: String) -> String {
 /// it does not go at all and comes back as `tor`.
 pub async fn check_update(current_version: String) -> String {
     let manager = try_json!(manager());
-    match manager.check_update(UPDATE_FEED, &current_version).await {
-        Ok(status) => to_json(&status),
-        Err(e) => core_error_json(&e),
-    }
+    reply(manager.check_update(UPDATE_FEED, &current_version).await)
 }
 
 /// Closes the notice on the release it announced.
 pub async fn dismiss_update(version: String) -> String {
     let manager = try_json!(manager());
-    match manager.dismiss_update(&version).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.dismiss_update(&version).await)
 }
 
 /// Turns the daily check on or off.
 pub async fn set_update_automatic(automatic: bool) -> String {
     let manager = try_json!(manager());
-    match manager.set_update_automatic(automatic).await {
-        Ok(()) => ok_json(),
-        Err(e) => core_error_json(&e),
-    }
+    reply_ok(manager.set_update_automatic(automatic).await)
 }
 
 #[cfg(test)]
@@ -1381,18 +1244,15 @@ mod tests {
     /// taken for one that may say everything.
     #[tokio::test]
     async fn the_words_of_a_notification_are_asked_with_the_whole_context() {
-        let kind = |payload: String| {
-            serde_json::from_str::<Value>(&payload).expect("JSON")["error"]["kind"].clone()
-        };
         let txs = r#"[{"wallet_id":"w1","txid":"aa","net_sats":1000,"stage":"mempool"}]"#;
         let partial = r#"{"names":{},"unit":"btc","masked":false}"#;
         let whole = r#"{"names":{},"unit":"btc","masked":false,"details":true}"#;
         assert_eq!(
-            kind(live_notices(txs.into(), partial.into()).await),
+            kind_of(&live_notices(txs.into(), partial.into()).await),
             "bad_json"
         );
         assert_eq!(
-            kind(live_notices("[{}]".into(), whole.into()).await),
+            kind_of(&live_notices("[{}]".into(), whole.into()).await),
             "bad_json"
         );
     }

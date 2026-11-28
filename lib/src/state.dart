@@ -393,7 +393,7 @@ class MaskedNotifier extends Notifier<bool> {
     final preferences = ref.read(preferencesProvider.notifier);
     final shown = await preferences.show(PreferencesChange(masked: masked));
     if (shown == Shown.overtaken) return;
-    unsaved.set(masked && shown == Shown.refused);
+    unsaved.put(masked && shown == Shown.refused);
   }
 }
 
@@ -402,17 +402,10 @@ final maskedProvider = NotifierProvider<MaskedNotifier, bool>(
   MaskedNotifier.new,
 );
 
-class MaskUnsavedNotifier extends Notifier<bool> {
-  @override
-  bool build() => false;
-
-  void set(bool unsaved) => state = unsaved;
-}
-
 /// Balances are hidden in the app and the vault refused, twice, to keep
 /// them hidden: see [MaskedNotifier].
-final maskUnsavedProvider = NotifierProvider<MaskUnsavedNotifier, bool>(
-  MaskUnsavedNotifier.new,
+final maskUnsavedProvider = NotifierProvider<Slot<bool>, bool>(
+  () => Slot(false),
 );
 
 class UnitNotifier extends Notifier<AmountUnit> {
