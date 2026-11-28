@@ -200,7 +200,7 @@ class _BackupRestoreScreenState extends ConsumerState<BackupRestoreScreen> {
     'wrong_key' => wrongPasswordMessage,
     'unreadable_backup' => notABackupMessage,
     'newer_format' => newerBackupMessage,
-    _ => materialRefusal(error, backup: true),
+    _ => materialRefusal(error, privateKey: privateKeyInABackup),
   };
 
   Future<void> _open() async {

@@ -213,11 +213,7 @@ class ScanScreenState extends ConsumerState<ScanScreen> {
           }
           // The core's sentence says what it saw and what to show
           // instead; a private key is said in the screen's words.
-          _startOver(
-            e.kind == 'private_material'
-                ? widget.privateKey
-                : materialRefusal(e),
-          );
+          _startOver(materialRefusal(e, privateKey: widget.privateKey));
           return;
         }
         if (!mounted || _done) return;
