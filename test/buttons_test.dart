@@ -303,6 +303,160 @@ void main() {
     });
   });
 
+  group('a label that changes', () {
+    late StateSetter set;
+    var adding = false;
+
+    Widget form({bool stillMotion = false}) => _page(
+      stillMotion: stillMotion,
+      StatefulBuilder(
+        builder: (context, setState) {
+          set = setState;
+          return PrimaryButton(
+            label: adding ? 'Adding…' : 'Add wallet',
+            busy: adding,
+            onPressed: () {},
+          );
+        },
+      ),
+    );
+
+    setUp(() => adding = false);
+
+    double width(WidgetTester tester) =>
+        tester.getSize(find.byType(PrimaryButton)).width;
+
+    /// The width of a button that has only ever shown [label].
+    Future<double> alone(
+      WidgetTester tester,
+      String label, {
+      bool busy = false,
+    }) async {
+      await tester.pumpWidget(
+        _page(PrimaryButton(label: label, busy: busy, onPressed: () {})),
+      );
+      final width = tester.getSize(find.byType(PrimaryButton)).width;
+      // A new tree for what follows, not an update of this one.
+      await tester.pumpWidget(const SizedBox());
+      return width;
+    }
+
+    double opacityOf(WidgetTester tester, String label) => tester
+        .widget<FadeTransition>(
+          find
+              .ancestor(
+                of: find.text(label, skipOffstage: false),
+                matching: find.byType(FadeTransition, skipOffstage: false),
+              )
+              .first,
+        )
+        .opacity
+        .value;
+
+    for (final stillMotion in [false, true]) {
+      testWidgets('fades the old one into the new, '
+          '${stillMotion ? 'with animations reduced' : 'by default'}', (
+        tester,
+      ) async {
+        await tester.pumpWidget(form(stillMotion: stillMotion));
+        set(() => adding = true);
+        await tester.pump();
+        await tester.pump(GerfautMotion.base ~/ 2);
+        // Midway, the old label still paints, half gone, under the new.
+        expect(opacityOf(tester, 'Add wallet'), inExclusiveRange(0, 1));
+        expect(opacityOf(tester, 'Adding…'), inExclusiveRange(0, 1));
+        await tester.pump(GerfautMotion.base);
+        expect(opacityOf(tester, 'Adding…'), 1);
+        expect(find.text('Adding…'), findsOne);
+        expect(find.text('Add wallet'), findsNothing);
+      });
+    }
+
+    testWidgets('keeps the width of the wider of the two', (tester) async {
+      final wider = [
+        await alone(tester, 'Add wallet'),
+        await alone(tester, 'Adding…', busy: true),
+      ].reduce((a, b) => a > b ? a : b);
+
+      await tester.pumpWidget(form());
+      set(() => adding = true);
+      await tester.pump();
+      expect(width(tester), wider);
+      await tester.pump(GerfautMotion.base ~/ 2);
+      expect(width(tester), wider);
+      await tester.pump(GerfautMotion.base);
+      expect(width(tester), wider);
+      // The attempt fails: the first label comes back in the same room.
+      set(() => adding = false);
+      await tester.pump();
+      await tester.pump(GerfautMotion.base * 2);
+      expect(width(tester), wider);
+    });
+
+    testWidgets('keeps the room of every label of the work', (tester) async {
+      const labels = ['Save backend', 'Checking the certificate…', 'Saving…'];
+      final widest = await alone(tester, labels[1], busy: true);
+      var step = 0;
+      await tester.pumpWidget(
+        _page(
+          StatefulBuilder(
+            builder: (context, setState) {
+              set = setState;
+              return PrimaryButton(
+                label: labels[step % 3],
+                busy: step % 3 != 0,
+                onPressed: () {},
+              );
+            },
+          ),
+        ),
+      );
+      for (var i = 1; i <= 3; i++) {
+        set(() => step = i);
+        await tester.pump();
+        await tester.pump(GerfautMotion.base * 2);
+        expect(width(tester), widest, reason: labels[i % 3]);
+      }
+    });
+
+    testWidgets('swaps a value at rest in the same frame', (tester) async {
+      var count = 2;
+      await tester.pumpWidget(
+        _page(
+          StatefulBuilder(
+            builder: (context, setState) {
+              set = setState;
+              return PrimaryButton(
+                label: 'Restore $count wallets',
+                onPressed: () {},
+              );
+            },
+          ),
+        ),
+      );
+      set(() => count = 3);
+      await tester.pump();
+      expect(find.text('Restore 2 wallets', skipOffstage: false), findsNothing);
+      expect(find.text('Restore 3 wallets'), findsOne);
+    });
+
+    testWidgets('is read out once, the label shown', (tester) async {
+      final semantics = tester.ensureSemantics();
+      await tester.pumpWidget(form());
+      set(() => adding = true);
+      await tester.pump();
+      for (final wait in [GerfautMotion.base ~/ 2, GerfautMotion.base]) {
+        await tester.pump(wait);
+        expect(
+          tester.getSemantics(find.text('Adding…')).getSemanticsData().label,
+          'Adding…',
+        );
+        expect(find.bySemanticsLabel(RegExp('Add wallet')), findsNothing);
+      }
+      semantics.dispose();
+    });
+  });
+
   group('off', () {
     for (final brightness in Brightness.values) {
       final tokens = brightness == Brightness.dark

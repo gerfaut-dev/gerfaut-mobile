@@ -366,21 +366,6 @@ class _FilledActionState extends State<_FilledAction> {
           ),
         );
 
-    final icon = widget.icon;
-    // A glyph that changes (copy then copied, the spinner of a busy
-    // button) fades into the next in place, as every copy icon does.
-    final Widget? leading = !busy && icon == null
-        ? null
-        : FadeInPlace(
-            state: busy ? null : icon,
-            alignment: Alignment.center,
-            child: busy
-                // Still with animations reduced: the label carries the
-                // state.
-                ? const TurningIcon(turning: true, size: _glyph)
-                : Icon(icon, size: _glyph),
-          );
-
     final live = !busy && widget.onPressed != null;
     void press(bool down) {
       if (_pressed != down) setState(() => _pressed = down);
@@ -415,7 +400,11 @@ class _FilledActionState extends State<_FilledAction> {
               if (_focused != focused) setState(() => _focused = focused);
             },
             onPressed: live ? widget.onPressed : null,
-            child: _Content(label: widget.label, leading: leading),
+            child: _FilledContent(
+              label: widget.label,
+              icon: widget.icon,
+              busy: busy,
+            ),
           ),
         ),
       ),
@@ -427,6 +416,93 @@ class _FilledActionState extends State<_FilledAction> {
         width: widget.expand ? double.infinity : null,
         child: button,
       ),
+    );
+  }
+}
+
+/// What a filled button shows: its glyph, or the spinner while busy,
+/// then its label. When its state changes ("Add wallet", then "Adding…";
+/// a busy label that moves on; a glyph that changes), the old fades into
+/// the new in place, and the button keeps the room of the widest label
+/// it showed, during the fade and after it, so neither it nor what
+/// stands beside it moves.
+///
+/// A label that changes at rest is a value ("Restore 3 wallets"): it is
+/// replaced in the same frame, as an amount is, and the button takes its
+/// width.
+class _FilledContent extends StatefulWidget {
+  const _FilledContent({
+    required this.label,
+    required this.icon,
+    required this.busy,
+  });
+
+  final String label;
+  final IconData? icon;
+  final bool busy;
+
+  @override
+  State<_FilledContent> createState() => _FilledContentState();
+}
+
+class _FilledContentState extends State<_FilledContent> {
+  /// Counts the changes of state, which fade.
+  int _change = 0;
+
+  /// The labels shown since the last change at rest, each with whether a
+  /// glyph stood before it: held unseen for their width.
+  final List<(String, bool)> _held = [];
+
+  @override
+  void didUpdateWidget(_FilledContent old) {
+    super.didUpdateWidget(old);
+    final was = (old.label, old.busy || old.icon != null);
+    final now = (widget.label, widget.busy || widget.icon != null);
+    if (old.label == widget.label &&
+        old.busy == widget.busy &&
+        old.icon == widget.icon) {
+      return;
+    }
+    if (old.busy || widget.busy || old.icon != widget.icon) {
+      _change++;
+      if (!_held.contains(was)) _held.add(was);
+    } else {
+      _held.clear();
+    }
+    _held.remove(now);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = widget.icon;
+    return Stack(
+      alignment: Alignment.center,
+      fit: StackFit.passthrough,
+      children: [
+        FadeInPlace(
+          state: _change,
+          alignment: Alignment.center,
+          child: _Content(
+            label: widget.label,
+            leading: widget.busy
+                // Still with animations reduced: the label carries the
+                // state.
+                ? const TurningIcon(turning: true, size: _glyph)
+                : (icon == null ? null : Icon(icon, size: _glyph)),
+          ),
+        ),
+        for (final (label, glyph) in _held)
+          HeldPlace(
+            // On one line, as the label it stands beside: wrapped, it
+            // would hold a height the button does not have.
+            child: glyph
+                ? _Content(
+                    label: label,
+                    leading: const SizedBox.square(dimension: _glyph),
+                  )
+                : Text(label, maxLines: 1, softWrap: false),
+          ),
+      ],
     );
   }
 }
