@@ -56,6 +56,9 @@ enum _BackendSave {
   writing,
 }
 
+/// The backend form on screen: one per kind of [BackendConfig].
+enum _BackendKind { publicEsplora, customEsplora, customElectrum }
+
 /// The Network section: which chain, which backend serves it, how Tor is
 /// reached, and the certificates accepted along the way.
 class NetworkSection extends ConsumerStatefulWidget {
@@ -97,7 +100,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
   /// saved backend and sent with every save of a custom one: a save that
   /// left it out would turn it off.
   bool _ownNode = false;
-  String _backendKind = 'public_esplora';
+  _BackendKind _backendKind = _BackendKind.publicEsplora;
 
   /// Chosen public server id; null is the automatic rotation.
   String? _publicServer;
@@ -156,9 +159,9 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
     _certificateNote = null;
     final config = settings.backendFor(settings.activeNetwork);
     _backendKind = switch (config) {
-      PublicEsplora() => 'public_esplora',
-      CustomEsplora() => 'custom_esplora',
-      CustomElectrum() => 'custom_electrum',
+      PublicEsplora() => _BackendKind.publicEsplora,
+      CustomEsplora() => _BackendKind.customEsplora,
+      CustomElectrum() => _BackendKind.customElectrum,
     };
     _publicServer = switch (config) {
       PublicEsplora(:final server) => server,
@@ -208,18 +211,18 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
 
   bool get _backendValid {
     return switch (_backendKind) {
-      'custom_esplora' => _esploraController.text.trim().isNotEmpty,
-      'custom_electrum' =>
+      _BackendKind.customEsplora => _esploraController.text.trim().isNotEmpty,
+      _BackendKind.customElectrum =>
         _hostController.text.trim().isNotEmpty &&
             RegExp(r'^\d+$').hasMatch(_portController.text.trim()),
-      _ => true,
+      _BackendKind.publicEsplora => true,
     };
   }
 
   /// Switches the backend form. What the last save said about a
   /// certificate belongs to that backend, so it goes with it, and so
   /// does a refused scan.
-  void _pickBackendKind(String kind) {
+  void _pickBackendKind(_BackendKind kind) {
     _clearTest();
     setState(() {
       _backendKind = kind;
@@ -297,7 +300,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
     final backend = await read(address) ?? await read('electrum.invalid:$port');
     if (!mounted ||
         !_tlsFollowsPort ||
-        _backendKind != 'custom_electrum' ||
+        _backendKind != _BackendKind.customElectrum ||
         _electrumAddress != address) {
       return;
     }
@@ -399,10 +402,10 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
         _ => false,
       };
       if (backend.kind == 'esplora') {
-        _backendKind = 'custom_esplora';
+        _backendKind = _BackendKind.customEsplora;
         _esploraController.text = backend.url;
       } else {
-        _backendKind = 'custom_electrum';
+        _backendKind = _BackendKind.customElectrum;
         // An IPv6 literal goes back into its brackets: host and port are
         // joined again on save, and without them the two cannot be told
         // apart.
@@ -428,15 +431,15 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
     final bridge = ref.read(bridgeProvider);
     final toast = Toast.of(context);
     final config = switch (_backendKind) {
-      'custom_esplora' => CustomEsplora(
+      _BackendKind.customEsplora => CustomEsplora(
         url: _esploraController.text.trim(),
         ownNode: _ownNode,
       ),
-      'custom_electrum' => CustomElectrum(
+      _BackendKind.customElectrum => CustomElectrum(
         url: buildElectrumUrl(_hostController.text, _portController.text, _tls),
         ownNode: _ownNode,
       ),
-      _ => PublicEsplora(server: _publicServer),
+      _BackendKind.publicEsplora => PublicEsplora(server: _publicServer),
     };
     final endpoint = _certificateEndpoint(config, network);
     setState(() {
@@ -565,7 +568,8 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
     final name = settings.retiredServers[network];
     final config = settings.backendFor(network);
     if (name == null || config is! PublicEsplora) return null;
-    return _backendKind == 'public_esplora' && _publicServer == config.server
+    return _backendKind == _BackendKind.publicEsplora &&
+            _publicServer == config.server
         ? name
         : null;
   }
@@ -742,7 +746,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
           title: 'Backend · ${network.label}',
           children: [
             _BackendOption(
-              value: 'public_esplora',
+              value: _BackendKind.publicEsplora,
               groupValue: _backendKind,
               label: 'Public API',
               hint:
@@ -751,20 +755,20 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
               onChanged: _pickBackendKind,
             ),
             _BackendOption(
-              value: 'custom_esplora',
+              value: _BackendKind.customEsplora,
               groupValue: _backendKind,
               label: 'My own Esplora',
               hint: 'An Esplora-compatible HTTP endpoint you run yourself.',
               onChanged: _pickBackendKind,
             ),
             _BackendOption(
-              value: 'custom_electrum',
+              value: _BackendKind.customElectrum,
               groupValue: _backendKind,
               label: 'My own Electrum server',
               hint: 'electrs or Fulcrum, reachable over TLS or plain TCP.',
               onChanged: _pickBackendKind,
             ),
-            if (_backendKind == 'public_esplora') ...[
+            if (_backendKind == _BackendKind.publicEsplora) ...[
               const SizedBox(height: GerfautSpacing.sm),
               FieldLabel('Server', tokens: tokens),
               const SizedBox(height: GerfautSpacing.sm),
@@ -777,7 +781,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
                 },
               ),
             ],
-            if (_backendKind == 'custom_esplora') ...[
+            if (_backendKind == _BackendKind.customEsplora) ...[
               const SizedBox(height: GerfautSpacing.sm),
               // The field below says its own name; the caption is for
               // the eye.
@@ -807,7 +811,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
                 _OnionNote(mode: settings.tor.mode, tokens: tokens),
               ],
             ],
-            if (_backendKind == 'custom_electrum') ...[
+            if (_backendKind == _BackendKind.customElectrum) ...[
               const SizedBox(height: GerfautSpacing.sm),
               // The field below says its own name; the caption is for
               // the eye.
@@ -899,7 +903,7 @@ class _NetworkSectionState extends ConsumerState<NetworkSection> {
                 _OnionNote(mode: settings.tor.mode, tokens: tokens),
               ],
             ],
-            if (_backendKind != 'public_esplora') ...[
+            if (_backendKind != _BackendKind.publicEsplora) ...[
               const SizedBox(height: GerfautSpacing.md),
               // Declared, never detected: a public server typed in by
               // hand looks exactly like a node of one's own.
@@ -1544,11 +1548,11 @@ class _BackendOption extends StatelessWidget {
     required this.onChanged,
   });
 
-  final String value;
-  final String groupValue;
+  final _BackendKind value;
+  final _BackendKind groupValue;
   final String label;
   final String hint;
-  final ValueChanged<String> onChanged;
+  final ValueChanged<_BackendKind> onChanged;
 
   @override
   Widget build(BuildContext context) {
