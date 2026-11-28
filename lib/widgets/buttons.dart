@@ -366,21 +366,6 @@ class _FilledActionState extends State<_FilledAction> {
           ),
         );
 
-    final icon = widget.icon;
-    // A glyph that changes (copy then copied, the spinner of a busy
-    // button) fades into the next in place, as every copy icon does.
-    final Widget? leading = !busy && icon == null
-        ? null
-        : FadeInPlace(
-            state: busy ? null : icon,
-            alignment: Alignment.center,
-            child: busy
-                // Still with animations reduced: the label carries the
-                // state.
-                ? const TurningIcon(turning: true, size: _glyph)
-                : Icon(icon, size: _glyph),
-          );
-
     final live = !busy && widget.onPressed != null;
     void press(bool down) {
       if (_pressed != down) setState(() => _pressed = down);
@@ -415,7 +400,11 @@ class _FilledActionState extends State<_FilledAction> {
               if (_focused != focused) setState(() => _focused = focused);
             },
             onPressed: live ? widget.onPressed : null,
-            child: _Content(label: widget.label, leading: leading),
+            child: _FilledContent(
+              label: widget.label,
+              icon: widget.icon,
+              busy: busy,
+            ),
           ),
         ),
       ),
@@ -427,6 +416,75 @@ class _FilledActionState extends State<_FilledAction> {
         width: widget.expand ? double.infinity : null,
         child: button,
       ),
+    );
+  }
+}
+
+/// What a filled button shows: its glyph, or the spinner while busy,
+/// then its label. When either changes ("Add wallet", then "Adding…"),
+/// the old fades into the new in place, and the button keeps the room
+/// of the wider of the two, during the fade and after it, so neither it
+/// nor what stands beside it moves.
+class _FilledContent extends StatefulWidget {
+  const _FilledContent({
+    required this.label,
+    required this.icon,
+    required this.busy,
+  });
+
+  final String label;
+  final IconData? icon;
+  final bool busy;
+
+  @override
+  State<_FilledContent> createState() => _FilledContentState();
+}
+
+class _FilledContentState extends State<_FilledContent> {
+  /// The label shown before the last change, and whether a glyph stood
+  /// before it: held unseen for its width. Null until something changes.
+  (String, bool)? _before;
+
+  @override
+  void didUpdateWidget(_FilledContent old) {
+    super.didUpdateWidget(old);
+    if (old.label != widget.label ||
+        old.busy != widget.busy ||
+        old.icon != widget.icon) {
+      _before = (old.label, old.busy || old.icon != null);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final icon = widget.icon;
+    final before = _before;
+    return Stack(
+      alignment: Alignment.center,
+      fit: StackFit.passthrough,
+      children: [
+        FadeInPlace(
+          state: (widget.label, widget.busy, icon),
+          alignment: Alignment.center,
+          child: _Content(
+            label: widget.label,
+            leading: widget.busy
+                // Still with animations reduced: the label carries the
+                // state.
+                ? const TurningIcon(turning: true, size: _glyph)
+                : (icon == null ? null : Icon(icon, size: _glyph)),
+          ),
+        ),
+        if (before != null)
+          HeldPlace(
+            child: _Content(
+              label: before.$1,
+              leading: before.$2
+                  ? const SizedBox.square(dimension: _glyph)
+                  : null,
+            ),
+          ),
+      ],
     );
   }
 }

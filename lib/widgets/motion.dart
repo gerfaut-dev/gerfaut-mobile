@@ -102,6 +102,21 @@ class _StageElement extends StatelessElement {
   }
 }
 
+/// Keeps the room of something no longer shown, beside what replaced it
+/// in a [FadeInPlace]: it takes its size, but is not painted, not read
+/// out, not hit and not found as onstage content. A button whose label
+/// changes keeps the width of the wider of the two this way, so nothing
+/// around it moves once the fade is over either.
+class HeldPlace extends StatelessWidget {
+  const HeldPlace({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) =>
+      Opacity(opacity: 0, child: _Stage(leaving: true, child: child));
+}
+
 /// The icon of a copy button: copy, then a check for
 /// [GerfautMotion.hold] once copied, the one fading into the other in
 /// place. The word or the toast beside it says it too.
