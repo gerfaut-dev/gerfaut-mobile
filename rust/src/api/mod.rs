@@ -238,7 +238,9 @@ pub async fn parse_input(input: String, script: Option<String>) -> String {
 /// two; the network decides the first address shown.
 pub async fn parse_input_with_options(input: String, options_json: String) -> String {
     let options: ImportOptions = try_json!(from_json(&options_json, "ImportOptions"));
-    reply(gerfaut_core::input::parse_input_with_options(&input, &options))
+    reply(gerfaut_core::input::parse_input_with_options(
+        &input, &options,
+    ))
 }
 
 /// Reads a server address scanned or pasted into the backend settings:
